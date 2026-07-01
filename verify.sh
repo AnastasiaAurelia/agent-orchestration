@@ -42,6 +42,13 @@ check_file "$CLAUDE_DIR/commands/review.md"              "command: /review"
 check_file "$CLAUDE_DIR/commands/ship.md"                "command: /ship"
 check_file "$CLAUDE_DIR/commands/cost-report.md"         "command: /cost-report"
 check_file "$CLAUDE_DIR/hooks/check-careful.sh"          "hook script: check-careful.sh"
+check_file "$CLAUDE_DIR/commands/orchestrate.md"         "command: /orchestrate"
+check_file "$CLAUDE_DIR/commands/loop-audit.md"          "command: /loop-audit"
+check_file "$CLAUDE_DIR/skills/loop-design/SKILL.md"     "skill: loop-design"
+check_file "$CLAUDE_DIR/templates/diana/LOOP.md"         "loop template: LOOP.md"
+check_file "$CLAUDE_DIR/templates/diana/STATE.md"        "loop template: STATE.md"
+check_file "$CLAUDE_DIR/templates/diana/RUN_LOG.md"      "loop template: RUN_LOG.md"
+check_file "$CLAUDE_DIR/templates/diana/BUDGET.md"       "loop template: BUDGET.md"
 
 # --- 2. check-careful.sh executable ---
 HOOK_SCRIPT="$CLAUDE_DIR/hooks/check-careful.sh"

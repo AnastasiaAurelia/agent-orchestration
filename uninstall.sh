@@ -13,9 +13,13 @@
 #     the user has in .claude/).
 #   - Never deletes .claude/, .claude/commands/, .claude/skills/, or
 #     .claude/hooks/ themselves — only empty Diana-only subdirectories
-#     (skills/plan-review/, skills/research-first/) it created.
+#     (skills/plan-review/, skills/research-first/, skills/minimal-solution/,
+#     skills/loop-design/, templates/diana/) it created.
 #   - Edits to shared files (settings.local.json, CLAUDE.md) are backed up
 #     before being modified, since those files may contain non-Diana content.
+#   - Never touches root-level LOOP.md/STATE.md/RUN_LOG.md/BUDGET.md — those
+#     are live project state, not Diana-installed files. If found, they're
+#     reported as preserved, not removed.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,9 +58,16 @@ remove_file "$CLAUDE_DIR/commands/review.md"
 remove_file "$CLAUDE_DIR/commands/ship.md"
 remove_file "$CLAUDE_DIR/commands/cost-report.md"
 remove_file "$CLAUDE_DIR/hooks/check-careful.sh"
+remove_file "$CLAUDE_DIR/commands/orchestrate.md"
+remove_file "$CLAUDE_DIR/commands/loop-audit.md"
+remove_file "$CLAUDE_DIR/skills/loop-design/SKILL.md"
+remove_file "$CLAUDE_DIR/templates/diana/LOOP.md"
+remove_file "$CLAUDE_DIR/templates/diana/STATE.md"
+remove_file "$CLAUDE_DIR/templates/diana/RUN_LOG.md"
+remove_file "$CLAUDE_DIR/templates/diana/BUDGET.md"
 
 # remove Diana-only subdirectories, but only if now empty (never force)
-for d in "$CLAUDE_DIR/skills/plan-review" "$CLAUDE_DIR/skills/research-first" "$CLAUDE_DIR/skills/minimal-solution"; do
+for d in "$CLAUDE_DIR/skills/plan-review" "$CLAUDE_DIR/skills/research-first" "$CLAUDE_DIR/skills/minimal-solution" "$CLAUDE_DIR/skills/loop-design" "$CLAUDE_DIR/templates/diana"; do
   if [ -d "$d" ] && rmdir "$d" 2>/dev/null; then
     REMOVED+=("${d#"$TARGET"/}/  (empty dir removed)")
   fi
@@ -173,7 +184,15 @@ else
   SKIPPED+=("CLAUDE.md  (not present)")
 fi
 
-# --- 4. report ---
+# --- 4. root loop files are live project state — never touched, just noted ---
+ROOT_LOOP_FILES=()
+for f in LOOP.md STATE.md RUN_LOG.md BUDGET.md; do
+  if [ -f "$TARGET/$f" ]; then
+    ROOT_LOOP_FILES+=("$f")
+  fi
+done
+
+# --- 5. report ---
 echo "Diana uninstall → $TARGET"
 echo
 if [ "${#REMOVED[@]}" -gt 0 ]; then
@@ -187,6 +206,11 @@ fi
 if [ "${#SKIPPED[@]}" -gt 0 ]; then
   echo "skipped:"
   printf '  %s\n' "${SKIPPED[@]}"
+fi
+if [ "${#ROOT_LOOP_FILES[@]}" -gt 0 ]; then
+  echo
+  echo "warning: found root loop file(s), left in place (may contain project state):"
+  printf '  %s\n' "${ROOT_LOOP_FILES[@]}"
 fi
 echo
 echo "Note: .claude/, .claude/commands/, .claude/skills/, and .claude/hooks/ are left in place"

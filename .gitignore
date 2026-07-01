@@ -22,6 +22,8 @@
 !diana/hooks/cost-report.md
 !diana/memory/
 !diana/memory/README.md
+!diana/templates/
+!diana/templates/*.md
 
 # Explicit reminders for common files that must never be published here.
 .env

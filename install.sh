@@ -14,6 +14,11 @@
 #     CLAUDE.md Diana section — it does not disturb unrelated content there.
 #   - Re-running is idempotent: unchanged files/entries are left alone and
 #     reported as "unchanged", not re-copied or re-backed-up.
+#   - Loop templates (LOOP.md, STATE.md, RUN_LOG.md, BUDGET.md) are installed
+#     as reference copies under .claude/templates/diana/ only. This script
+#     never creates live root-level LOOP.md/STATE.md/RUN_LOG.md/BUDGET.md —
+#     those are project state, created on demand by /orchestrate or by
+#     explicit user request, never by install.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,7 +58,10 @@ mkdir_report "$CLAUDE_DIR/skills"
 mkdir_report "$CLAUDE_DIR/skills/plan-review"
 mkdir_report "$CLAUDE_DIR/skills/research-first"
 mkdir_report "$CLAUDE_DIR/skills/minimal-solution"
+mkdir_report "$CLAUDE_DIR/skills/loop-design"
 mkdir_report "$CLAUDE_DIR/hooks"
+mkdir_report "$CLAUDE_DIR/templates"
+mkdir_report "$CLAUDE_DIR/templates/diana"
 
 # --- 2. plain file installs (backup-then-overwrite, skip if identical) ---
 install_file() {
@@ -81,6 +89,13 @@ install_file "$DIANA_SRC/commands/review.md"       "$CLAUDE_DIR/commands/review.
 install_file "$DIANA_SRC/commands/ship.md"         "$CLAUDE_DIR/commands/ship.md"
 install_file "$DIANA_SRC/hooks/cost-report.md"     "$CLAUDE_DIR/commands/cost-report.md"
 install_file "$DIANA_SRC/hooks/check-careful.sh"   "$CLAUDE_DIR/hooks/check-careful.sh"
+install_file "$DIANA_SRC/commands/orchestrate.md"  "$CLAUDE_DIR/commands/orchestrate.md"
+install_file "$DIANA_SRC/commands/loop-audit.md"   "$CLAUDE_DIR/commands/loop-audit.md"
+install_file "$DIANA_SRC/skills/loop-design.md"    "$CLAUDE_DIR/skills/loop-design/SKILL.md"
+install_file "$DIANA_SRC/templates/LOOP.md"        "$CLAUDE_DIR/templates/diana/LOOP.md"
+install_file "$DIANA_SRC/templates/STATE.md"       "$CLAUDE_DIR/templates/diana/STATE.md"
+install_file "$DIANA_SRC/templates/RUN_LOG.md"     "$CLAUDE_DIR/templates/diana/RUN_LOG.md"
+install_file "$DIANA_SRC/templates/BUDGET.md"      "$CLAUDE_DIR/templates/diana/BUDGET.md"
 
 chmod +x "$CLAUDE_DIR/hooks/check-careful.sh"
 
