@@ -1,0 +1,38 @@
+# Keep this public repo scoped to the reusable Diana base.
+# The working directory may contain local reference repos and scratch projects;
+# ignore everything by default, then allow only the intended release files.
+
+*
+
+!.gitignore
+!README.md
+!install.sh
+!verify.sh
+!uninstall.sh
+
+!diana/
+!diana/CLAUDE.md
+!diana/skills/
+!diana/skills/*.md
+!diana/commands/
+!diana/commands/*.md
+!diana/hooks/
+!diana/hooks/hooks.json
+!diana/hooks/check-careful.sh
+!diana/hooks/cost-report.md
+!diana/memory/
+!diana/memory/README.md
+
+# Explicit reminders for common files that must never be published here.
+.env
+.env.*
+node_modules/
+references/
+scratch/
+tmp/
+temp/
+*.bak
+*.bak.*
+*.swp
+*.swo
+.DS_Store

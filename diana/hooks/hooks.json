@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/check-careful.sh\"",
+            "description": "Warn before destructive shell commands (rm -rf, DROP TABLE, force-push, reset --hard, kubectl delete, ...)"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "description": "Append a session token/cost row to ~/.claude/diana/costs.jsonl",
+            "command": "node -e \"const fs=require('fs'),os=require('os'),path=require('path');let input='';process.stdin.on('data',d=>input+=d);process.stdin.on('end',()=>{try{const hook=JSON.parse(input||'{}');const transcriptPath=hook.transcript_path;const sessionId=hook.session_id||'unknown';const cwd=hook.cwd||process.cwd();let inTok=0,outTok=0,cacheW=0,cacheR=0,model='unknown';if(transcriptPath&&fs.existsSync(transcriptPath)){const lines=fs.readFileSync(transcriptPath,'utf8').split(/\\r?\\n/).filter(Boolean);for(const line of lines){let e;try{e=JSON.parse(line)}catch{continue}const u=e&&e.message&&e.message.usage;if(u){inTok+=u.input_tokens||0;outTok+=u.output_tokens||0;cacheW+=u.cache_creation_input_tokens||0;cacheR+=u.cache_read_input_tokens||0;if(e.message.model)model=e.message.model}}}const PRICES={opus:{in:15,out:75,cacheW:18.75,cacheR:1.5},sonnet:{in:3,out:15,cacheW:3.75,cacheR:0.3},haiku:{in:0.8,out:4,cacheW:1,cacheR:0.08}};const key=Object.keys(PRICES).find(k=>model.toLowerCase().includes(k));let cost=null;if(key){const p=PRICES[key];cost=(inTok*p.in+outTok*p.out+cacheW*p.cacheW+cacheR*p.cacheR)/1e6}const row={timestamp:new Date().toISOString(),session_id:sessionId,cwd,model,input_tokens:inTok,output_tokens:outTok,cache_creation_input_tokens:cacheW,cache_read_input_tokens:cacheR,estimated_cost_usd:cost};const dir=path.join(os.homedir(),'.claude','diana');fs.mkdirSync(dir,{recursive:true});fs.appendFileSync(path.join(dir,'costs.jsonl'),JSON.stringify(row)+'\\n')}catch(e){}process.exit(0)})\""
+          }
+        ]
+      }
+    ]
+  }
+}
