@@ -55,3 +55,15 @@ trivial changes (typo, one-line config value, rename).
 Diana is not a framework. There is no plugin system, no multi-tool adapter,
 no model router in v0.1. If a task seems to need one, say so explicitly
 instead of building it inline.
+
+## Growth Discipline
+
+Before adding a new skill, command, hook, or workflow to Diana, check:
+
+1. Does it directly support the core loop: plan → inspect → fix → test →
+   review → ship?
+2. Can it be added, tested, and removed in under one day?
+3. Will it be used weekly in real project work?
+4. Does it reduce repeated friction without creating new maintenance burden?
+
+If the answer is no, it belongs in backlog or notes, not in Diana.
