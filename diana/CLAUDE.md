@@ -56,6 +56,17 @@ Diana is not a framework. There is no plugin system, no multi-tool adapter,
 no model router in v0.1. If a task seems to need one, say so explicitly
 instead of building it inline.
 
+Model choice (Opus/Sonnet/Haiku) is manual — use Claude Code's own `/model`
+command or `--model` flag. Diana does not select or switch models for you.
+Model choice must never be used to weaken approval, review, a loop's
+assigned level, or the actor/verifier separation required above L1 — see
+`LOOP.md`'s actor/verifier rule; a stronger model is never a substitute for
+a human gate. If cost is a concern, use `BUDGET.md`'s caps and the existing
+cost log (`~/.claude/diana/costs.jsonl`) first — a routing policy, even
+something as small as a `Model hint` column in `LOOP.md`'s registry, isn't
+worth adding until loops have real run history in `RUN_LOG.md` to justify
+it.
+
 ## Growth Discipline
 
 Before adding a new skill, command, hook, or workflow to Diana, check:

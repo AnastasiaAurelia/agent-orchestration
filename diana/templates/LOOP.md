@@ -35,7 +35,9 @@ had not just written it, and confirm independently (re-run the test, re-read
 the diff, re-check the assertion) before recording the outcome as anything
 other than `escalated`. A loop that certifies its own work is the single
 biggest way this goes wrong — `/loop-audit` will fail any loop that can't
-show this separation.
+show this separation. Model choice does not change any of this — running a
+step on a stronger or different model is not a separate verification step,
+and is never grounds to skip the human gate at L2/L3.
 
 ## Kill switch
 
