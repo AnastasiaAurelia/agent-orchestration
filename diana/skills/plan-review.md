@@ -50,3 +50,30 @@ Give a verdict, not a report:
 
 Do not produce a long written report for small tasks — the point is to catch
 the one wrong assumption before writing code, not to perform thoroughness.
+
+## Manual advisor option (optional, human-triggered)
+
+If the **risk & blast radius** lens says this is irreversible or touches
+shared/production state, or the **architecture** lens leaves two or more
+genuinely different approaches equally plausible, you may offer the user a
+manual second opinion before proceeding — never call one automatically.
+
+Ask which they want: no advisor, a manual Opus session, or a manual Fable
+session — there is no required order between Opus and Fable. If the user
+has no preference, suggest alternating across occasions rather than
+defaulting to the same one every time, so a real comparison becomes
+possible later. This is for occasional, high-stakes moments — if it's
+being reached for on most tasks, that's a sign to stop and reconsider, not
+a routine step.
+
+An advisor consult never counts as approval, review, or verification, and
+never changes who signs off — it's a second opinion the executor can take
+or leave.
+
+If the user picks an advisor (or explicitly declines one after a trigger
+fires), note that a consult happened. As soon as the outcome is known —
+the guidance was applied, changed nothing, or wasn't used — stop and
+explicitly remind the user to create or update `memory/advisor-log.md`
+right then, per the schema in `memory/README.md`. Don't defer this to
+"later" or assume it'll get written down unprompted; an on-demand log
+that's never reminded is a log that's never written.
