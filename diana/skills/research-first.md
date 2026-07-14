@@ -49,3 +49,11 @@ Better:
 
 If you haven't done steps 1-4, say so instead of presenting a guess as a
 diagnosis.
+
+## When the root cause still won't resolve
+
+If steps 1-4 are genuinely done and the root cause still can't be stated
+confidently, or a second distinct fix attempt has failed on what was
+believed to be the same root cause, that's one of the trigger conditions
+for `plan-review.md`'s manual advisor option — see that file for how to
+offer it. Don't loop a third guess without considering it.
