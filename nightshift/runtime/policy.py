@@ -299,10 +299,15 @@ _SENSITIVE_ENV_EXACT = frozenset(
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",
         "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_API_KEY",
         "GITHUB_TOKEN",
         "GH_TOKEN",
         "SSH_AUTH_SOCK",
         "SSH_AGENT_PID",
+        # Not caught by the substring rules below (no TOKEN/SECRET/PASSWORD/
+        # KEY/CREDENTIAL marker in the name) but a database URL routinely
+        # embeds a plaintext username/password -- e.g. postgres://user:pw@host/db.
+        "DATABASE_URL",
     }
 )
 
