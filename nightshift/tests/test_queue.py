@@ -33,6 +33,7 @@ def _task(
     status="pending",
     title="a bounded task",
     attempt_count=0,
+    max_attempts=3,
     claimed_pid=None,
     claimed_at=None,
 ):
@@ -41,6 +42,7 @@ def _task(
         "status": status,
         "title": title,
         "attempt_count": attempt_count,
+        "max_attempts": max_attempts,
         "claimed_pid": claimed_pid,
         "claimed_at": claimed_at,
     }
@@ -533,6 +535,200 @@ class NightshiftQueueTestCase(unittest.TestCase):
             "ownership -- it must be immediately recoverable",
         )
         self.assertEqual(second.recovered_stale_task_ids, ("t1",))
+
+    # -- Milestone 2: completion and retry transitions ---------------------------
+
+    def test_valid_owner_completes_a_claimed_task(self):
+        _write_raw_queue(self.queue_path, [_task("t1", attempt_count=0)])
+        claim = nsq.claim_next(self.queue_path)
+        self.assertEqual(claim.outcome, nsq.ClaimOutcome.CLAIMED)
+
+        result = nsq.complete_task(self.queue_path, "t1", owner_pid=os.getpid())
+
+        self.assertEqual(result.outcome, nsq.TransitionOutcome.DONE)
+        self.assertEqual(result.task_id, "t1")
+        with open(self.queue_path, encoding="utf-8") as f:
+            data = nsq.validate_queue(json.load(f))
+        task = data["tasks"][0]
+        self.assertEqual(task["status"], "done")
+        self.assertIsNone(task["claimed_pid"])
+        self.assertIsNone(task["claimed_at"])
+
+    def test_wrong_owner_cannot_complete_task(self):
+        _write_raw_queue(self.queue_path, [_task("t1", attempt_count=0)])
+        claim = nsq.claim_next(self.queue_path)
+        self.assertEqual(claim.outcome, nsq.ClaimOutcome.CLAIMED)
+        before = _read_raw_bytes(self.queue_path)
+
+        impostor_pid = os.getpid() + 1  # exact-match check only; liveness is irrelevant here
+        result = nsq.complete_task(self.queue_path, "t1", owner_pid=impostor_pid)
+
+        self.assertEqual(result.outcome, nsq.TransitionOutcome.WRONG_OWNER)
+        after = _read_raw_bytes(self.queue_path)
+        self.assertEqual(before, after, "a wrong-owner completion attempt must not modify the queue")
+
+    def test_pending_task_cannot_be_completed(self):
+        _write_raw_queue(self.queue_path, [_task("t1", attempt_count=0)])
+        before = _read_raw_bytes(self.queue_path)
+
+        result = nsq.complete_task(self.queue_path, "t1", owner_pid=os.getpid())
+
+        self.assertEqual(result.outcome, nsq.TransitionOutcome.INVALID_STATE)
+        after = _read_raw_bytes(self.queue_path)
+        self.assertEqual(before, after)
+
+    def test_done_task_cannot_be_completed_again(self):
+        _write_raw_queue(self.queue_path, [_task("t1", attempt_count=0)])
+        nsq.claim_next(self.queue_path)
+        first = nsq.complete_task(self.queue_path, "t1", owner_pid=os.getpid())
+        self.assertEqual(first.outcome, nsq.TransitionOutcome.DONE)
+        before = _read_raw_bytes(self.queue_path)
+
+        second = nsq.complete_task(self.queue_path, "t1", owner_pid=os.getpid())
+
+        self.assertEqual(second.outcome, nsq.TransitionOutcome.INVALID_STATE)
+        after = _read_raw_bytes(self.queue_path)
+        self.assertEqual(before, after, "completing an already-done task must not modify the queue")
+
+    def test_first_failure_below_retry_limit_requeues_task(self):
+        _write_raw_queue(self.queue_path, [_task("t1", attempt_count=0, max_attempts=2)])
+        claim = nsq.claim_next(self.queue_path)
+        self.assertEqual(claim.outcome, nsq.ClaimOutcome.CLAIMED)
+        self.assertEqual(claim.attempt_count, 1)
+
+        result = nsq.fail_task(self.queue_path, "t1", owner_pid=os.getpid())
+
+        self.assertEqual(result.outcome, nsq.TransitionOutcome.REQUEUED)
+        with open(self.queue_path, encoding="utf-8") as f:
+            data = nsq.validate_queue(json.load(f))
+        task = data["tasks"][0]
+        self.assertEqual(task["status"], "pending")
+        self.assertIsNone(task["claimed_pid"])
+        self.assertIsNone(task["claimed_at"])
+        self.assertEqual(task["attempt_count"], 1, "fail_task must not itself change attempt_count")
+
+        reclaim = nsq.claim_next(self.queue_path)
+        self.assertEqual(reclaim.outcome, nsq.ClaimOutcome.CLAIMED)
+        self.assertEqual(reclaim.attempt_count, 2, "the requeued task must be claimable again")
+
+    def test_failure_at_retry_limit_marks_task_permanently_failed(self):
+        _write_raw_queue(self.queue_path, [_task("t1", attempt_count=0, max_attempts=2)])
+        nsq.claim_next(self.queue_path)  # attempt_count -> 1
+        first_fail = nsq.fail_task(self.queue_path, "t1", owner_pid=os.getpid())
+        self.assertEqual(first_fail.outcome, nsq.TransitionOutcome.REQUEUED)
+
+        nsq.claim_next(self.queue_path)  # attempt_count -> 2 == max_attempts
+        result = nsq.fail_task(self.queue_path, "t1", owner_pid=os.getpid())
+
+        self.assertEqual(result.outcome, nsq.TransitionOutcome.FAILED_PERMANENTLY)
+        with open(self.queue_path, encoding="utf-8") as f:
+            data = nsq.validate_queue(json.load(f))
+        task = data["tasks"][0]
+        self.assertEqual(task["status"], "failed")
+        self.assertIsNone(task["claimed_pid"])
+        self.assertIsNone(task["claimed_at"])
+        self.assertEqual(task["attempt_count"], 2)
+
+    def test_failed_task_cannot_be_claimed(self):
+        _write_raw_queue(self.queue_path, [_task("t1", attempt_count=0, max_attempts=1)])
+        claim = nsq.claim_next(self.queue_path)
+        self.assertEqual(claim.outcome, nsq.ClaimOutcome.CLAIMED)
+        self.assertEqual(claim.attempt_count, 1)
+
+        failed = nsq.fail_task(self.queue_path, "t1", owner_pid=os.getpid())
+        self.assertEqual(failed.outcome, nsq.TransitionOutcome.FAILED_PERMANENTLY)
+
+        result = nsq.claim_next(self.queue_path)
+
+        self.assertEqual(result.outcome, nsq.ClaimOutcome.NO_PENDING_TASK)
+
+    def test_done_task_cannot_be_claimed(self):
+        _write_raw_queue(self.queue_path, [_task("t1", attempt_count=0)])
+        nsq.claim_next(self.queue_path)
+        completed = nsq.complete_task(self.queue_path, "t1", owner_pid=os.getpid())
+        self.assertEqual(completed.outcome, nsq.TransitionOutcome.DONE)
+
+        result = nsq.claim_next(self.queue_path)
+
+        self.assertEqual(result.outcome, nsq.ClaimOutcome.NO_PENDING_TASK)
+
+    def test_concurrent_completion_attempts_produce_exactly_one_valid_transition(self):
+        _write_raw_queue(self.queue_path, [_task("t1", attempt_count=0)])
+        claim = nsq.claim_next(self.queue_path, claimant_pid=999999)
+        self.assertEqual(claim.outcome, nsq.ClaimOutcome.CLAIMED)
+
+        sentinel_path = os.path.join(self.tmpdir, "start.sentinel")
+        stdout_paths = [os.path.join(self.tmpdir, f"complete{i}.json") for i in range(2)]
+        procs = []
+        for out_path in stdout_paths:
+            out_f = open(out_path, "w", encoding="utf-8")
+            proc = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "nightshift.runtime.queue",
+                    "complete",
+                    self.queue_path,
+                    "t1",
+                    "--owner-pid",
+                    "999999",
+                    "--wait-for",
+                    sentinel_path,
+                ],
+                cwd=REPO_ROOT,
+                stdout=out_f,
+                stderr=subprocess.DEVNULL,
+            )
+            procs.append((proc, out_f))
+        self._live_procs.extend(p for p, _ in procs)
+
+        time.sleep(0.2)
+        with open(sentinel_path, "w", encoding="utf-8") as f:
+            f.write("go")
+
+        for proc, out_f in procs:
+            proc.wait(timeout=10)
+            out_f.close()
+        results = [json.loads(_read_raw_bytes(p).decode("utf-8")) for p in stdout_paths]
+
+        done_results = [r for r in results if r["outcome"] == "done"]
+        rejected_results = [r for r in results if r["outcome"] != "done"]
+        self.assertEqual(len(done_results), 1, f"expected exactly one valid completion, got {results}")
+        self.assertEqual(len(rejected_results), 1)
+        self.assertIn(rejected_results[0]["outcome"], ("lock_busy", "invalid_state"))
+
+        with open(self.queue_path, encoding="utf-8") as f:
+            data = nsq.validate_queue(json.load(f))
+        self.assertEqual(data["tasks"][0]["status"], "done")
+
+    def test_transition_on_nonexistent_task_id_is_rejected_and_leaves_queue_unchanged(
+        self,
+    ):
+        _write_raw_queue(self.queue_path, [_task("t1", attempt_count=0)])
+        before = _read_raw_bytes(self.queue_path)
+
+        complete_result = nsq.complete_task(self.queue_path, "does-not-exist", owner_pid=os.getpid())
+        self.assertEqual(complete_result.outcome, nsq.TransitionOutcome.TASK_NOT_FOUND)
+        self.assertEqual(_read_raw_bytes(self.queue_path), before)
+
+        fail_result = nsq.fail_task(self.queue_path, "does-not-exist", owner_pid=os.getpid())
+        self.assertEqual(fail_result.outcome, nsq.TransitionOutcome.TASK_NOT_FOUND)
+        self.assertEqual(_read_raw_bytes(self.queue_path), before)
+
+    def test_malformed_transition_input_leaves_canonical_state_unchanged(self):
+        with open(self.queue_path, "w", encoding="utf-8") as f:
+            f.write("{not valid json for a transition attempt")
+        before = _read_raw_bytes(self.queue_path)
+
+        complete_result = nsq.complete_task(self.queue_path, "t1", owner_pid=os.getpid())
+        self.assertEqual(complete_result.outcome, nsq.TransitionOutcome.MALFORMED_QUEUE)
+        after_complete = _read_raw_bytes(self.queue_path)
+        self.assertEqual(before, after_complete)
+
+        fail_result = nsq.fail_task(self.queue_path, "t1", owner_pid=os.getpid())
+        self.assertEqual(fail_result.outcome, nsq.TransitionOutcome.MALFORMED_QUEUE)
+        after_fail = _read_raw_bytes(self.queue_path)
+        self.assertEqual(before, after_fail)
 
     # -- 10. Repository isolation ------------------------------------------------
 

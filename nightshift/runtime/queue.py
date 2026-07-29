@@ -24,10 +24,24 @@ The canonical queue is a single UTF-8 JSON file shaped like::
       ]
     }
 
-Allowed statuses are deliberately limited to "pending" and "claimed" -- this
-milestone has no execute/evaluate/report step, so no other status exists yet.
-Do not add statuses here for future phases; extend this file only when a
-later, separately-approved milestone actually needs them.
+Allowed statuses are "pending", "claimed", "done", and "failed". "done" and
+"failed" are terminal: neither can ever be claimed, completed, or failed
+again. Do not add statuses here for future phases; extend this file only
+when a later, separately-approved milestone actually needs them.
+
+``max_attempts`` is a required, positive-integer, per-task field: the total
+number of times a task may be claimed before a failure becomes permanent.
+It is fixed at task-authoring time and never mutated by this module.
+
+Known limitation (deferred to a later, separately-approved milestone): the
+stale-lock recovery path in :func:`claim_next` returns an abandoned
+"claimed" task straight back to "pending" unconditionally -- it does not yet
+compare ``attempt_count`` to ``max_attempts``. An abandoned task recovered
+that way can therefore be claimed again even past its retry ceiling. This is
+deliberate: teaching abandoned-run recovery about retry limits is scoped to
+the crash/abandoned-run recovery milestone, not this one, and adding that
+check here without also fixing the recovery path would let recovery write a
+queue state this module's own validator would then reject on the next read.
 
 ``claimed_pid`` / ``claimed_at`` are the *persistent claim metadata*: who
 claimed a task and when. They are written into the canonical file and
@@ -140,6 +154,15 @@ exactly one of:
     validation succeeded). The canonical file is guaranteed untouched,
     because the failure necessarily occurred before or during the atomic
     ``os.replace`` step, which never partially applies.
+
+:func:`complete_task` and :func:`fail_task` return a separate
+:class:`TransitionResult` (see its class docstring for its own
+``TransitionOutcome`` values: ``DONE``, ``REQUEUED``,
+``FAILED_PERMANENTLY``, ``WRONG_OWNER``, ``INVALID_STATE``,
+``TASK_NOT_FOUND``, ``LOCK_BUSY``, ``MALFORMED_QUEUE``,
+``INTERNAL_FAILURE``) -- the completion/retry state machine is a distinct
+concern from claiming, even though both share the same lock and atomic
+write primitives.
 """
 
 from __future__ import annotations
@@ -157,12 +180,14 @@ import time
 from enum import Enum
 from typing import Any, Optional
 
-ALLOWED_STATUSES = ("pending", "claimed")
+ALLOWED_STATUSES = ("pending", "claimed", "done", "failed")
+TERMINAL_STATUSES = ("done", "failed")
 REQUIRED_TASK_FIELDS = (
     "id",
     "status",
     "title",
     "attempt_count",
+    "max_attempts",
     "claimed_pid",
     "claimed_at",
 )
@@ -192,6 +217,77 @@ class _LockBusyError(Exception):
     Never propagated past claim_next() -- it is always converted into a
     ClaimResult(outcome=ClaimOutcome.LOCK_BUSY) at the call site.
     """
+
+
+class TransitionOutcome(str, Enum):
+    """Outcomes shared by :func:`complete_task` and :func:`fail_task`.
+
+    ``DONE``
+        The task was a valid, owned, "claimed" task and is now "done".
+        Only returned by :func:`complete_task`.
+
+    ``REQUEUED``
+        The task failed but had not yet exhausted ``max_attempts``, so it
+        is back to "pending" (claim metadata cleared) and claimable again.
+        Only returned by :func:`fail_task`.
+
+    ``FAILED_PERMANENTLY``
+        The task failed at or past its ``max_attempts`` ceiling and is now
+        "failed" (claim metadata cleared). Terminal -- never claimable
+        again. Only returned by :func:`fail_task`.
+
+    ``WRONG_OWNER``
+        The task is "claimed", but not by the ``owner_pid`` making this
+        call. Nothing was modified.
+
+    ``INVALID_STATE``
+        The task is not currently "claimed" (already "pending", "done", or
+        "failed"), so it cannot be completed or failed right now. Nothing
+        was modified.
+
+    ``TASK_NOT_FOUND``
+        No task with the given id exists in the queue. Nothing was
+        modified.
+
+    ``LOCK_BUSY``
+        The short-lived OS mutex was held elsewhere; back off and retry.
+        The canonical file was never even opened.
+
+    ``MALFORMED_QUEUE``
+        The canonical file failed validation before any mutation was
+        attempted. The canonical file is guaranteed untouched.
+
+    ``INTERNAL_FAILURE``
+        An unexpected error occurred during the write phase. The canonical
+        file is guaranteed untouched, for the same reason as
+        ClaimOutcome.INTERNAL_FAILURE.
+    """
+
+    DONE = "done"
+    REQUEUED = "requeued"
+    FAILED_PERMANENTLY = "failed_permanently"
+    WRONG_OWNER = "wrong_owner"
+    INVALID_STATE = "invalid_state"
+    TASK_NOT_FOUND = "task_not_found"
+    LOCK_BUSY = "lock_busy"
+    MALFORMED_QUEUE = "malformed_queue"
+    INTERNAL_FAILURE = "internal_failure"
+
+
+@dataclasses.dataclass(frozen=True)
+class TransitionResult:
+    outcome: TransitionOutcome
+    task_id: Optional[str] = None
+    attempt_count: Optional[int] = None
+    message: Optional[str] = None
+
+    def to_json_dict(self) -> dict:
+        return {
+            "outcome": self.outcome.value,
+            "task_id": self.task_id,
+            "attempt_count": self.attempt_count,
+            "message": self.message,
+        }
 
 
 @dataclasses.dataclass(frozen=True)
@@ -302,6 +398,16 @@ def validate_queue(data: Any) -> dict:
                 f"task {task_id!r} has a negative 'attempt_count'"
             )
 
+        max_attempts = task["max_attempts"]
+        if isinstance(max_attempts, bool) or not isinstance(max_attempts, int):
+            raise MalformedQueueError(
+                f"task {task_id!r} has a non-integer 'max_attempts'"
+            )
+        if max_attempts < 1:
+            raise MalformedQueueError(
+                f"task {task_id!r} has a non-positive 'max_attempts'"
+            )
+
         claimed_pid = task["claimed_pid"]
         claimed_at = task["claimed_at"]
         if claimed_pid is not None and (
@@ -322,15 +428,16 @@ def validate_queue(data: Any) -> dict:
                     f"task {task_id!r} has an unparseable 'claimed_at': {exc}"
                 ) from exc
 
-        if status == "pending":
-            if claimed_pid is not None or claimed_at is not None:
-                raise MalformedQueueError(
-                    f"task {task_id!r} is 'pending' but carries claim metadata"
-                )
-        elif status == "claimed":
+        if status == "claimed":
             if claimed_pid is None or claimed_at is None:
                 raise MalformedQueueError(
                     f"task {task_id!r} is 'claimed' but is missing claim metadata"
+                )
+        else:
+            # "pending", "done", and "failed" all carry no active claim.
+            if claimed_pid is not None or claimed_at is not None:
+                raise MalformedQueueError(
+                    f"task {task_id!r} has status {status!r} but carries claim metadata"
                 )
 
     return data
@@ -395,6 +502,25 @@ def _os_lock(lock_path: str):
         os.close(lock_fd)
 
 
+def _read_and_validate(queue_path: str) -> dict:
+    """Read, parse, and strictly validate the canonical queue file.
+
+    Raises json.JSONDecodeError or MalformedQueueError on any problem --
+    callers convert both into a MALFORMED_QUEUE-shaped outcome. Never
+    repairs anything.
+    """
+    with open(queue_path, "r", encoding="utf-8") as f:
+        raw_text = f.read()
+    return validate_queue(json.loads(raw_text))
+
+
+def _find_task(data: dict, task_id: str) -> Optional[dict]:
+    for task in data["tasks"]:
+        if task["id"] == task_id:
+            return task
+    return None
+
+
 def claim_next(
     queue_path: str,
     stale_threshold_seconds: int = DEFAULT_STALE_THRESHOLD_SECONDS,
@@ -416,10 +542,7 @@ def claim_next(
     try:
         with _os_lock(lock_path):
             try:
-                with open(queue_path, "r", encoding="utf-8") as f:
-                    raw_text = f.read()
-                data = json.loads(raw_text)
-                data = validate_queue(data)
+                data = _read_and_validate(queue_path)
             except (json.JSONDecodeError, MalformedQueueError) as exc:
                 return ClaimResult(
                     outcome=ClaimOutcome.MALFORMED_QUEUE,
@@ -498,27 +621,202 @@ def claim_next(
         )
 
 
+def complete_task(
+    queue_path: str,
+    task_id: str,
+    owner_pid: Optional[int] = None,
+    lock_path: Optional[str] = None,
+) -> TransitionResult:
+    """Mark a "claimed" task "done", clearing its claim ownership metadata.
+
+    Only succeeds if ``task_id`` exists, is currently "claimed", and is
+    owned by ``owner_pid`` (defaulting to os.getpid() of the caller) --
+    exactly the same identity check :func:`claim_next` recorded at claim
+    time, never a looser "some owner exists" check.
+    """
+    if lock_path is None:
+        lock_path = queue_path + ".lock"
+    if owner_pid is None:
+        owner_pid = os.getpid()
+
+    try:
+        with _os_lock(lock_path):
+            try:
+                data = _read_and_validate(queue_path)
+            except (json.JSONDecodeError, MalformedQueueError) as exc:
+                return TransitionResult(
+                    outcome=TransitionOutcome.MALFORMED_QUEUE,
+                    task_id=task_id,
+                    message=str(exc),
+                )
+
+            task = _find_task(data, task_id)
+            if task is None:
+                return TransitionResult(
+                    outcome=TransitionOutcome.TASK_NOT_FOUND, task_id=task_id
+                )
+
+            if task["status"] != "claimed":
+                return TransitionResult(
+                    outcome=TransitionOutcome.INVALID_STATE,
+                    task_id=task_id,
+                    attempt_count=task["attempt_count"],
+                    message=f"task status is {task['status']!r}, not 'claimed'",
+                )
+
+            if task["claimed_pid"] != owner_pid:
+                return TransitionResult(
+                    outcome=TransitionOutcome.WRONG_OWNER,
+                    task_id=task_id,
+                    attempt_count=task["attempt_count"],
+                )
+
+            task["status"] = "done"
+            task["claimed_pid"] = None
+            task["claimed_at"] = None
+
+            try:
+                _atomic_write(queue_path, data)
+            except OSError as exc:
+                return TransitionResult(
+                    outcome=TransitionOutcome.INTERNAL_FAILURE,
+                    task_id=task_id,
+                    message=f"write failed: {exc}",
+                )
+
+            return TransitionResult(
+                outcome=TransitionOutcome.DONE,
+                task_id=task_id,
+                attempt_count=task["attempt_count"],
+            )
+    except _LockBusyError:
+        return TransitionResult(
+            outcome=TransitionOutcome.LOCK_BUSY,
+            task_id=task_id,
+            message="the short-lived OS mutex for this queue is held by another process",
+        )
+    except OSError as exc:
+        return TransitionResult(
+            outcome=TransitionOutcome.INTERNAL_FAILURE,
+            task_id=task_id,
+            message=f"unexpected OS error: {exc}",
+        )
+
+
+def fail_task(
+    queue_path: str,
+    task_id: str,
+    owner_pid: Optional[int] = None,
+    lock_path: Optional[str] = None,
+) -> TransitionResult:
+    """Record a failed attempt on a "claimed" task, owned by ``owner_pid``.
+
+    If attempt_count has not yet reached max_attempts, the task returns to
+    "pending" (claim metadata cleared) and is claimable again. Otherwise it
+    becomes permanently "failed" (claim metadata cleared, never claimable
+    again). attempt_count itself is never modified here -- it was already
+    incremented exactly once, at claim time, by claim_next().
+    """
+    if lock_path is None:
+        lock_path = queue_path + ".lock"
+    if owner_pid is None:
+        owner_pid = os.getpid()
+
+    try:
+        with _os_lock(lock_path):
+            try:
+                data = _read_and_validate(queue_path)
+            except (json.JSONDecodeError, MalformedQueueError) as exc:
+                return TransitionResult(
+                    outcome=TransitionOutcome.MALFORMED_QUEUE,
+                    task_id=task_id,
+                    message=str(exc),
+                )
+
+            task = _find_task(data, task_id)
+            if task is None:
+                return TransitionResult(
+                    outcome=TransitionOutcome.TASK_NOT_FOUND, task_id=task_id
+                )
+
+            if task["status"] != "claimed":
+                return TransitionResult(
+                    outcome=TransitionOutcome.INVALID_STATE,
+                    task_id=task_id,
+                    attempt_count=task["attempt_count"],
+                    message=f"task status is {task['status']!r}, not 'claimed'",
+                )
+
+            if task["claimed_pid"] != owner_pid:
+                return TransitionResult(
+                    outcome=TransitionOutcome.WRONG_OWNER,
+                    task_id=task_id,
+                    attempt_count=task["attempt_count"],
+                )
+
+            if task["attempt_count"] >= task["max_attempts"]:
+                task["status"] = "failed"
+                outcome = TransitionOutcome.FAILED_PERMANENTLY
+            else:
+                task["status"] = "pending"
+                outcome = TransitionOutcome.REQUEUED
+            task["claimed_pid"] = None
+            task["claimed_at"] = None
+
+            try:
+                _atomic_write(queue_path, data)
+            except OSError as exc:
+                return TransitionResult(
+                    outcome=TransitionOutcome.INTERNAL_FAILURE,
+                    task_id=task_id,
+                    message=f"write failed: {exc}",
+                )
+
+            return TransitionResult(
+                outcome=outcome,
+                task_id=task_id,
+                attempt_count=task["attempt_count"],
+            )
+    except _LockBusyError:
+        return TransitionResult(
+            outcome=TransitionOutcome.LOCK_BUSY,
+            task_id=task_id,
+            message="the short-lived OS mutex for this queue is held by another process",
+        )
+    except OSError as exc:
+        return TransitionResult(
+            outcome=TransitionOutcome.INTERNAL_FAILURE,
+            task_id=task_id,
+            message=f"unexpected OS error: {exc}",
+        )
+
+
 def _wait_for_sentinel(sentinel_path: str) -> None:
     while not os.path.exists(sentinel_path):
         time.sleep(0.001)
 
 
 def main(argv=None) -> int:
-    """CLI entry point: `python3 -m nightshift.runtime.queue claim <path>`.
+    """CLI entry point.
+
+    Subcommands: `claim <queue_path>`, `complete <queue_path> <task_id>
+    [--owner-pid PID]`, `fail <queue_path> <task_id> [--owner-pid PID]`.
 
     This is a debug/test interface, not a durable ownership mechanism: it
-    records its own PID as the claimant and then exits immediately after
-    printing its result, so that PID is dead the instant the command
-    returns. See the "Ownership contract" section of this module's
-    docstring before using this CLI to represent anything whose liveness
-    must be tracked -- a real claimant must be a long-lived process calling
-    claim_next() directly, not this one-shot command.
+    records its own PID (or an explicitly passed ``--owner-pid``) as the
+    actor and then exits immediately after printing its result, so that PID
+    is dead the instant the command returns. See the "Ownership contract"
+    section of this module's docstring before using this CLI to represent
+    anything whose liveness must be tracked -- a real owner must be a
+    long-lived process calling claim_next()/complete_task()/fail_task()
+    directly, not this one-shot command.
 
-    Exit code 0 means the call ran to completion; the actual result
-    (one of the ClaimOutcome values) is printed as a JSON object on
-    stdout under the "outcome" key. Exit code 1 means an exception escaped
-    this function unexpectedly (defensive only -- should not occur, since
-    claim_next() converts anticipated failures into a ClaimResult).
+    Exit code 0 means the call ran to completion; the actual result (one of
+    the ClaimOutcome or TransitionOutcome values, matching the subcommand)
+    is printed as a JSON object on stdout under the "outcome" key. Exit code
+    1 means an exception escaped this function unexpectedly (defensive
+    only -- should not occur, since every operation here converts
+    anticipated failures into a result object).
     """
     parser = argparse.ArgumentParser(prog="nightshift.runtime.queue")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -533,6 +831,18 @@ def main(argv=None) -> int:
     )
     claim_parser.add_argument("--wait-for", dest="wait_for", default=None)
 
+    complete_parser = sub.add_parser("complete")
+    complete_parser.add_argument("queue_path")
+    complete_parser.add_argument("task_id")
+    complete_parser.add_argument("--owner-pid", type=int, default=None, dest="owner_pid")
+    complete_parser.add_argument("--wait-for", dest="wait_for", default=None)
+
+    fail_parser = sub.add_parser("fail")
+    fail_parser.add_argument("queue_path")
+    fail_parser.add_argument("task_id")
+    fail_parser.add_argument("--owner-pid", type=int, default=None, dest="owner_pid")
+    fail_parser.add_argument("--wait-for", dest="wait_for", default=None)
+
     args = parser.parse_args(argv)
 
     if args.command == "claim":
@@ -542,6 +852,20 @@ def main(argv=None) -> int:
             args.queue_path,
             stale_threshold_seconds=args.stale_threshold_seconds,
         )
+        print(json.dumps(result.to_json_dict()))
+        return 0
+
+    if args.command == "complete":
+        if args.wait_for:
+            _wait_for_sentinel(args.wait_for)
+        result = complete_task(args.queue_path, args.task_id, owner_pid=args.owner_pid)
+        print(json.dumps(result.to_json_dict()))
+        return 0
+
+    if args.command == "fail":
+        if args.wait_for:
+            _wait_for_sentinel(args.wait_for)
+        result = fail_task(args.queue_path, args.task_id, owner_pid=args.owner_pid)
         print(json.dumps(result.to_json_dict()))
         return 0
 
