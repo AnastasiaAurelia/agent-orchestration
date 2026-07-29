@@ -43,3 +43,10 @@ temp/
 !docs/
 !docs/nightshift/
 !docs/nightshift/*.md
+
+# Diana Nightshift: deterministic queue -> claim -> lock milestone only
+!nightshift/
+!nightshift/runtime/
+!nightshift/runtime/*.py
+!nightshift/tests/
+!nightshift/tests/*.py
