@@ -36,7 +36,17 @@ def _task(
     max_attempts=3,
     claimed_pid=None,
     claimed_at=None,
+    acceptance_command=None,
+    working_dir=None,
+    timeout_seconds=5,
 ):
+    # Defaults are a trivially-passing command and an always-existing
+    # directory, so Milestone 1/2 tests (which don't care about acceptance
+    # at all) don't need to supply a real contract.
+    if acceptance_command is None:
+        acceptance_command = [sys.executable, "-c", "pass"]
+    if working_dir is None:
+        working_dir = tempfile.gettempdir()
     return {
         "id": task_id,
         "status": status,
@@ -45,6 +55,9 @@ def _task(
         "max_attempts": max_attempts,
         "claimed_pid": claimed_pid,
         "claimed_at": claimed_at,
+        "acceptance_command": acceptance_command,
+        "working_dir": working_dir,
+        "timeout_seconds": timeout_seconds,
     }
 
 
@@ -729,6 +742,137 @@ class NightshiftQueueTestCase(unittest.TestCase):
         self.assertEqual(fail_result.outcome, nsq.TransitionOutcome.MALFORMED_QUEUE)
         after_fail = _read_raw_bytes(self.queue_path)
         self.assertEqual(before, after_fail)
+
+    # -- Milestone 3: task contract and deterministic acceptance -----------------
+
+    def test_passing_acceptance_marks_task_done(self):
+        _write_raw_queue(self.queue_path, [_task("t1", attempt_count=0)])
+        claim = nsq.claim_next(self.queue_path, claimant_pid=os.getpid())
+        self.assertEqual(claim.outcome, nsq.ClaimOutcome.CLAIMED)
+
+        run = nsq.run_acceptance_and_record(self.queue_path, "t1", owner_pid=os.getpid())
+
+        self.assertTrue(run.acceptance.passed)
+        self.assertEqual(run.acceptance.reason, nsq.AcceptanceOutcome.PASSED)
+        self.assertEqual(run.acceptance.exit_code, 0)
+        self.assertEqual(run.transition.outcome, nsq.TransitionOutcome.DONE)
+        with open(self.queue_path, encoding="utf-8") as f:
+            data = nsq.validate_queue(json.load(f))
+        self.assertEqual(data["tasks"][0]["status"], "done")
+
+    def test_failing_acceptance_enters_retry_flow(self):
+        _write_raw_queue(
+            self.queue_path,
+            [_task("t1", attempt_count=0, max_attempts=2, acceptance_command=[sys.executable, "-c", "import sys; sys.exit(1)"])],
+        )
+        claim = nsq.claim_next(self.queue_path, claimant_pid=os.getpid())
+        self.assertEqual(claim.outcome, nsq.ClaimOutcome.CLAIMED)
+        self.assertEqual(claim.attempt_count, 1)
+
+        run = nsq.run_acceptance_and_record(self.queue_path, "t1", owner_pid=os.getpid())
+
+        self.assertFalse(run.acceptance.passed)
+        self.assertEqual(run.acceptance.reason, nsq.AcceptanceOutcome.FAILED)
+        self.assertEqual(run.acceptance.exit_code, 1)
+        self.assertEqual(run.transition.outcome, nsq.TransitionOutcome.REQUEUED)
+        with open(self.queue_path, encoding="utf-8") as f:
+            data = nsq.validate_queue(json.load(f))
+        self.assertEqual(data["tasks"][0]["status"], "pending")
+
+    def test_timeout_enters_retry_flow(self):
+        _write_raw_queue(
+            self.queue_path,
+            [
+                _task(
+                    "t1",
+                    attempt_count=0,
+                    max_attempts=2,
+                    acceptance_command=[sys.executable, "-c", "import time; time.sleep(5)"],
+                    timeout_seconds=1,
+                )
+            ],
+        )
+        claim = nsq.claim_next(self.queue_path, claimant_pid=os.getpid())
+        self.assertEqual(claim.outcome, nsq.ClaimOutcome.CLAIMED)
+
+        run = nsq.run_acceptance_and_record(self.queue_path, "t1", owner_pid=os.getpid())
+
+        self.assertFalse(run.acceptance.passed)
+        self.assertEqual(run.acceptance.reason, nsq.AcceptanceOutcome.TIMED_OUT)
+        self.assertEqual(run.transition.outcome, nsq.TransitionOutcome.REQUEUED)
+
+    def test_malformed_contract_is_rejected(self):
+        task = _task("t1", acceptance_command="not-a-list-of-strings")
+
+        result = nsq.run_acceptance(task)
+
+        self.assertFalse(result.passed)
+        self.assertEqual(result.reason, nsq.AcceptanceOutcome.MALFORMED_CONTRACT)
+        self.assertIsNone(result.exit_code)
+
+    def test_missing_command_is_rejected(self):
+        task = _task("t1", acceptance_command=["/path/does/not/exist/nightshift-fixture-binary"])
+
+        result = nsq.run_acceptance(task)
+
+        self.assertFalse(result.passed)
+        self.assertEqual(result.reason, nsq.AcceptanceOutcome.MISSING_COMMAND)
+        self.assertIsNone(result.exit_code)
+
+    def test_stdout_and_stderr_are_captured(self):
+        task = _task(
+            "t1",
+            acceptance_command=[
+                sys.executable,
+                "-c",
+                "import sys; print('out-line'); print('err-line', file=sys.stderr)",
+            ],
+        )
+
+        result = nsq.run_acceptance(task)
+
+        self.assertTrue(result.passed)
+        self.assertIn("out-line", result.stdout)
+        self.assertIn("err-line", result.stderr)
+
+    def test_executor_text_cannot_override_a_failed_acceptance_result(self):
+        task = _task(
+            "t1",
+            acceptance_command=[
+                sys.executable,
+                "-c",
+                "print('SUCCESS! all tests passed! nothing to see here'); "
+                "import sys; sys.exit(1)",
+            ],
+        )
+
+        result = nsq.run_acceptance(task)
+
+        self.assertFalse(
+            result.passed,
+            "stdout claiming success must never override a non-zero exit code",
+        )
+        self.assertEqual(result.reason, nsq.AcceptanceOutcome.FAILED)
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("SUCCESS", result.stdout)
+
+    def test_command_arguments_containing_spaces_are_handled_safely(self):
+        task = _task(
+            "t1",
+            acceptance_command=[
+                sys.executable,
+                "-c",
+                "import sys; sys.exit(0 if sys.argv[1] == 'has spaces' else 1)",
+                "has spaces",
+            ],
+        )
+
+        result = nsq.run_acceptance(task)
+
+        self.assertTrue(
+            result.passed,
+            "an argv element containing spaces must survive as one argument, unsplit",
+        )
 
     # -- 10. Repository isolation ------------------------------------------------
 

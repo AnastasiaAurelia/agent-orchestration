@@ -33,6 +33,22 @@ when a later, separately-approved milestone actually needs them.
 number of times a task may be claimed before a failure becomes permanent.
 It is fixed at task-authoring time and never mutated by this module.
 
+``acceptance_command`` (non-empty list of strings), ``working_dir`` (an
+existing directory path), and ``timeout_seconds`` (a positive number) are
+the task contract :func:`run_acceptance` uses to deterministically decide
+whether a task's work passed -- never the executor's own claim. All three
+are required, fixed at task-authoring time, and never mutated by this
+module. ``acceptance_command`` is always argv form; it is never assembled
+into or run through a shell.
+
+``validate_queue`` only checks the *structural* shape of these three fields
+(right types, non-empty). It deliberately does not check that
+``working_dir`` exists on disk: that is an environmental condition specific
+to whenever one particular task's acceptance is actually run, not a
+queue-wide schema property -- one task's missing directory must not make
+``validate_queue`` reject every other task in the same file.
+:func:`run_acceptance` checks it lazily, per task, at run time.
+
 Known limitation (deferred to a later, separately-approved milestone): the
 stale-lock recovery path in :func:`claim_next` returns an abandoned
 "claimed" task straight back to "pending" unconditionally -- it does not yet
@@ -174,6 +190,7 @@ import datetime
 import fcntl
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -190,6 +207,9 @@ REQUIRED_TASK_FIELDS = (
     "max_attempts",
     "claimed_pid",
     "claimed_at",
+    "acceptance_command",
+    "working_dir",
+    "timeout_seconds",
 )
 DEFAULT_STALE_THRESHOLD_SECONDS = 300
 
@@ -406,6 +426,33 @@ def validate_queue(data: Any) -> dict:
         if max_attempts < 1:
             raise MalformedQueueError(
                 f"task {task_id!r} has a non-positive 'max_attempts'"
+            )
+
+        acceptance_command = task["acceptance_command"]
+        if (
+            not isinstance(acceptance_command, list)
+            or not acceptance_command
+            or not all(isinstance(part, str) for part in acceptance_command)
+        ):
+            raise MalformedQueueError(
+                f"task {task_id!r} has an invalid 'acceptance_command' "
+                "(must be a non-empty list of strings)"
+            )
+
+        working_dir = task["working_dir"]
+        if not isinstance(working_dir, str) or not working_dir:
+            raise MalformedQueueError(
+                f"task {task_id!r} has an invalid 'working_dir' (must be a non-empty string)"
+            )
+
+        timeout_seconds = task["timeout_seconds"]
+        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
+            raise MalformedQueueError(
+                f"task {task_id!r} has a non-numeric 'timeout_seconds'"
+            )
+        if timeout_seconds <= 0:
+            raise MalformedQueueError(
+                f"task {task_id!r} has a non-positive 'timeout_seconds'"
             )
 
         claimed_pid = task["claimed_pid"]
@@ -789,6 +836,264 @@ def fail_task(
             task_id=task_id,
             message=f"unexpected OS error: {exc}",
         )
+
+
+class AcceptanceOutcome(str, Enum):
+    """Why an acceptance run did or did not pass.
+
+    All four non-passing reasons are deliberately treated identically by
+    :func:`run_acceptance_and_record`: every one of them drives fail_task(),
+    exactly like any other failed attempt. Only PASSED drives complete_task().
+    """
+
+    PASSED = "passed"
+    FAILED = "failed"
+    TIMED_OUT = "timed_out"
+    MISSING_COMMAND = "missing_command"
+    MALFORMED_CONTRACT = "malformed_contract"
+
+
+@dataclasses.dataclass(frozen=True)
+class AcceptanceResult:
+    passed: bool
+    reason: AcceptanceOutcome
+    command: tuple
+    exit_code: Optional[int]
+    stdout: str
+    stderr: str
+    started_at: Optional[str]
+    ended_at: Optional[str]
+    message: Optional[str] = None
+
+    def to_json_dict(self) -> dict:
+        return {
+            "passed": self.passed,
+            "reason": self.reason.value,
+            "command": list(self.command),
+            "exit_code": self.exit_code,
+            "stdout": self.stdout,
+            "stderr": self.stderr,
+            "started_at": self.started_at,
+            "ended_at": self.ended_at,
+            "message": self.message,
+        }
+
+
+def run_acceptance(task: dict) -> AcceptanceResult:
+    """Deterministically check one task's work: run its acceptance command.
+
+    Reads only task["acceptance_command"], task["working_dir"], and
+    task["timeout_seconds"] -- never any text the executor may have
+    written elsewhere. Exit code 0 is the only way to pass. The command is
+    always run as an argv list with shell=False, so no shell is ever
+    invoked and no string concatenation can inject anything. Evidence
+    never includes the process environment -- only argv, exit code,
+    timestamps, and whatever the command itself wrote to stdout/stderr.
+
+    Re-validates the three contract fields defensively (structurally
+    identical to validate_queue's own checks) so this function is safe to
+    call directly on any task dict, not only ones that already passed
+    validate_queue. Additionally checks that working_dir actually exists on
+    disk -- the one thing validate_queue deliberately leaves to this
+    function (see the module docstring's "Ownership contract"-adjacent note
+    on acceptance fields).
+    """
+    command = task.get("acceptance_command")
+    working_dir = task.get("working_dir")
+    timeout_seconds = task.get("timeout_seconds")
+
+    if (
+        not isinstance(command, list)
+        or not command
+        or not all(isinstance(part, str) for part in command)
+    ):
+        return AcceptanceResult(
+            passed=False,
+            reason=AcceptanceOutcome.MALFORMED_CONTRACT,
+            command=tuple(command) if isinstance(command, list) else (),
+            exit_code=None,
+            stdout="",
+            stderr="",
+            started_at=None,
+            ended_at=None,
+            message="acceptance_command must be a non-empty list of strings",
+        )
+
+    if not isinstance(working_dir, str) or not working_dir or not os.path.isdir(working_dir):
+        return AcceptanceResult(
+            passed=False,
+            reason=AcceptanceOutcome.MALFORMED_CONTRACT,
+            command=tuple(command),
+            exit_code=None,
+            stdout="",
+            stderr="",
+            started_at=None,
+            ended_at=None,
+            message=f"working_dir {working_dir!r} is not an existing directory",
+        )
+
+    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
+        return AcceptanceResult(
+            passed=False,
+            reason=AcceptanceOutcome.MALFORMED_CONTRACT,
+            command=tuple(command),
+            exit_code=None,
+            stdout="",
+            stderr="",
+            started_at=None,
+            ended_at=None,
+            message="timeout_seconds must be a positive number",
+        )
+    if timeout_seconds <= 0:
+        return AcceptanceResult(
+            passed=False,
+            reason=AcceptanceOutcome.MALFORMED_CONTRACT,
+            command=tuple(command),
+            exit_code=None,
+            stdout="",
+            stderr="",
+            started_at=None,
+            ended_at=None,
+            message="timeout_seconds must be a positive number",
+        )
+
+    started_at = _utcnow().isoformat()
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=working_dir,
+            timeout=timeout_seconds,
+            capture_output=True,
+            text=True,
+            shell=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return AcceptanceResult(
+            passed=False,
+            reason=AcceptanceOutcome.TIMED_OUT,
+            command=tuple(command),
+            exit_code=None,
+            stdout=exc.stdout or "",
+            stderr=exc.stderr or "",
+            started_at=started_at,
+            ended_at=_utcnow().isoformat(),
+            message=f"acceptance command exceeded {timeout_seconds}s timeout",
+        )
+    except OSError as exc:
+        # Covers FileNotFoundError, PermissionError, NotADirectoryError,
+        # IsADirectoryError, and any other OS-level failure to exec the
+        # command -- all are "the command could not be run", grouped under
+        # MISSING_COMMAND. TimeoutExpired is a SubprocessError, not an
+        # OSError, so it can never be caught here by mistake -- it is
+        # already handled by the except clause above this one.
+        return AcceptanceResult(
+            passed=False,
+            reason=AcceptanceOutcome.MISSING_COMMAND,
+            command=tuple(command),
+            exit_code=None,
+            stdout="",
+            stderr="",
+            started_at=started_at,
+            ended_at=_utcnow().isoformat(),
+            message=str(exc),
+        )
+
+    passed = completed.returncode == 0
+    return AcceptanceResult(
+        passed=passed,
+        reason=AcceptanceOutcome.PASSED if passed else AcceptanceOutcome.FAILED,
+        command=tuple(command),
+        exit_code=completed.returncode,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+        started_at=started_at,
+        ended_at=_utcnow().isoformat(),
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class AcceptanceRun:
+    """The full result of one run_acceptance_and_record() call."""
+
+    acceptance: AcceptanceResult
+    transition: TransitionResult
+
+    def to_json_dict(self) -> dict:
+        return {
+            "acceptance": self.acceptance.to_json_dict(),
+            "transition": self.transition.to_json_dict(),
+        }
+
+
+def run_acceptance_and_record(
+    queue_path: str,
+    task_id: str,
+    owner_pid: Optional[int] = None,
+    lock_path: Optional[str] = None,
+) -> AcceptanceRun:
+    """Run a task's acceptance command, then apply the resulting transition.
+
+    Reads the task's contract fields with a plain, unlocked read -- the
+    acceptance command can take up to timeout_seconds, and holding the
+    short-lived OS mutex for that long would block every other claim/
+    complete/fail call against this queue file. Only the final
+    complete_task()/fail_task() call (already independently lock-protected)
+    performs the actual state mutation, re-reading and re-checking
+    ownership fresh at that point -- so a task being reclaimed by someone
+    else in between is still handled safely: the transition call simply
+    returns WRONG_OWNER rather than corrupting anything.
+
+    A PASSED acceptance drives complete_task(); every other AcceptanceOutcome
+    (FAILED, TIMED_OUT, MISSING_COMMAND, MALFORMED_CONTRACT) drives
+    fail_task() identically -- from the retry state machine's point of
+    view, all four are simply "this attempt did not succeed".
+    """
+    if owner_pid is None:
+        owner_pid = os.getpid()
+
+    try:
+        data = _read_and_validate(queue_path)
+    except (json.JSONDecodeError, MalformedQueueError) as exc:
+        acceptance = AcceptanceResult(
+            passed=False,
+            reason=AcceptanceOutcome.MALFORMED_CONTRACT,
+            command=(),
+            exit_code=None,
+            stdout="",
+            stderr="",
+            started_at=None,
+            ended_at=None,
+            message=f"cannot read queue: {exc}",
+        )
+        transition = TransitionResult(
+            outcome=TransitionOutcome.MALFORMED_QUEUE, task_id=task_id, message=str(exc)
+        )
+        return AcceptanceRun(acceptance=acceptance, transition=transition)
+
+    task = _find_task(data, task_id)
+    if task is None:
+        acceptance = AcceptanceResult(
+            passed=False,
+            reason=AcceptanceOutcome.MALFORMED_CONTRACT,
+            command=(),
+            exit_code=None,
+            stdout="",
+            stderr="",
+            started_at=None,
+            ended_at=None,
+            message=f"no such task: {task_id!r}",
+        )
+        transition = TransitionResult(outcome=TransitionOutcome.TASK_NOT_FOUND, task_id=task_id)
+        return AcceptanceRun(acceptance=acceptance, transition=transition)
+
+    acceptance = run_acceptance(task)
+
+    if acceptance.passed:
+        transition = complete_task(queue_path, task_id, owner_pid=owner_pid, lock_path=lock_path)
+    else:
+        transition = fail_task(queue_path, task_id, owner_pid=owner_pid, lock_path=lock_path)
+
+    return AcceptanceRun(acceptance=acceptance, transition=transition)
 
 
 def _wait_for_sentinel(sentinel_path: str) -> None:
