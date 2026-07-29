@@ -1065,6 +1065,270 @@ class NightshiftQueueTestCase(unittest.TestCase):
         self.assertEqual(result.outcome, nsq.ExecutorOutcome.TIMED_OUT)
         self.assertIn("before-timeout", result.stdout)
 
+    # -- Milestone 5: abandoned-run recovery -------------------------------------
+
+    def test_killed_executor_owner_is_recovered(self):
+        proc = _spawn_alive_process()
+        proc.kill()
+        proc.wait(timeout=5)
+        self.assertFalse(nsq._is_pid_alive(proc.pid), "precondition: process must be dead")
+
+        old_timestamp = (datetime.now(timezone.utc) - timedelta(seconds=1000)).isoformat()
+        _write_raw_queue(
+            self.queue_path,
+            [
+                _task(
+                    "t1",
+                    status="claimed",
+                    attempt_count=1,
+                    max_attempts=3,
+                    claimed_pid=proc.pid,
+                    claimed_at=old_timestamp,
+                )
+            ],
+        )
+
+        result = nsq.reap_abandoned_tasks(self.queue_path, stale_threshold_seconds=1)
+
+        self.assertEqual(result.outcome, nsq.ReapOutcome.RECOVERED)
+        self.assertEqual(result.requeued_task_ids, ("t1",))
+        self.assertEqual(result.failed_task_ids, ())
+        with open(self.queue_path, encoding="utf-8") as f:
+            data = nsq.validate_queue(json.load(f))
+        self.assertEqual(data["tasks"][0]["status"], "pending")
+
+    def test_active_executor_owner_is_not_reaped(self):
+        alive_proc = _spawn_alive_process()
+        self._live_procs.append(alive_proc)
+
+        _write_raw_queue(
+            self.queue_path,
+            [
+                _task(
+                    "t1",
+                    status="claimed",
+                    attempt_count=1,
+                    claimed_pid=alive_proc.pid,
+                    claimed_at=datetime.now(timezone.utc).isoformat(),
+                )
+            ],
+        )
+        before = _read_raw_bytes(self.queue_path)
+
+        result = nsq.reap_abandoned_tasks(self.queue_path, stale_threshold_seconds=300)
+
+        self.assertEqual(result.outcome, nsq.ReapOutcome.NOTHING_TO_REAP)
+        after = _read_raw_bytes(self.queue_path)
+        self.assertEqual(before, after, "an active owner's claim must never be touched")
+
+    def test_dead_but_fresh_executor_owner_is_not_reaped_early(self):
+        dead_pid = _spawn_and_reap_dead_pid()
+
+        _write_raw_queue(
+            self.queue_path,
+            [
+                _task(
+                    "t1",
+                    status="claimed",
+                    attempt_count=1,
+                    claimed_pid=dead_pid,
+                    claimed_at=datetime.now(timezone.utc).isoformat(),  # fresh
+                )
+            ],
+        )
+        before = _read_raw_bytes(self.queue_path)
+
+        result = nsq.reap_abandoned_tasks(self.queue_path, stale_threshold_seconds=3600)
+
+        self.assertEqual(result.outcome, nsq.ReapOutcome.NOTHING_TO_REAP)
+        after = _read_raw_bytes(self.queue_path)
+        self.assertEqual(before, after)
+
+    def test_dead_stale_executor_owner_is_recovered(self):
+        dead_pid = _spawn_and_reap_dead_pid()
+        old_timestamp = (datetime.now(timezone.utc) - timedelta(seconds=1000)).isoformat()
+        _write_raw_queue(
+            self.queue_path,
+            [
+                _task(
+                    "t1",
+                    status="claimed",
+                    attempt_count=1,
+                    max_attempts=5,
+                    claimed_pid=dead_pid,
+                    claimed_at=old_timestamp,
+                )
+            ],
+        )
+
+        result = nsq.reap_abandoned_tasks(self.queue_path, stale_threshold_seconds=1)
+
+        self.assertEqual(result.outcome, nsq.ReapOutcome.RECOVERED)
+        self.assertEqual(result.requeued_task_ids, ("t1",))
+        with open(self.queue_path, encoding="utf-8") as f:
+            data = nsq.validate_queue(json.load(f))
+        task = data["tasks"][0]
+        self.assertEqual(task["status"], "pending")
+        self.assertIsNone(task["claimed_pid"])
+        self.assertIsNone(task["claimed_at"])
+
+    def test_retry_limit_is_respected_during_abandoned_run_recovery(self):
+        dead_pid = _spawn_and_reap_dead_pid()
+        old_timestamp = (datetime.now(timezone.utc) - timedelta(seconds=1000)).isoformat()
+        _write_raw_queue(
+            self.queue_path,
+            [
+                _task(
+                    "t1",
+                    status="claimed",
+                    attempt_count=2,
+                    max_attempts=2,  # already at the limit
+                    claimed_pid=dead_pid,
+                    claimed_at=old_timestamp,
+                )
+            ],
+        )
+
+        result = nsq.reap_abandoned_tasks(self.queue_path, stale_threshold_seconds=1)
+
+        self.assertEqual(result.outcome, nsq.ReapOutcome.RECOVERED)
+        self.assertEqual(
+            result.failed_task_ids,
+            ("t1",),
+            "a task abandoned at its retry limit must be recovered to 'failed', not 'pending'",
+        )
+        self.assertEqual(result.requeued_task_ids, ())
+        with open(self.queue_path, encoding="utf-8") as f:
+            data = nsq.validate_queue(json.load(f))
+        task = data["tasks"][0]
+        self.assertEqual(task["status"], "failed")
+        self.assertIsNone(task["claimed_pid"])
+        self.assertIsNone(task["claimed_at"])
+
+        # Confirms the queue is not permanently blocked: claim_next() must
+        # still work normally afterward (nothing left claimable here, but
+        # the call itself must complete cleanly, not error).
+        claim = nsq.claim_next(self.queue_path)
+        self.assertEqual(claim.outcome, nsq.ClaimOutcome.NO_PENDING_TASK)
+
+    def test_recovery_with_nothing_abandoned_is_a_clean_no_op(self):
+        _write_raw_queue(self.queue_path, [_task("t1", status="pending")])
+        before = _read_raw_bytes(self.queue_path)
+
+        result = nsq.reap_abandoned_tasks(self.queue_path, stale_threshold_seconds=300)
+
+        self.assertEqual(result.outcome, nsq.ReapOutcome.NOTHING_TO_REAP)
+        self.assertEqual(result.requeued_task_ids, ())
+        self.assertEqual(result.failed_task_ids, ())
+        after = _read_raw_bytes(self.queue_path)
+        self.assertEqual(before, after)
+
+    def test_recovery_on_malformed_queue_is_rejected_and_leaves_queue_unchanged(self):
+        with open(self.queue_path, "w", encoding="utf-8") as f:
+            f.write("{not valid json for reap either")
+        before = _read_raw_bytes(self.queue_path)
+
+        result = nsq.reap_abandoned_tasks(self.queue_path, stale_threshold_seconds=300)
+
+        self.assertEqual(result.outcome, nsq.ReapOutcome.MALFORMED_QUEUE)
+        after = _read_raw_bytes(self.queue_path)
+        self.assertEqual(before, after)
+
+    def test_concurrent_reap_and_completion_produce_one_valid_terminal_transition(self):
+        alive_proc = _spawn_alive_process()
+        self._live_procs.append(alive_proc)
+
+        _write_raw_queue(
+            self.queue_path,
+            [
+                _task(
+                    "t1",
+                    status="claimed",
+                    attempt_count=1,
+                    claimed_pid=alive_proc.pid,
+                    claimed_at=datetime.now(timezone.utc).isoformat(),
+                )
+            ],
+        )
+
+        sentinel_path = os.path.join(self.tmpdir, "start.sentinel")
+        complete_out = os.path.join(self.tmpdir, "complete.json")
+        reap_out = os.path.join(self.tmpdir, "reap.json")
+
+        complete_f = open(complete_out, "w", encoding="utf-8")
+        complete_proc = subprocess.Popen(
+            [
+                sys.executable, "-m", "nightshift.runtime.queue", "complete",
+                self.queue_path, "t1", "--owner-pid", str(alive_proc.pid),
+                "--wait-for", sentinel_path,
+            ],
+            cwd=REPO_ROOT, stdout=complete_f, stderr=subprocess.DEVNULL,
+        )
+        reap_f = open(reap_out, "w", encoding="utf-8")
+        reap_proc = subprocess.Popen(
+            [
+                sys.executable, "-m", "nightshift.runtime.queue", "reap",
+                self.queue_path, "--stale-threshold", "0",
+                "--wait-for", sentinel_path,
+            ],
+            cwd=REPO_ROOT, stdout=reap_f, stderr=subprocess.DEVNULL,
+        )
+        self._live_procs.extend([complete_proc, reap_proc])
+
+        time.sleep(0.2)
+        with open(sentinel_path, "w", encoding="utf-8") as f:
+            f.write("go")
+
+        complete_proc.wait(timeout=10)
+        complete_f.close()
+        reap_proc.wait(timeout=10)
+        reap_f.close()
+
+        with open(complete_out, encoding="utf-8") as f:
+            complete_result = json.loads(f.read())
+        with open(reap_out, encoding="utf-8") as f:
+            reap_result = json.loads(f.read())
+
+        self.assertIn(
+            reap_result["outcome"],
+            ("nothing_to_reap", "lock_busy"),
+            "reap must never recover an actively-owned claim -- 'recovered' would mean it stole it",
+        )
+
+        # The very first completion attempt can legitimately lose the
+        # non-blocking OS-mutex race to reap -- that's the same lock_busy
+        # contract every operation in this module has (see Milestone 1's
+        # concurrent-claim test: which named process wins the mutex is a
+        # race, never assumed). A real caller retries on lock_busy; do the
+        # same here rather than assuming a single bare attempt must win.
+        attempts = [complete_result]
+        retries = 0
+        while complete_result["outcome"] == "lock_busy" and retries < 20:
+            completed = subprocess.run(
+                [
+                    sys.executable, "-m", "nightshift.runtime.queue", "complete",
+                    self.queue_path, "t1", "--owner-pid", str(alive_proc.pid),
+                ],
+                cwd=REPO_ROOT, capture_output=True, text=True, timeout=10,
+            )
+            complete_result = json.loads(completed.stdout)
+            attempts.append(complete_result)
+            retries += 1
+
+        self.assertEqual(
+            complete_result["outcome"],
+            "done",
+            f"completion must succeed once retried past transient lock contention; attempts={attempts}",
+        )
+
+        with open(self.queue_path, encoding="utf-8") as f:
+            data = nsq.validate_queue(json.load(f))
+        self.assertEqual(
+            data["tasks"][0]["status"],
+            "done",
+            "the live, legitimate completion must win -- reap must never steal an active run",
+        )
+
     # -- 10. Repository isolation ------------------------------------------------
 
     def test_state_lives_only_in_a_temporary_directory_outside_the_repository(self):

@@ -60,15 +60,19 @@ queue-wide schema property -- one task's missing directory must not make
 ``validate_queue`` reject every other task in the same file.
 :func:`run_acceptance` checks it lazily, per task, at run time.
 
-Known limitation (deferred to a later, separately-approved milestone): the
-stale-lock recovery path in :func:`claim_next` returns an abandoned
-"claimed" task straight back to "pending" unconditionally -- it does not yet
-compare ``attempt_count`` to ``max_attempts``. An abandoned task recovered
-that way can therefore be claimed again even past its retry ceiling. This is
-deliberate: teaching abandoned-run recovery about retry limits is scoped to
-the crash/abandoned-run recovery milestone, not this one, and adding that
-check here without also fixing the recovery path would let recovery write a
-queue state this module's own validator would then reject on the next read.
+Abandoned-run recovery: both :func:`claim_next` (as a side effect of looking
+for work) and the standalone :func:`reap_abandoned_tasks` (for recovery on
+its own, independent of claiming) share the same retry-aware decision via
+``_recover_abandoned_claims``: a "claimed" task whose owner PID is dead and
+whose ``claimed_at`` age exceeds the caller's stale threshold is recovered
+to "pending" if ``attempt_count < max_attempts`` (claimable again), or
+straight to "failed" if not (it already used its last attempt while
+unsupervised, and must never be handed out again). A live claim, and a dead
+claim that has not yet exceeded the stale threshold, are both left
+untouched either way. Because recovery is retry-aware, ``validate_queue``
+also enforces ``attempt_count < max_attempts`` whenever status is
+"pending" -- a "pending" task that already exhausted its attempts can no
+longer occur, from any code path in this module.
 
 ``claimed_pid`` / ``claimed_at`` are the *persistent claim metadata*: who
 claimed a task and when. They are written into the canonical file and
@@ -330,6 +334,7 @@ class ClaimResult:
     task_id: Optional[str] = None
     attempt_count: Optional[int] = None
     recovered_stale_task_ids: tuple = ()
+    recovered_failed_task_ids: tuple = ()
     blocking_task_id: Optional[str] = None
     message: Optional[str] = None
 
@@ -339,6 +344,7 @@ class ClaimResult:
             "task_id": self.task_id,
             "attempt_count": self.attempt_count,
             "recovered_stale_task_ids": list(self.recovered_stale_task_ids),
+            "recovered_failed_task_ids": list(self.recovered_failed_task_ids),
             "blocking_task_id": self.blocking_task_id,
             "message": self.message,
         }
@@ -440,6 +446,11 @@ def validate_queue(data: Any) -> dict:
         if max_attempts < 1:
             raise MalformedQueueError(
                 f"task {task_id!r} has a non-positive 'max_attempts'"
+            )
+        if status == "pending" and attempt_count >= max_attempts:
+            raise MalformedQueueError(
+                f"task {task_id!r} is 'pending' but attempt_count ({attempt_count}) "
+                f"already reached max_attempts ({max_attempts})"
             )
 
         acceptance_command = task["acceptance_command"]
@@ -605,6 +616,46 @@ def _find_task(data: dict, task_id: str) -> Optional[dict]:
     return None
 
 
+def _recover_abandoned_claims(tasks: list, now: datetime.datetime, stale_threshold_seconds: int):
+    """Mutate ``tasks`` in place, recovering abandoned "claimed" entries.
+
+    Shared by claim_next() and reap_abandoned_tasks() so the retry-aware
+    decision lives in exactly one place. A task is only ever touched here
+    if its recorded PID is confirmed dead AND its claimed_at age exceeds
+    stale_threshold_seconds -- a live claim, or a dead-but-not-yet-stale
+    claim, is left completely untouched either way.
+
+    Returns (requeued_ids, failed_ids, blocking_task_id):
+      - requeued_ids: recovered to "pending" (attempt_count < max_attempts)
+      - failed_ids: recovered straight to "failed" (already at the limit)
+      - blocking_task_id: the first task left untouched because it is
+        still live or not yet stale (None if there was none)
+    """
+    requeued_ids = []
+    failed_ids = []
+    blocking_task_id = None
+
+    for task in tasks:
+        if task["status"] != "claimed":
+            continue
+        pid = task["claimed_pid"]
+        claimed_at = _parse_timestamp(task["claimed_at"])
+        age_seconds = (now - claimed_at).total_seconds()
+        if not _is_pid_alive(pid) and age_seconds > stale_threshold_seconds:
+            if task["attempt_count"] >= task["max_attempts"]:
+                task["status"] = "failed"
+                failed_ids.append(task["id"])
+            else:
+                task["status"] = "pending"
+                requeued_ids.append(task["id"])
+            task["claimed_pid"] = None
+            task["claimed_at"] = None
+        elif blocking_task_id is None:
+            blocking_task_id = task["id"]
+
+    return requeued_ids, failed_ids, blocking_task_id
+
+
 def claim_next(
     queue_path: str,
     stale_threshold_seconds: int = DEFAULT_STALE_THRESHOLD_SECONDS,
@@ -613,10 +664,12 @@ def claim_next(
 ) -> ClaimResult:
     """Atomically claim exactly one pending task from ``queue_path``.
 
-    Recovers any stale claim (dead PID, age past ``stale_threshold_seconds``)
-    back to "pending" as part of the same locked pass before selecting a
-    candidate to claim. Never touches a live claim or a dead-but-not-yet-
-    stale claim.
+    Recovers any abandoned "claimed" task (dead PID, age past
+    ``stale_threshold_seconds``) as part of the same locked pass before
+    selecting a candidate to claim, via the same retry-aware logic
+    ``reap_abandoned_tasks`` uses on its own -- see
+    ``_recover_abandoned_claims``. Never touches a live claim or a
+    dead-but-not-yet-stale claim.
     """
     if lock_path is None:
         lock_path = queue_path + ".lock"
@@ -635,22 +688,9 @@ def claim_next(
 
             now = _utcnow()
             tasks = data["tasks"]
-            recovered_ids = []
-            blocking_task_id = None
-
-            for task in tasks:
-                if task["status"] != "claimed":
-                    continue
-                pid = task["claimed_pid"]
-                claimed_at = _parse_timestamp(task["claimed_at"])
-                age_seconds = (now - claimed_at).total_seconds()
-                if not _is_pid_alive(pid) and age_seconds > stale_threshold_seconds:
-                    task["status"] = "pending"
-                    task["claimed_pid"] = None
-                    task["claimed_at"] = None
-                    recovered_ids.append(task["id"])
-                elif blocking_task_id is None:
-                    blocking_task_id = task["id"]
+            requeued_ids, failed_ids, blocking_task_id = _recover_abandoned_claims(
+                tasks, now, stale_threshold_seconds
+            )
 
             claimed_task = None
             for task in tasks:
@@ -659,10 +699,19 @@ def claim_next(
                     break
 
             if claimed_task is None:
-                # A recovered task is marked "pending" in `tasks` above, so
-                # the loop just before this can only fail to find one when
-                # recovered_ids is empty too -- nothing was mutated, so no
-                # write is needed here.
+                # A requeued task is marked "pending" in `tasks` above, so
+                # this loop can only fail to find one when requeued_ids is
+                # also empty -- but a task recovered straight to "failed"
+                # never becomes "pending", so failed_ids alone can still
+                # mean something was mutated even with nothing to claim.
+                if failed_ids:
+                    try:
+                        _atomic_write(queue_path, data)
+                    except OSError as exc:
+                        return ClaimResult(
+                            outcome=ClaimOutcome.INTERNAL_FAILURE,
+                            message=f"write failed: {exc}",
+                        )
                 outcome = (
                     ClaimOutcome.LOCK_HELD
                     if blocking_task_id is not None
@@ -670,7 +719,8 @@ def claim_next(
                 )
                 return ClaimResult(
                     outcome=outcome,
-                    recovered_stale_task_ids=tuple(recovered_ids),
+                    recovered_stale_task_ids=tuple(requeued_ids),
+                    recovered_failed_task_ids=tuple(failed_ids),
                     blocking_task_id=blocking_task_id,
                 )
 
@@ -691,7 +741,8 @@ def claim_next(
                 outcome=ClaimOutcome.CLAIMED,
                 task_id=claimed_task["id"],
                 attempt_count=claimed_task["attempt_count"],
-                recovered_stale_task_ids=tuple(recovered_ids),
+                recovered_stale_task_ids=tuple(requeued_ids),
+                recovered_failed_task_ids=tuple(failed_ids),
             )
     except _LockBusyError:
         return ClaimResult(
@@ -872,6 +923,103 @@ def fail_task(
             outcome=TransitionOutcome.INTERNAL_FAILURE,
             task_id=task_id,
             message=f"unexpected OS error: {exc}",
+        )
+
+
+class ReapOutcome(str, Enum):
+    """Outcome of one reap_abandoned_tasks() call.
+
+    ``RECOVERED``
+        At least one abandoned task's ownership changed -- see
+        requeued_task_ids / failed_task_ids on the result for which.
+
+    ``NOTHING_TO_REAP``
+        The queue is valid and nothing needed recovering: no "claimed"
+        task was both dead and past the stale threshold. A live claim or a
+        dead-but-not-yet-stale claim is not an error, just nothing to do.
+
+    ``LOCK_BUSY`` / ``MALFORMED_QUEUE`` / ``INTERNAL_FAILURE``
+        Same meaning as the identically-named ClaimOutcome values.
+    """
+
+    RECOVERED = "recovered"
+    NOTHING_TO_REAP = "nothing_to_reap"
+    LOCK_BUSY = "lock_busy"
+    MALFORMED_QUEUE = "malformed_queue"
+    INTERNAL_FAILURE = "internal_failure"
+
+
+@dataclasses.dataclass(frozen=True)
+class ReapResult:
+    outcome: ReapOutcome
+    requeued_task_ids: tuple = ()
+    failed_task_ids: tuple = ()
+    message: Optional[str] = None
+
+    def to_json_dict(self) -> dict:
+        return {
+            "outcome": self.outcome.value,
+            "requeued_task_ids": list(self.requeued_task_ids),
+            "failed_task_ids": list(self.failed_task_ids),
+            "message": self.message,
+        }
+
+
+def reap_abandoned_tasks(
+    queue_path: str,
+    stale_threshold_seconds: int = DEFAULT_STALE_THRESHOLD_SECONDS,
+    lock_path: Optional[str] = None,
+) -> ReapResult:
+    """Recover abandoned "claimed" tasks without attempting to claim work.
+
+    Applies the exact same dead-PID + staleness-threshold + retry-limit
+    decision claim_next() applies as a side effect of looking for work (see
+    _recover_abandoned_claims) -- this function exists so recovery can be
+    triggered on its own, independent of claiming, e.g. by a periodic health
+    check. Never steals a live claim or a dead-but-not-yet-stale claim.
+    Atomic and lock-protected exactly like every other mutating operation
+    in this module: a malformed queue or a busy OS mutex leaves the
+    canonical file provably untouched.
+    """
+    if lock_path is None:
+        lock_path = queue_path + ".lock"
+
+    try:
+        with _os_lock(lock_path):
+            try:
+                data = _read_and_validate(queue_path)
+            except (json.JSONDecodeError, MalformedQueueError) as exc:
+                return ReapResult(outcome=ReapOutcome.MALFORMED_QUEUE, message=str(exc))
+
+            now = _utcnow()
+            tasks = data["tasks"]
+            requeued_ids, failed_ids, _blocking_task_id = _recover_abandoned_claims(
+                tasks, now, stale_threshold_seconds
+            )
+
+            if not requeued_ids and not failed_ids:
+                return ReapResult(outcome=ReapOutcome.NOTHING_TO_REAP)
+
+            try:
+                _atomic_write(queue_path, data)
+            except OSError as exc:
+                return ReapResult(
+                    outcome=ReapOutcome.INTERNAL_FAILURE, message=f"write failed: {exc}"
+                )
+
+            return ReapResult(
+                outcome=ReapOutcome.RECOVERED,
+                requeued_task_ids=tuple(requeued_ids),
+                failed_task_ids=tuple(failed_ids),
+            )
+    except _LockBusyError:
+        return ReapResult(
+            outcome=ReapOutcome.LOCK_BUSY,
+            message="the short-lived OS mutex for this queue is held by another process",
+        )
+    except OSError as exc:
+        return ReapResult(
+            outcome=ReapOutcome.INTERNAL_FAILURE, message=f"unexpected OS error: {exc}"
         )
 
 
@@ -1408,7 +1556,8 @@ def main(argv=None) -> int:
     """CLI entry point.
 
     Subcommands: `claim <queue_path>`, `complete <queue_path> <task_id>
-    [--owner-pid PID]`, `fail <queue_path> <task_id> [--owner-pid PID]`.
+    [--owner-pid PID]`, `fail <queue_path> <task_id> [--owner-pid PID]`,
+    `reap <queue_path> [--stale-threshold SECONDS]`.
 
     This is a debug/test interface, not a durable ownership mechanism: it
     records its own PID (or an explicitly passed ``--owner-pid``) as the
@@ -1451,6 +1600,16 @@ def main(argv=None) -> int:
     fail_parser.add_argument("--owner-pid", type=int, default=None, dest="owner_pid")
     fail_parser.add_argument("--wait-for", dest="wait_for", default=None)
 
+    reap_parser = sub.add_parser("reap")
+    reap_parser.add_argument("queue_path")
+    reap_parser.add_argument(
+        "--stale-threshold",
+        type=int,
+        default=DEFAULT_STALE_THRESHOLD_SECONDS,
+        dest="stale_threshold_seconds",
+    )
+    reap_parser.add_argument("--wait-for", dest="wait_for", default=None)
+
     args = parser.parse_args(argv)
 
     if args.command == "claim":
@@ -1474,6 +1633,15 @@ def main(argv=None) -> int:
         if args.wait_for:
             _wait_for_sentinel(args.wait_for)
         result = fail_task(args.queue_path, args.task_id, owner_pid=args.owner_pid)
+        print(json.dumps(result.to_json_dict()))
+        return 0
+
+    if args.command == "reap":
+        if args.wait_for:
+            _wait_for_sentinel(args.wait_for)
+        result = reap_abandoned_tasks(
+            args.queue_path, stale_threshold_seconds=args.stale_threshold_seconds
+        )
         print(json.dumps(result.to_json_dict()))
         return 0
 
