@@ -39,14 +39,18 @@ def _task(
     acceptance_command=None,
     working_dir=None,
     timeout_seconds=5,
+    executor_command=None,
+    executor_timeout_seconds=5,
 ):
-    # Defaults are a trivially-passing command and an always-existing
-    # directory, so Milestone 1/2 tests (which don't care about acceptance
-    # at all) don't need to supply a real contract.
+    # Defaults are trivially-passing commands and an always-existing
+    # directory, so Milestone 1/2/3 tests (which don't care about executor
+    # or acceptance specifics) don't need to supply a real contract.
     if acceptance_command is None:
         acceptance_command = [sys.executable, "-c", "pass"]
     if working_dir is None:
         working_dir = tempfile.gettempdir()
+    if executor_command is None:
+        executor_command = [sys.executable, "-c", "pass"]
     return {
         "id": task_id,
         "status": status,
@@ -55,6 +59,8 @@ def _task(
         "max_attempts": max_attempts,
         "claimed_pid": claimed_pid,
         "claimed_at": claimed_at,
+        "executor_command": executor_command,
+        "executor_timeout_seconds": executor_timeout_seconds,
         "acceptance_command": acceptance_command,
         "working_dir": working_dir,
         "timeout_seconds": timeout_seconds,
@@ -127,6 +133,27 @@ def _wait_for_path(path, timeout=10):
         if time.monotonic() > deadline:
             raise TimeoutError(f"{path} never appeared within {timeout}s")
         time.sleep(0.001)
+
+
+def _wait_until_pid_dead(pid, timeout=2.0):
+    """Poll until a PID is truly gone, not merely a killed-but-unreaped zombie.
+
+    SIGKILL terminates a process immediately, but if its parent dies in the
+    same stroke (as happens here: the direct child and any grandchild it
+    spawned are both killed by the same process-group signal), the
+    grandchild becomes an orphaned zombie until the kernel reparents it to
+    init/a subreaper and reaps it. A zombie still occupies a PID slot, so
+    os.kill(pid, 0) keeps succeeding until that reap actually happens --
+    this is standard POSIX behavior, not a bug in the kill itself. Polling
+    briefly for that to settle is the correct check, not a flakiness
+    workaround.
+    """
+    deadline = time.monotonic() + timeout
+    while nsq._is_pid_alive(pid):
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.01)
+    return True
 
 
 class NightshiftQueueTestCase(unittest.TestCase):
@@ -873,6 +900,170 @@ class NightshiftQueueTestCase(unittest.TestCase):
             result.passed,
             "an argv element containing spaces must survive as one argument, unsplit",
         )
+
+    # -- Milestone 4A: bounded executor process ----------------------------------
+
+    def test_successful_executor_followed_by_passing_acceptance(self):
+        _write_raw_queue(
+            self.queue_path,
+            [
+                _task(
+                    "t1",
+                    attempt_count=0,
+                    working_dir=self.tmpdir,
+                    executor_command=[sys.executable, "-c", "open('marker.txt', 'w').close()"],
+                    acceptance_command=[
+                        sys.executable,
+                        "-c",
+                        "import os, sys; sys.exit(0 if os.path.exists('marker.txt') else 1)",
+                    ],
+                )
+            ],
+        )
+        claim = nsq.claim_next(self.queue_path, claimant_pid=os.getpid())
+        self.assertEqual(claim.outcome, nsq.ClaimOutcome.CLAIMED)
+
+        run = nsq.run_task(self.queue_path, "t1", owner_pid=os.getpid())
+
+        self.assertEqual(run.executor.outcome, nsq.ExecutorOutcome.COMPLETED)
+        self.assertEqual(run.executor.exit_code, 0)
+        self.assertIsNotNone(run.executor.pid)
+        self.assertTrue(run.acceptance_run.acceptance.passed)
+        self.assertEqual(run.acceptance_run.transition.outcome, nsq.TransitionOutcome.DONE)
+        self.assertTrue(os.path.exists(os.path.join(self.tmpdir, "marker.txt")))
+
+    def test_executor_nonzero_exit_does_not_prevent_acceptance_from_running(self):
+        _write_raw_queue(
+            self.queue_path,
+            [
+                _task(
+                    "t1",
+                    attempt_count=0,
+                    working_dir=self.tmpdir,
+                    executor_command=[sys.executable, "-c", "import sys; sys.exit(1)"],
+                    acceptance_command=[sys.executable, "-c", "pass"],
+                )
+            ],
+        )
+        claim = nsq.claim_next(self.queue_path, claimant_pid=os.getpid())
+        self.assertEqual(claim.outcome, nsq.ClaimOutcome.CLAIMED)
+
+        run = nsq.run_task(self.queue_path, "t1", owner_pid=os.getpid())
+
+        self.assertEqual(run.executor.outcome, nsq.ExecutorOutcome.COMPLETED)
+        self.assertEqual(run.executor.exit_code, 1)
+        self.assertTrue(
+            run.acceptance_run.acceptance.passed,
+            "acceptance must still run and be judged on its own merits, "
+            "independent of the executor's own exit code",
+        )
+        self.assertEqual(run.acceptance_run.transition.outcome, nsq.TransitionOutcome.DONE)
+
+    def test_executor_times_out(self):
+        task = _task(
+            "t1",
+            working_dir=self.tmpdir,
+            executor_command=[sys.executable, "-c", "import time; time.sleep(30)"],
+            executor_timeout_seconds=1,
+        )
+
+        result = nsq.run_executor(task)
+
+        self.assertEqual(result.outcome, nsq.ExecutorOutcome.TIMED_OUT)
+        self.assertIsNotNone(result.pid)
+
+    def test_child_process_is_cleaned_up_after_timeout(self):
+        task = _task(
+            "t1",
+            working_dir=self.tmpdir,
+            executor_command=[sys.executable, "-c", "import time; time.sleep(30)"],
+            executor_timeout_seconds=1,
+        )
+
+        result = nsq.run_executor(task)
+
+        self.assertEqual(result.outcome, nsq.ExecutorOutcome.TIMED_OUT)
+        self.assertFalse(
+            nsq._is_pid_alive(result.pid),
+            "the direct child must already be reaped by the time run_executor returns",
+        )
+
+    def test_child_spawned_subprocess_is_also_cleaned_up(self):
+        grandchild_pid_file = os.path.join(self.tmpdir, "grandchild_pid.txt")
+        executor_script = (
+            "import subprocess, sys, time\n"
+            "gc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+            f"with open({grandchild_pid_file!r}, 'w') as f:\n"
+            "    f.write(str(gc.pid))\n"
+            "time.sleep(30)\n"
+        )
+        task = _task(
+            "t1",
+            working_dir=self.tmpdir,
+            executor_command=[sys.executable, "-c", executor_script],
+            executor_timeout_seconds=2,
+        )
+
+        result = nsq.run_executor(task)
+
+        self.assertEqual(result.outcome, nsq.ExecutorOutcome.TIMED_OUT)
+        with open(grandchild_pid_file, encoding="utf-8") as f:
+            grandchild_pid = int(f.read().strip())
+        self.assertFalse(nsq._is_pid_alive(result.pid), "the direct child must be dead")
+        self.assertTrue(
+            _wait_until_pid_dead(grandchild_pid),
+            "a grandchild spawned by the executor must also die from the "
+            "process-group kill, not just the direct child (allowing brief "
+            "time for the kernel to reap the orphaned zombie)",
+        )
+
+    def test_missing_executable_fails_cleanly(self):
+        task = _task(
+            "t1", executor_command=["/path/does/not/exist/nightshift-fixture-binary"]
+        )
+
+        result = nsq.run_executor(task)
+
+        self.assertEqual(result.outcome, nsq.ExecutorOutcome.MISSING_EXECUTABLE)
+        self.assertIsNone(result.pid)
+        self.assertIsNone(result.exit_code)
+
+    def test_working_directory_boundary_is_respected(self):
+        task = _task(
+            "t1",
+            working_dir=self.tmpdir,
+            executor_command=[
+                sys.executable,
+                "-c",
+                "import os; open('cwd_marker.txt', 'w').write(os.getcwd())",
+            ],
+        )
+
+        result = nsq.run_executor(task)
+
+        self.assertEqual(result.outcome, nsq.ExecutorOutcome.COMPLETED)
+        marker_path = os.path.join(self.tmpdir, "cwd_marker.txt")
+        self.assertTrue(os.path.exists(marker_path), "executor must have run with cwd=working_dir")
+        with open(marker_path, encoding="utf-8") as f:
+            recorded_cwd = f.read()
+        self.assertEqual(os.path.realpath(recorded_cwd), os.path.realpath(self.tmpdir))
+
+    def test_output_evidence_is_retained_even_on_timeout(self):
+        task = _task(
+            "t1",
+            working_dir=self.tmpdir,
+            executor_command=[
+                sys.executable,
+                "-c",
+                "import sys, time; print('before-timeout'); sys.stdout.flush(); time.sleep(30)",
+            ],
+            executor_timeout_seconds=1,
+        )
+
+        result = nsq.run_executor(task)
+
+        self.assertEqual(result.outcome, nsq.ExecutorOutcome.TIMED_OUT)
+        self.assertIn("before-timeout", result.stdout)
 
     # -- 10. Repository isolation ------------------------------------------------
 

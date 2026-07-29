@@ -41,6 +41,17 @@ are required, fixed at task-authoring time, and never mutated by this
 module. ``acceptance_command`` is always argv form; it is never assembled
 into or run through a shell.
 
+``executor_command`` (non-empty list of strings) and
+``executor_timeout_seconds`` (a positive number) are the bounded work
+command :func:`run_executor` launches, sharing the same ``working_dir`` as
+acceptance (acceptance checks what the executor left behind there).
+``timeout_seconds`` bounds the *acceptance* command specifically;
+``executor_timeout_seconds`` bounds the *executor* command specifically --
+they are deliberately separate fields, since the two phases can need very
+different time budgets. The executor's own exit code is never authoritative
+-- :func:`run_task` always runs acceptance afterward regardless of it,
+exactly like every other part of this design defers to acceptance alone.
+
 ``validate_queue`` only checks the *structural* shape of these three fields
 (right types, non-empty). It deliberately does not check that
 ``working_dir`` exists on disk: that is an environmental condition specific
@@ -190,6 +201,7 @@ import datetime
 import fcntl
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -210,6 +222,8 @@ REQUIRED_TASK_FIELDS = (
     "acceptance_command",
     "working_dir",
     "timeout_seconds",
+    "executor_command",
+    "executor_timeout_seconds",
 )
 DEFAULT_STALE_THRESHOLD_SECONDS = 300
 
@@ -453,6 +467,29 @@ def validate_queue(data: Any) -> dict:
         if timeout_seconds <= 0:
             raise MalformedQueueError(
                 f"task {task_id!r} has a non-positive 'timeout_seconds'"
+            )
+
+        executor_command = task["executor_command"]
+        if (
+            not isinstance(executor_command, list)
+            or not executor_command
+            or not all(isinstance(part, str) for part in executor_command)
+        ):
+            raise MalformedQueueError(
+                f"task {task_id!r} has an invalid 'executor_command' "
+                "(must be a non-empty list of strings)"
+            )
+
+        executor_timeout_seconds = task["executor_timeout_seconds"]
+        if isinstance(executor_timeout_seconds, bool) or not isinstance(
+            executor_timeout_seconds, (int, float)
+        ):
+            raise MalformedQueueError(
+                f"task {task_id!r} has a non-numeric 'executor_timeout_seconds'"
+            )
+        if executor_timeout_seconds <= 0:
+            raise MalformedQueueError(
+                f"task {task_id!r} has a non-positive 'executor_timeout_seconds'"
             )
 
         claimed_pid = task["claimed_pid"]
@@ -1094,6 +1131,272 @@ def run_acceptance_and_record(
         transition = fail_task(queue_path, task_id, owner_pid=owner_pid, lock_path=lock_path)
 
     return AcceptanceRun(acceptance=acceptance, transition=transition)
+
+
+class ExecutorOutcome(str, Enum):
+    """How the executor phase of a task run ended.
+
+    None of these values feed done/retry/failed directly -- only
+    run_acceptance()'s verdict does that. This enum exists purely to
+    describe what happened during the executor phase for evidence
+    purposes.
+    """
+
+    COMPLETED = "completed"
+    TIMED_OUT = "timed_out"
+    MISSING_EXECUTABLE = "missing_executable"
+    MALFORMED_CONTRACT = "malformed_contract"
+
+
+@dataclasses.dataclass(frozen=True)
+class ExecutorResult:
+    outcome: ExecutorOutcome
+    command: tuple
+    pid: Optional[int]
+    exit_code: Optional[int]
+    stdout: str
+    stderr: str
+    started_at: Optional[str]
+    ended_at: Optional[str]
+    message: Optional[str] = None
+
+    def to_json_dict(self) -> dict:
+        return {
+            "outcome": self.outcome.value,
+            "command": list(self.command),
+            "pid": self.pid,
+            "exit_code": self.exit_code,
+            "stdout": self.stdout,
+            "stderr": self.stderr,
+            "started_at": self.started_at,
+            "ended_at": self.ended_at,
+            "message": self.message,
+        }
+
+
+def run_executor(task: dict) -> ExecutorResult:
+    """Launch one fresh child process for task["executor_command"].
+
+    Never invokes `claude`, never touches Claude authentication, never
+    makes a network call -- it launches exactly and only whatever argv the
+    task contract names, with shell=False. Runs in its own process group
+    (POSIX setsid via start_new_session=True) so that on timeout the
+    *entire* process group -- the executor and anything it itself spawned
+    without starting its own new session -- can be killed together, not
+    just the direct child.
+
+    The executor's own exit code is captured as evidence only; it never by
+    itself decides task success. That is exclusively run_acceptance()'s job
+    (see run_task()).
+    """
+    command = task.get("executor_command")
+    working_dir = task.get("working_dir")
+    executor_timeout_seconds = task.get("executor_timeout_seconds")
+
+    if (
+        not isinstance(command, list)
+        or not command
+        or not all(isinstance(part, str) for part in command)
+    ):
+        return ExecutorResult(
+            outcome=ExecutorOutcome.MALFORMED_CONTRACT,
+            command=tuple(command) if isinstance(command, list) else (),
+            pid=None,
+            exit_code=None,
+            stdout="",
+            stderr="",
+            started_at=None,
+            ended_at=None,
+            message="executor_command must be a non-empty list of strings",
+        )
+
+    if not isinstance(working_dir, str) or not working_dir or not os.path.isdir(working_dir):
+        return ExecutorResult(
+            outcome=ExecutorOutcome.MALFORMED_CONTRACT,
+            command=tuple(command),
+            pid=None,
+            exit_code=None,
+            stdout="",
+            stderr="",
+            started_at=None,
+            ended_at=None,
+            message=f"working_dir {working_dir!r} is not an existing directory",
+        )
+
+    if isinstance(executor_timeout_seconds, bool) or not isinstance(
+        executor_timeout_seconds, (int, float)
+    ):
+        return ExecutorResult(
+            outcome=ExecutorOutcome.MALFORMED_CONTRACT,
+            command=tuple(command),
+            pid=None,
+            exit_code=None,
+            stdout="",
+            stderr="",
+            started_at=None,
+            ended_at=None,
+            message="executor_timeout_seconds must be a positive number",
+        )
+    if executor_timeout_seconds <= 0:
+        return ExecutorResult(
+            outcome=ExecutorOutcome.MALFORMED_CONTRACT,
+            command=tuple(command),
+            pid=None,
+            exit_code=None,
+            stdout="",
+            stderr="",
+            started_at=None,
+            ended_at=None,
+            message="executor_timeout_seconds must be a positive number",
+        )
+
+    started_at = _utcnow().isoformat()
+    try:
+        proc = subprocess.Popen(
+            command,
+            cwd=working_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            shell=False,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        return ExecutorResult(
+            outcome=ExecutorOutcome.MISSING_EXECUTABLE,
+            command=tuple(command),
+            pid=None,
+            exit_code=None,
+            stdout="",
+            stderr="",
+            started_at=started_at,
+            ended_at=_utcnow().isoformat(),
+            message=str(exc),
+        )
+
+    pid = proc.pid
+    try:
+        stdout, stderr = proc.communicate(timeout=executor_timeout_seconds)
+        return ExecutorResult(
+            outcome=ExecutorOutcome.COMPLETED,
+            command=tuple(command),
+            pid=pid,
+            exit_code=proc.returncode,
+            stdout=stdout,
+            stderr=stderr,
+            started_at=started_at,
+            ended_at=_utcnow().isoformat(),
+        )
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # already gone by the time we tried to kill it
+        stdout, stderr = proc.communicate()  # reap and collect whatever remains
+        return ExecutorResult(
+            outcome=ExecutorOutcome.TIMED_OUT,
+            command=tuple(command),
+            pid=pid,
+            exit_code=proc.returncode,
+            stdout=stdout,
+            stderr=stderr,
+            started_at=started_at,
+            ended_at=_utcnow().isoformat(),
+            message=f"executor exceeded {executor_timeout_seconds}s timeout",
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class TaskRun:
+    """The full result of one run_task() call: executor phase + acceptance phase."""
+
+    executor: ExecutorResult
+    acceptance_run: AcceptanceRun
+
+    def to_json_dict(self) -> dict:
+        return {
+            "executor": self.executor.to_json_dict(),
+            "acceptance_run": self.acceptance_run.to_json_dict(),
+        }
+
+
+def _short_circuit_task_run(
+    task_id: str, transition_outcome: TransitionOutcome, message: str
+) -> TaskRun:
+    """Build a TaskRun for the cases where nothing could even be attempted.
+
+    Shared by both of run_task()'s pre-flight checks (queue unreadable,
+    task not found) so the placeholder-evidence shape isn't duplicated
+    twice for what is, in both cases, "neither phase ever ran".
+    """
+    executor = ExecutorResult(
+        outcome=ExecutorOutcome.MALFORMED_CONTRACT,
+        command=(),
+        pid=None,
+        exit_code=None,
+        stdout="",
+        stderr="",
+        started_at=None,
+        ended_at=None,
+        message=message,
+    )
+    acceptance = AcceptanceResult(
+        passed=False,
+        reason=AcceptanceOutcome.MALFORMED_CONTRACT,
+        command=(),
+        exit_code=None,
+        stdout="",
+        stderr="",
+        started_at=None,
+        ended_at=None,
+        message=message,
+    )
+    transition = TransitionResult(
+        outcome=transition_outcome,
+        task_id=task_id,
+        message=message if transition_outcome == TransitionOutcome.MALFORMED_QUEUE else None,
+    )
+    return TaskRun(
+        executor=executor, acceptance_run=AcceptanceRun(acceptance=acceptance, transition=transition)
+    )
+
+
+def run_task(
+    queue_path: str,
+    task_id: str,
+    owner_pid: Optional[int] = None,
+    lock_path: Optional[str] = None,
+) -> TaskRun:
+    """Run one claimed task's executor, then always run acceptance after it.
+
+    The executor's outcome (completed with any exit code, timed out, or
+    failed to launch) never itself decides done/retry/failed -- acceptance
+    always runs afterward and is the sole authority on that, exactly as
+    run_acceptance_and_record() already enforces on its own. This function
+    only adds the executor phase in front of the unchanged Milestone 3
+    pipeline; it does not duplicate any of that pipeline's logic.
+    """
+    if owner_pid is None:
+        owner_pid = os.getpid()
+
+    try:
+        data = _read_and_validate(queue_path)
+    except (json.JSONDecodeError, MalformedQueueError) as exc:
+        return _short_circuit_task_run(
+            task_id, TransitionOutcome.MALFORMED_QUEUE, f"cannot read queue: {exc}"
+        )
+
+    task = _find_task(data, task_id)
+    if task is None:
+        return _short_circuit_task_run(
+            task_id, TransitionOutcome.TASK_NOT_FOUND, f"no such task: {task_id!r}"
+        )
+
+    executor_result = run_executor(task)
+    acceptance_run = run_acceptance_and_record(
+        queue_path, task_id, owner_pid=owner_pid, lock_path=lock_path
+    )
+    return TaskRun(executor=executor_result, acceptance_run=acceptance_run)
 
 
 def _wait_for_sentinel(sentinel_path: str) -> None:
