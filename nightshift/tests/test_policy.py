@@ -14,12 +14,30 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from nightshift.runtime import policy  # noqa: E402
+
+
+def _write_fake_executable(directory, name, script_body="#!/bin/sh\nexit 0\n"):
+    """Write a trivial, self-contained fake executable for policy tests.
+
+    policy.check_command() never actually runs the resolved executable --
+    it only resolves its path and checks argv against deny rules -- so the
+    script's body never needs to do anything real. This exists so tests
+    that require an ALLOWED outcome for an optional (not guaranteed
+    installed) tool don't depend on that tool actually being present on
+    whatever host the suite runs on.
+    """
+    path = os.path.join(directory, name)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(script_body)
+    os.chmod(path, 0o755)
+    return path
 
 
 class PolicyTestCase(unittest.TestCase):
@@ -165,22 +183,40 @@ class PolicyTestCase(unittest.TestCase):
         self.assertEqual(decision.outcome, policy.PolicyOutcome.REJECTED)
 
     def test_gh_pr_merge_and_gh_api_write_rejected(self):
-        decision = policy.check_command(
-            ["gh", "pr", "merge", "1"], self.tmpdir, policy.EXECUTOR_POLICY
-        )
-        self.assertEqual(decision.outcome, policy.PolicyOutcome.REJECTED)
+        # gh (GitHub CLI) is an optional tool -- not guaranteed installed on
+        # every host this suite runs on (e.g. a freshly isolated VPS user).
+        # A fake, PATH-prepended gh makes the ALLOWED assertion below
+        # deterministic regardless: check_command() only resolves the
+        # executable and inspects argv, it never actually runs it.
+        fake_bin_dir = os.path.join(self.tmpdir, "fake-bin")
+        os.makedirs(fake_bin_dir)
+        fake_gh = _write_fake_executable(fake_bin_dir, "gh")
 
-        decision = policy.check_command(
-            ["gh", "api", "-X", "POST", "repos/x/y/issues"], self.tmpdir, policy.EXECUTOR_POLICY
-        )
-        self.assertEqual(decision.outcome, policy.PolicyOutcome.REJECTED)
+        patched_path = fake_bin_dir + os.pathsep + os.environ.get("PATH", "")
+        with mock.patch.dict(os.environ, {"PATH": patched_path}):
+            # Confirm the fake binary is actually what gets resolved -- not
+            # a real `gh` found elsewhere on PATH -- so this test cannot
+            # silently pass for the wrong reason on a host where GitHub CLI
+            # happens to already be installed.
+            resolved = policy.resolve_executable("gh", self.tmpdir)
+            self.assertEqual(resolved, os.path.realpath(fake_gh))
 
-        # A read-only gh api call (no -X/--method, defaults to GET) is not
-        # one of the enumerated write operations.
-        decision = policy.check_command(
-            ["gh", "api", "repos/x/y"], self.tmpdir, policy.EXECUTOR_POLICY
-        )
-        self.assertEqual(decision.outcome, policy.PolicyOutcome.ALLOWED)
+            decision = policy.check_command(
+                ["gh", "pr", "merge", "1"], self.tmpdir, policy.EXECUTOR_POLICY
+            )
+            self.assertEqual(decision.outcome, policy.PolicyOutcome.REJECTED)
+
+            decision = policy.check_command(
+                ["gh", "api", "-X", "POST", "repos/x/y/issues"], self.tmpdir, policy.EXECUTOR_POLICY
+            )
+            self.assertEqual(decision.outcome, policy.PolicyOutcome.REJECTED)
+
+            # A read-only gh api call (no -X/--method, defaults to GET) is not
+            # one of the enumerated write operations.
+            decision = policy.check_command(
+                ["gh", "api", "repos/x/y"], self.tmpdir, policy.EXECUTOR_POLICY
+            )
+            self.assertEqual(decision.outcome, policy.PolicyOutcome.ALLOWED)
 
     def test_env_wrapper_rejected(self):
         decision = policy.check_command(
