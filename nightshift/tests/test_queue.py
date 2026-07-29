@@ -42,6 +42,7 @@ def _task(
     timeout_seconds=5,
     executor_command=None,
     executor_timeout_seconds=5,
+    approved_root=None,
 ):
     # Defaults are trivially-passing commands and an always-existing
     # directory, so Milestone 1/2/3 tests (which don't care about executor
@@ -52,6 +53,8 @@ def _task(
         working_dir = tempfile.gettempdir()
     if executor_command is None:
         executor_command = [sys.executable, "-c", "pass"]
+    if approved_root is None:
+        approved_root = working_dir
     return {
         "id": task_id,
         "status": status,
@@ -65,6 +68,7 @@ def _task(
         "acceptance_command": acceptance_command,
         "working_dir": working_dir,
         "timeout_seconds": timeout_seconds,
+        "approved_root": approved_root,
     }
 
 
@@ -1537,6 +1541,153 @@ class NightshiftQueueTestCase(unittest.TestCase):
             report_text = f.read()
         self.assertIn("Queue unreadable", report_text)
         self.assertIn("No runs recorded yet.", report_text)
+
+    # -- Milestone 7A: deterministic task-policy security boundary ---------------
+
+    def test_forbidden_command_never_spawns(self):
+        marker_path = os.path.join(self.tmpdir, "should-not-exist.txt")
+        task = _task(
+            "t1",
+            working_dir=self.tmpdir,
+            executor_command=["bash", "-c", f"touch {marker_path}"],
+        )
+
+        result = nsq.run_executor(task)
+
+        self.assertEqual(result.outcome, nsq.ExecutorOutcome.POLICY_REJECTED)
+        self.assertFalse(
+            os.path.exists(marker_path),
+            "a rejected command's argv must never actually execute, even indirectly",
+        )
+
+    def test_policy_rejection_is_captured_in_evidence(self):
+        task = _task("t1", working_dir=self.tmpdir, executor_command=["sudo", "ls"])
+
+        result = nsq.run_executor(task)
+
+        self.assertEqual(result.outcome, nsq.ExecutorOutcome.POLICY_REJECTED)
+        self.assertIsNotNone(result.message)
+        self.assertIn("sudo", result.message.lower())
+
+    def test_policy_rejection_enters_the_retry_flow(self):
+        _write_raw_queue(
+            self.queue_path,
+            [
+                _task(
+                    "t1",
+                    attempt_count=0,
+                    max_attempts=2,
+                    working_dir=self.tmpdir,
+                    executor_command=["sudo", "ls"],
+                )
+            ],
+        )
+        claim = nsq.claim_next(self.queue_path, claimant_pid=os.getpid())
+        self.assertEqual(claim.outcome, nsq.ClaimOutcome.CLAIMED)
+
+        run = nsq.run_task(self.queue_path, "t1", owner_pid=os.getpid())
+
+        self.assertEqual(run.executor.outcome, nsq.ExecutorOutcome.POLICY_REJECTED)
+        self.assertEqual(
+            run.acceptance_run.transition.outcome,
+            nsq.TransitionOutcome.REQUEUED,
+            "a policy-rejected executor must drive the normal retry flow, not DONE",
+        )
+        with open(self.queue_path, encoding="utf-8") as f:
+            data = nsq.validate_queue(json.load(f))
+        self.assertEqual(data["tasks"][0]["status"], "pending")
+
+    def test_policy_rejection_at_retry_limit_permanently_fails(self):
+        _write_raw_queue(
+            self.queue_path,
+            [
+                _task(
+                    "t1",
+                    attempt_count=0,
+                    max_attempts=1,
+                    working_dir=self.tmpdir,
+                    executor_command=["sudo", "ls"],
+                )
+            ],
+        )
+        claim = nsq.claim_next(self.queue_path, claimant_pid=os.getpid())
+        self.assertEqual(claim.outcome, nsq.ClaimOutcome.CLAIMED)
+
+        run = nsq.run_task(self.queue_path, "t1", owner_pid=os.getpid())
+
+        self.assertEqual(run.acceptance_run.transition.outcome, nsq.TransitionOutcome.FAILED_PERMANENTLY)
+        with open(self.queue_path, encoding="utf-8") as f:
+            data = nsq.validate_queue(json.load(f))
+        self.assertEqual(data["tasks"][0]["status"], "failed")
+
+    def test_a_trivially_passing_acceptance_command_does_not_mask_a_policy_rejected_executor(self):
+        # This is the exact gap found and fixed while implementing this
+        # milestone: without the run_task() fix, this scenario would mark
+        # the task "done" because the acceptance command (unrelated to the
+        # executor) always passes on its own.
+        _write_raw_queue(
+            self.queue_path,
+            [
+                _task(
+                    "t1",
+                    working_dir=self.tmpdir,
+                    executor_command=["sudo", "ls"],
+                    acceptance_command=[sys.executable, "-c", "pass"],
+                )
+            ],
+        )
+        nsq.claim_next(self.queue_path, claimant_pid=os.getpid())
+
+        run = nsq.run_task(self.queue_path, "t1", owner_pid=os.getpid())
+
+        self.assertNotEqual(run.acceptance_run.transition.outcome, nsq.TransitionOutcome.DONE)
+
+    def test_environment_allowlist_is_actually_applied_to_a_real_child_process(self):
+        marker_path = os.path.join(self.tmpdir, "env_dump.txt")
+        task = _task(
+            "t1",
+            working_dir=self.tmpdir,
+            executor_command=[
+                sys.executable,
+                "-c",
+                (
+                    "import os, json; "
+                    f"open({marker_path!r}, 'w').write(json.dumps(dict(os.environ)))"
+                ),
+            ],
+        )
+        os.environ["NIGHTSHIFT_TEST_SECRET_KEY"] = "must-not-appear-in-child"
+        try:
+            result = nsq.run_executor(task)
+        finally:
+            del os.environ["NIGHTSHIFT_TEST_SECRET_KEY"]
+
+        self.assertEqual(result.outcome, nsq.ExecutorOutcome.COMPLETED)
+        with open(marker_path, encoding="utf-8") as f:
+            child_env = json.loads(f.read())
+        self.assertNotIn("NIGHTSHIFT_TEST_SECRET_KEY", child_env)
+        self.assertIn("PATH", child_env)
+
+    def test_working_directory_outside_approved_root_is_rejected_end_to_end(self):
+        outside_dir = tempfile.mkdtemp(prefix="nightshift-outside-root-")
+        try:
+            task = _task(
+                "t1",
+                working_dir=outside_dir,
+                approved_root=self.tmpdir,
+            )
+            result = nsq.run_executor(task)
+            self.assertEqual(result.outcome, nsq.ExecutorOutcome.POLICY_REJECTED)
+            self.assertIn("approved_root", result.message)
+        finally:
+            shutil.rmtree(outside_dir, ignore_errors=True)
+
+    def test_malformed_policy_relevant_fields_fail_closed(self):
+        task = _task("t1", working_dir=self.tmpdir, approved_root="/path/does/not/exist")
+
+        result = nsq.run_executor(task)
+
+        self.assertEqual(result.outcome, nsq.ExecutorOutcome.POLICY_REJECTED)
 
     # -- 10. Repository isolation ------------------------------------------------
 

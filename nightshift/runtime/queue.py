@@ -56,16 +56,40 @@ acceptance (acceptance checks what the executor left behind there).
 ``executor_timeout_seconds`` bounds the *executor* command specifically --
 they are deliberately separate fields, since the two phases can need very
 different time budgets. The executor's own exit code is never authoritative
--- :func:`run_task` always runs acceptance afterward regardless of it,
-exactly like every other part of this design defers to acceptance alone.
+-- :func:`run_task` always runs acceptance afterward whenever the executor
+actually ran (COMPLETED or TIMED_OUT); if the executor never ran at all
+(MALFORMED_CONTRACT, MISSING_EXECUTABLE, or POLICY_REJECTED -- see
+"Security policy" below), :func:`run_task` fails the attempt directly
+instead, since there is nothing for acceptance to meaningfully check and a
+trivially-passing acceptance command must not paper over a task that never
+executed.
 
-``validate_queue`` only checks the *structural* shape of these three fields
+``approved_root`` (non-empty string) is the directory ``working_dir`` must
+resolve inside of -- see "Security policy" below.
+
+``validate_queue`` only checks the *structural* shape of these fields
 (right types, non-empty). It deliberately does not check that
-``working_dir`` exists on disk: that is an environmental condition specific
-to whenever one particular task's acceptance is actually run, not a
-queue-wide schema property -- one task's missing directory must not make
-``validate_queue`` reject every other task in the same file.
-:func:`run_acceptance` checks it lazily, per task, at run time.
+``working_dir``/``approved_root`` exist on disk, or that one is inside the
+other: those are environmental conditions specific to whenever one
+particular task actually runs, not a queue-wide schema property -- one
+task's bad paths must not make ``validate_queue`` reject every other task
+in the same file. :func:`nightshift.runtime.policy.validate_working_dir`
+checks it lazily, per task, at run time.
+
+Security policy
+----------------
+:mod:`nightshift.runtime.policy` is the deterministic boundary applied to
+every executor/acceptance command before it is ever launched: executable
+resolution, a denylist of dangerous operations (different lists for
+executor vs. acceptance), an environment built by allowlist from empty
+(never the full parent environment), and the ``working_dir``/
+``approved_root`` containment check. A rejection at any of these points
+produces ``ExecutorOutcome.POLICY_REJECTED`` / ``AcceptanceOutcome.
+POLICY_REJECTED`` -- the command is never launched -- and flows into
+:func:`fail_task` exactly like any other non-passing outcome. This is a
+boundary for a *trusted* task author running *generic* commands
+unattended, not a sandbox for an untrusted one; see that module's own
+docstring for the full threat model and what remains possible.
 
 Abandoned-run recovery: both :func:`claim_next` (as a side effect of looking
 for work) and the standalone :func:`reap_abandoned_tasks` (for recovery on
@@ -220,6 +244,8 @@ import time
 from enum import Enum
 from typing import Any, Optional
 
+from nightshift.runtime import policy as _policy
+
 ALLOWED_STATUSES = ("pending", "claimed", "done", "failed")
 TERMINAL_STATUSES = ("done", "failed")
 REQUIRED_TASK_FIELDS = (
@@ -235,6 +261,7 @@ REQUIRED_TASK_FIELDS = (
     "timeout_seconds",
     "executor_command",
     "executor_timeout_seconds",
+    "approved_root",
 )
 DEFAULT_STALE_THRESHOLD_SECONDS = 300
 
@@ -508,6 +535,12 @@ def validate_queue(data: Any) -> dict:
         if executor_timeout_seconds <= 0:
             raise MalformedQueueError(
                 f"task {task_id!r} has a non-positive 'executor_timeout_seconds'"
+            )
+
+        approved_root = task["approved_root"]
+        if not isinstance(approved_root, str) or not approved_root:
+            raise MalformedQueueError(
+                f"task {task_id!r} has an invalid 'approved_root' (must be a non-empty string)"
             )
 
         claimed_pid = task["claimed_pid"]
@@ -1131,7 +1164,7 @@ def reap_abandoned_tasks(
 class AcceptanceOutcome(str, Enum):
     """Why an acceptance run did or did not pass.
 
-    All four non-passing reasons are deliberately treated identically by
+    All five non-passing reasons are deliberately treated identically by
     :func:`run_acceptance_and_record`: every one of them drives fail_task(),
     exactly like any other failed attempt. Only PASSED drives complete_task().
     """
@@ -1141,6 +1174,7 @@ class AcceptanceOutcome(str, Enum):
     TIMED_OUT = "timed_out"
     MISSING_COMMAND = "missing_command"
     MALFORMED_CONTRACT = "malformed_contract"
+    POLICY_REJECTED = "policy_rejected"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1187,6 +1221,13 @@ def run_acceptance(task: dict) -> AcceptanceResult:
     disk -- the one thing validate_queue deliberately leaves to this
     function (see the module docstring's "Ownership contract"-adjacent note
     on acceptance fields).
+
+    Before ever launching the command, also applies the deterministic
+    policy boundary (nightshift.runtime.policy): working_dir must resolve
+    inside approved_root, and the command must pass ACCEPTANCE_POLICY's
+    deny rules. Either failure returns POLICY_REJECTED without spawning
+    anything. The child process's environment is built by allowlist
+    (policy.build_allowed_env()), never inherited from this process.
     """
     command = task.get("acceptance_command")
     working_dir = task.get("working_dir")
@@ -1247,6 +1288,45 @@ def run_acceptance(task: dict) -> AcceptanceResult:
             message="timeout_seconds must be a positive number",
         )
 
+    approved_root = task.get("approved_root")
+    working_dir_decision = _policy.validate_working_dir(working_dir, approved_root)
+    if not working_dir_decision.allowed:
+        return AcceptanceResult(
+            passed=False,
+            reason=AcceptanceOutcome.POLICY_REJECTED,
+            command=tuple(command),
+            exit_code=None,
+            stdout="",
+            stderr="",
+            started_at=None,
+            ended_at=None,
+            message=working_dir_decision.reason,
+        )
+
+    policy_decision = _policy.check_command(command, working_dir, _policy.ACCEPTANCE_POLICY)
+    if not policy_decision.allowed:
+        # Two distinct situations, not one: the executable could not be
+        # resolved at all (unchanged MISSING_COMMAND, exactly as before this
+        # milestone) vs. it resolved fine but matched a deny rule (the new
+        # POLICY_REJECTED). Conflating them would break existing behavior
+        # for a plain nonexistent-executable case.
+        reason = (
+            AcceptanceOutcome.MISSING_COMMAND
+            if policy_decision.resolved_executable is None
+            else AcceptanceOutcome.POLICY_REJECTED
+        )
+        return AcceptanceResult(
+            passed=False,
+            reason=reason,
+            command=tuple(command),
+            exit_code=None,
+            stdout="",
+            stderr="",
+            started_at=None,
+            ended_at=None,
+            message=policy_decision.reason,
+        )
+
     started_at = _utcnow().isoformat()
     try:
         completed = subprocess.run(
@@ -1256,6 +1336,7 @@ def run_acceptance(task: dict) -> AcceptanceResult:
             capture_output=True,
             text=True,
             shell=False,
+            env=_policy.build_allowed_env(),
         )
     except subprocess.TimeoutExpired as exc:
         return AcceptanceResult(
@@ -1399,16 +1480,21 @@ def run_acceptance_and_record(
 class ExecutorOutcome(str, Enum):
     """How the executor phase of a task run ended.
 
-    None of these values feed done/retry/failed directly -- only
-    run_acceptance()'s verdict does that. This enum exists purely to
-    describe what happened during the executor phase for evidence
-    purposes.
+    COMPLETED and TIMED_OUT mean the executor genuinely ran (to completion
+    or not); run_task() still runs acceptance afterward regardless, exactly
+    as before -- acceptance's verdict is what feeds done/retry/failed.
+    MALFORMED_CONTRACT, MISSING_EXECUTABLE, and POLICY_REJECTED mean the
+    executor never ran at all -- run_task() fails the attempt directly for
+    these three (see run_task()'s docstring), since there is nothing for
+    acceptance to meaningfully check and a lenient acceptance command must
+    not paper over a task that never executed.
     """
 
     COMPLETED = "completed"
     TIMED_OUT = "timed_out"
     MISSING_EXECUTABLE = "missing_executable"
     MALFORMED_CONTRACT = "malformed_contract"
+    POLICY_REJECTED = "policy_rejected"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1451,6 +1537,13 @@ def run_executor(task: dict) -> ExecutorResult:
     The executor's own exit code is captured as evidence only; it never by
     itself decides task success. That is exclusively run_acceptance()'s job
     (see run_task()).
+
+    Before ever launching the command, also applies the deterministic
+    policy boundary (nightshift.runtime.policy): working_dir must resolve
+    inside approved_root, and the command must pass EXECUTOR_POLICY's deny
+    rules. Either failure returns POLICY_REJECTED without spawning
+    anything. The child process's environment is built by allowlist
+    (policy.build_allowed_env()), never inherited from this process.
     """
     command = task.get("executor_command")
     working_dir = task.get("working_dir")
@@ -1513,6 +1606,43 @@ def run_executor(task: dict) -> ExecutorResult:
             message="executor_timeout_seconds must be a positive number",
         )
 
+    approved_root = task.get("approved_root")
+    working_dir_decision = _policy.validate_working_dir(working_dir, approved_root)
+    if not working_dir_decision.allowed:
+        return ExecutorResult(
+            outcome=ExecutorOutcome.POLICY_REJECTED,
+            command=tuple(command),
+            pid=None,
+            exit_code=None,
+            stdout="",
+            stderr="",
+            started_at=None,
+            ended_at=None,
+            message=working_dir_decision.reason,
+        )
+
+    policy_decision = _policy.check_command(command, working_dir, _policy.EXECUTOR_POLICY)
+    if not policy_decision.allowed:
+        # See run_acceptance()'s identical comment: resolution failure stays
+        # MISSING_EXECUTABLE (unchanged); a resolved-but-denied executable
+        # is the new POLICY_REJECTED.
+        outcome = (
+            ExecutorOutcome.MISSING_EXECUTABLE
+            if policy_decision.resolved_executable is None
+            else ExecutorOutcome.POLICY_REJECTED
+        )
+        return ExecutorResult(
+            outcome=outcome,
+            command=tuple(command),
+            pid=None,
+            exit_code=None,
+            stdout="",
+            stderr="",
+            started_at=None,
+            ended_at=None,
+            message=policy_decision.reason,
+        )
+
     started_at = _utcnow().isoformat()
     try:
         proc = subprocess.Popen(
@@ -1523,6 +1653,7 @@ def run_executor(task: dict) -> ExecutorResult:
             text=True,
             shell=False,
             start_new_session=True,
+            env=_policy.build_allowed_env(),
         )
     except OSError as exc:
         return ExecutorResult(
@@ -1583,6 +1714,15 @@ class TaskRun:
         }
 
 
+_EXECUTOR_NEVER_RAN_OUTCOMES = frozenset(
+    {
+        ExecutorOutcome.MALFORMED_CONTRACT,
+        ExecutorOutcome.MISSING_EXECUTABLE,
+        ExecutorOutcome.POLICY_REJECTED,
+    }
+)
+
+
 def _short_circuit_task_run(
     task_id: str, transition_outcome: TransitionOutcome, message: str
 ) -> TaskRun:
@@ -1631,14 +1771,20 @@ def run_task(
     lock_path: Optional[str] = None,
     run_log_path: Optional[str] = None,
 ) -> TaskRun:
-    """Run one claimed task's executor, then always run acceptance after it.
+    """Run one claimed task's executor, then run acceptance if it actually ran.
 
-    The executor's outcome (completed with any exit code, timed out, or
-    failed to launch) never itself decides done/retry/failed -- acceptance
-    always runs afterward and is the sole authority on that, exactly as
-    run_acceptance_and_record() already enforces on its own. This function
-    only adds the executor phase in front of the unchanged Milestone 3
-    pipeline; it does not duplicate any of that pipeline's logic.
+    If the executor genuinely ran (COMPLETED or TIMED_OUT), acceptance
+    always runs afterward and is the sole authority on done/retry/failed,
+    exactly as run_acceptance_and_record() already enforces on its own --
+    the executor's own exit code never decides anything by itself.
+
+    If the executor never ran at all (MALFORMED_CONTRACT,
+    MISSING_EXECUTABLE, or POLICY_REJECTED), this function fails the
+    attempt directly via fail_task() instead of running acceptance:
+    otherwise a lenient or trivial acceptance command (exactly the shape
+    most task contracts use) could mark a policy-rejected or never-executed
+    task "done", silently defeating the point of rejecting it in the first
+    place.
     """
     if owner_pid is None:
         owner_pid = os.getpid()
@@ -1657,6 +1803,31 @@ def run_task(
         )
 
     executor_result = run_executor(task)
+
+    if executor_result.outcome in _EXECUTOR_NEVER_RAN_OUTCOMES:
+        transition = fail_task(
+            queue_path,
+            task_id,
+            owner_pid=owner_pid,
+            lock_path=lock_path,
+            run_log_path=run_log_path,
+            detail=f"executor_{executor_result.outcome.value}",
+        )
+        acceptance = AcceptanceResult(
+            passed=False,
+            reason=AcceptanceOutcome.MALFORMED_CONTRACT,
+            command=(),
+            exit_code=None,
+            stdout="",
+            stderr="",
+            started_at=None,
+            ended_at=None,
+            message="acceptance skipped: the executor never ran",
+        )
+        return TaskRun(
+            executor=executor_result, acceptance_run=AcceptanceRun(acceptance=acceptance, transition=transition)
+        )
+
     acceptance_run = run_acceptance_and_record(
         queue_path, task_id, owner_pid=owner_pid, lock_path=lock_path, run_log_path=run_log_path
     )
