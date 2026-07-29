@@ -1,11 +1,18 @@
-"""Deterministic queue -> claim -> lock primitive for Diana Nightshift.
+"""Deterministic queue, claim/lock, retry, acceptance, executor, recovery,
+and reporting primitives for Diana Nightshift (Milestones 1-6).
 
-This module is the entire approved milestone: it reads a small JSON task
-queue, atomically claims exactly one pending task per call, and recovers
-tasks abandoned by a dead claimant once a stale threshold has passed. It does
-not invoke Claude Code, does not schedule anything, and does not report
-anything beyond its own return value. See docs/nightshift/RESEARCH.md for the
-research this milestone is scoped from.
+This module reads a small JSON task queue, atomically claims exactly one
+pending task per call, runs a bounded executor and a deterministic
+acceptance check, drives the resulting done/retry/failed state machine,
+recovers tasks abandoned by a dead claimant, and can render a local
+Markdown report from the queue and an optional run log. It does not invoke
+Claude Code (`claude`/`claude -p`), does not touch Claude authentication,
+does not schedule anything (no cron/systemd integration), and does not make
+any network or external-messaging call anywhere in this file. See
+docs/nightshift/RESEARCH.md for the research this milestone series is
+scoped from, and the Mandatory Human Approval Gate in that scope's
+governing task for what remains explicitly out of bounds until a separate,
+supervised integration milestone.
 
 State format
 ------------
@@ -656,11 +663,85 @@ def _recover_abandoned_claims(tasks: list, now: datetime.datetime, stale_thresho
     return requeued_ids, failed_ids, blocking_task_id
 
 
+def _append_run_log(
+    run_log_path: Optional[str],
+    event: str,
+    task_id: str,
+    attempt_count: Optional[int],
+    detail: Optional[str] = None,
+    now: Optional[datetime.datetime] = None,
+) -> None:
+    """Best-effort append of one JSONL evidence line for the report generator.
+
+    Does nothing if run_log_path is None -- every function that accepts it
+    defaults to None, so this is opt-in and fully backward compatible with
+    every earlier milestone's calls. Deliberately narrow: only timestamp,
+    task_id, event, attempt_count, and a short detail string -- never
+    stdout/stderr or environment, so there is nothing here that needs
+    redacting later. Swallows OSError: a failure to log must never fail the
+    actual state transition that already happened; the queue file remains
+    the sole canonical state, this is auxiliary evidence only.
+    """
+    if run_log_path is None:
+        return
+    entry = {
+        "timestamp": (now or _utcnow()).isoformat(),
+        "task_id": task_id,
+        "event": event,
+        "attempt_count": attempt_count,
+        "detail": detail,
+    }
+    try:
+        with open(run_log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, sort_keys=True) + "\n")
+    except OSError:
+        pass
+
+
+_ABANDONED_RUN_DETAIL = "abandoned: owner process was dead and past the stale threshold"
+
+
+def _log_recovered_tasks(
+    run_log_path: Optional[str],
+    tasks: list,
+    requeued_ids: list,
+    failed_ids: list,
+    now: datetime.datetime,
+) -> None:
+    """Append one log line per task _recover_abandoned_claims() touched.
+
+    Shared by claim_next() and reap_abandoned_tasks() so both abandoned-run
+    recovery paths produce identically-shaped evidence for the report.
+    """
+    if run_log_path is None or (not requeued_ids and not failed_ids):
+        return
+    by_id = {task["id"]: task for task in tasks}
+    for task_id in requeued_ids:
+        _append_run_log(
+            run_log_path,
+            "recovered_requeued",
+            task_id,
+            by_id[task_id]["attempt_count"],
+            detail=_ABANDONED_RUN_DETAIL,
+            now=now,
+        )
+    for task_id in failed_ids:
+        _append_run_log(
+            run_log_path,
+            "recovered_failed",
+            task_id,
+            by_id[task_id]["attempt_count"],
+            detail=_ABANDONED_RUN_DETAIL,
+            now=now,
+        )
+
+
 def claim_next(
     queue_path: str,
     stale_threshold_seconds: int = DEFAULT_STALE_THRESHOLD_SECONDS,
     lock_path: Optional[str] = None,
     claimant_pid: Optional[int] = None,
+    run_log_path: Optional[str] = None,
 ) -> ClaimResult:
     """Atomically claim exactly one pending task from ``queue_path``.
 
@@ -669,7 +750,10 @@ def claim_next(
     selecting a candidate to claim, via the same retry-aware logic
     ``reap_abandoned_tasks`` uses on its own -- see
     ``_recover_abandoned_claims``. Never touches a live claim or a
-    dead-but-not-yet-stale claim.
+    dead-but-not-yet-stale claim. If ``run_log_path`` is given, any
+    recovery is appended to it for the report generator; the claim itself
+    is not separately logged (current "claimed" counts come from the queue
+    snapshot, not the log).
     """
     if lock_path is None:
         lock_path = queue_path + ".lock"
@@ -712,6 +796,7 @@ def claim_next(
                             outcome=ClaimOutcome.INTERNAL_FAILURE,
                             message=f"write failed: {exc}",
                         )
+                _log_recovered_tasks(run_log_path, tasks, requeued_ids, failed_ids, now)
                 outcome = (
                     ClaimOutcome.LOCK_HELD
                     if blocking_task_id is not None
@@ -737,6 +822,7 @@ def claim_next(
                     message=f"write failed: {exc}",
                 )
 
+            _log_recovered_tasks(run_log_path, tasks, requeued_ids, failed_ids, now)
             return ClaimResult(
                 outcome=ClaimOutcome.CLAIMED,
                 task_id=claimed_task["id"],
@@ -761,13 +847,15 @@ def complete_task(
     task_id: str,
     owner_pid: Optional[int] = None,
     lock_path: Optional[str] = None,
+    run_log_path: Optional[str] = None,
 ) -> TransitionResult:
     """Mark a "claimed" task "done", clearing its claim ownership metadata.
 
     Only succeeds if ``task_id`` exists, is currently "claimed", and is
     owned by ``owner_pid`` (defaulting to os.getpid() of the caller) --
     exactly the same identity check :func:`claim_next` recorded at claim
-    time, never a looser "some owner exists" check.
+    time, never a looser "some owner exists" check. If ``run_log_path`` is
+    given, a successful completion is appended for the report generator.
     """
     if lock_path is None:
         lock_path = queue_path + ".lock"
@@ -819,6 +907,7 @@ def complete_task(
                     message=f"write failed: {exc}",
                 )
 
+            _append_run_log(run_log_path, "done", task_id, task["attempt_count"])
             return TransitionResult(
                 outcome=TransitionOutcome.DONE,
                 task_id=task_id,
@@ -843,6 +932,8 @@ def fail_task(
     task_id: str,
     owner_pid: Optional[int] = None,
     lock_path: Optional[str] = None,
+    run_log_path: Optional[str] = None,
+    detail: Optional[str] = None,
 ) -> TransitionResult:
     """Record a failed attempt on a "claimed" task, owned by ``owner_pid``.
 
@@ -850,7 +941,12 @@ def fail_task(
     "pending" (claim metadata cleared) and is claimable again. Otherwise it
     becomes permanently "failed" (claim metadata cleared, never claimable
     again). attempt_count itself is never modified here -- it was already
-    incremented exactly once, at claim time, by claim_next().
+    incremented exactly once, at claim time, by claim_next(). If
+    ``run_log_path`` is given, the outcome is appended for the report
+    generator; ``detail`` (e.g. an AcceptanceOutcome value like
+    "timed_out") is carried through unchanged so the report can show
+    exactly why, without this function needing to know what an acceptance
+    check even is.
     """
     if lock_path is None:
         lock_path = queue_path + ".lock"
@@ -907,6 +1003,13 @@ def fail_task(
                     message=f"write failed: {exc}",
                 )
 
+            _append_run_log(
+                run_log_path,
+                "requeued" if outcome == TransitionOutcome.REQUEUED else "failed_permanently",
+                task_id,
+                task["attempt_count"],
+                detail=detail,
+            )
             return TransitionResult(
                 outcome=outcome,
                 task_id=task_id,
@@ -969,6 +1072,7 @@ def reap_abandoned_tasks(
     queue_path: str,
     stale_threshold_seconds: int = DEFAULT_STALE_THRESHOLD_SECONDS,
     lock_path: Optional[str] = None,
+    run_log_path: Optional[str] = None,
 ) -> ReapResult:
     """Recover abandoned "claimed" tasks without attempting to claim work.
 
@@ -1007,6 +1111,7 @@ def reap_abandoned_tasks(
                     outcome=ReapOutcome.INTERNAL_FAILURE, message=f"write failed: {exc}"
                 )
 
+            _log_recovered_tasks(run_log_path, tasks, requeued_ids, failed_ids, now)
             return ReapResult(
                 outcome=ReapOutcome.RECOVERED,
                 requeued_task_ids=tuple(requeued_ids),
@@ -1215,6 +1320,7 @@ def run_acceptance_and_record(
     task_id: str,
     owner_pid: Optional[int] = None,
     lock_path: Optional[str] = None,
+    run_log_path: Optional[str] = None,
 ) -> AcceptanceRun:
     """Run a task's acceptance command, then apply the resulting transition.
 
@@ -1274,9 +1380,18 @@ def run_acceptance_and_record(
     acceptance = run_acceptance(task)
 
     if acceptance.passed:
-        transition = complete_task(queue_path, task_id, owner_pid=owner_pid, lock_path=lock_path)
+        transition = complete_task(
+            queue_path, task_id, owner_pid=owner_pid, lock_path=lock_path, run_log_path=run_log_path
+        )
     else:
-        transition = fail_task(queue_path, task_id, owner_pid=owner_pid, lock_path=lock_path)
+        transition = fail_task(
+            queue_path,
+            task_id,
+            owner_pid=owner_pid,
+            lock_path=lock_path,
+            run_log_path=run_log_path,
+            detail=acceptance.reason.value,
+        )
 
     return AcceptanceRun(acceptance=acceptance, transition=transition)
 
@@ -1514,6 +1629,7 @@ def run_task(
     task_id: str,
     owner_pid: Optional[int] = None,
     lock_path: Optional[str] = None,
+    run_log_path: Optional[str] = None,
 ) -> TaskRun:
     """Run one claimed task's executor, then always run acceptance after it.
 
@@ -1542,9 +1658,215 @@ def run_task(
 
     executor_result = run_executor(task)
     acceptance_run = run_acceptance_and_record(
-        queue_path, task_id, owner_pid=owner_pid, lock_path=lock_path
+        queue_path, task_id, owner_pid=owner_pid, lock_path=lock_path, run_log_path=run_log_path
     )
     return TaskRun(executor=executor_result, acceptance_run=acceptance_run)
+
+
+# ---------------------------------------------------------------------------
+# Deterministic local report
+#
+# File-only, stdlib-only. No language model is ever invoked here, no network
+# call is ever made, and nothing here embellishes or infers beyond what the
+# queue snapshot and run log literally state. render_report() is a pure
+# function -- given the same arguments it always produces byte-identical
+# output -- so that it can be tested without any filesystem or clock
+# coupling; write_report() is the thin I/O wrapper around it.
+# ---------------------------------------------------------------------------
+
+_REPORT_EVENT_LABELS = {
+    "done": "done",
+    "requeued": "requeued for another attempt",
+    "failed_permanently": "permanently failed",
+    "recovered_requeued": "recovered from an abandoned run, requeued",
+    "recovered_failed": "recovered from an abandoned run, permanently failed",
+}
+
+
+def _load_run_log_events(run_log_path: Optional[str]):
+    """Read a JSONL run log. Returns (valid_events, malformed_line_count).
+
+    A missing path or missing file is not an error -- it just means no
+    history exists yet (e.g. no run has ever happened). Each malformed
+    line is skipped and counted, never guessed at or repaired, matching
+    this module's validation philosophy everywhere else.
+    """
+    if run_log_path is None or not os.path.exists(run_log_path):
+        return [], 0
+    events = []
+    malformed = 0
+    with open(run_log_path, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                malformed += 1
+    return events, malformed
+
+
+def render_report(
+    queue_data: Optional[dict],
+    queue_error: Optional[str],
+    log_events: list,
+    generated_at: str,
+    malformed_log_line_count: int = 0,
+) -> str:
+    """Render the Markdown report text. Pure: no I/O, no clock, no model.
+
+    ``queue_data`` is an already-validated queue dict, or None if the queue
+    could not be read (see ``queue_error``) -- a report is still produced
+    either way, so this remains useful after a crash or when the queue
+    itself is currently unreadable. Every line traces directly to a queue
+    field or a logged event; nothing is summarized, interpreted, or
+    embellished beyond that.
+    """
+    lines = ["# Nightshift Report", "", f"Generated: {generated_at}", ""]
+
+    if queue_error is not None:
+        lines.append(f"**Queue unreadable:** {queue_error}")
+        lines.append("")
+        tasks = []
+    else:
+        tasks = queue_data["tasks"] if queue_data else []
+
+    done_count = 0
+    pending_new_count = 0
+    pending_retry_count = 0
+    claimed_count = 0
+    failed_count = 0
+    next_pending = []
+    for task in tasks:
+        status = task["status"]
+        if status == "pending":
+            if task["attempt_count"] == 0:
+                pending_new_count += 1
+            else:
+                pending_retry_count += 1
+            next_pending.append(task)
+        elif status == "claimed":
+            claimed_count += 1
+        elif status == "done":
+            done_count += 1
+        elif status == "failed":
+            failed_count += 1
+
+    lines.append("## Summary")
+    lines.append("")
+    lines.append(f"- Total tasks: {len(tasks)}")
+    lines.append(f"- Done: {done_count}")
+    lines.append(f"- Pending (never attempted): {pending_new_count}")
+    lines.append(f"- Pending retry: {pending_retry_count}")
+    lines.append(f"- Claimed (in progress): {claimed_count}")
+    lines.append(f"- Permanently failed: {failed_count}")
+    lines.append("")
+
+    lines.append("## Next Pending Tasks")
+    lines.append("")
+    if next_pending:
+        for task in next_pending:
+            lines.append(
+                f"- `{task['id']}`: {task['title']} "
+                f"(attempt {task['attempt_count']}/{task['max_attempts']})"
+            )
+    else:
+        lines.append("(none)")
+    lines.append("")
+
+    lines.append("## Run History")
+    lines.append("")
+    if log_events:
+        for event in sorted(log_events, key=lambda e: e.get("timestamp", "")):
+            label = _REPORT_EVENT_LABELS.get(event.get("event"), str(event.get("event")))
+            detail = event.get("detail")
+            detail_suffix = f" -- {detail}" if detail else ""
+            lines.append(
+                f"- {event.get('timestamp', '?')} — `{event.get('task_id', '?')}` — "
+                f"{label} (attempt {event.get('attempt_count', '?')}){detail_suffix}"
+            )
+    else:
+        lines.append("No runs recorded yet.")
+    lines.append("")
+
+    if malformed_log_line_count:
+        lines.append(
+            f"_{malformed_log_line_count} malformed run-log line(s) were ignored and "
+            "excluded from this report._"
+        )
+        lines.append("")
+
+    return "\n".join(lines) + "\n"
+
+
+def _atomic_write_text(path: str, text: str) -> None:
+    """Same atomic temp-file-then-replace pattern as _atomic_write, for text."""
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".report-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w") as tmp_file:
+            tmp_file.write(text)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+        raise
+    else:
+        with contextlib.suppress(OSError):
+            dir_fd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+
+
+def write_report(
+    queue_path: str,
+    report_dir: str,
+    run_log_path: Optional[str] = None,
+    now: Optional[datetime.datetime] = None,
+) -> str:
+    """Render and atomically write a dated Markdown report; return its path.
+
+    Reads only the queue file and the run log -- no model, no network call.
+    Always produces a report, even when the queue is missing/malformed or
+    the log is empty/missing/partly corrupt, so this remains useful after a
+    crash or when nothing has ever succeeded. Writing twice for the same
+    calendar day overwrites that day's file with the latest snapshot
+    (deterministic given the same underlying data, not an accumulating
+    history -- the run log is the history).
+    """
+    if now is None:
+        now = _utcnow()
+    if run_log_path is None:
+        run_log_path = queue_path + ".log.jsonl"
+
+    queue_data = None
+    queue_error = None
+    try:
+        queue_data = _read_and_validate(queue_path)
+    except FileNotFoundError:
+        queue_error = f"queue file does not exist yet: {queue_path}"
+    except (json.JSONDecodeError, MalformedQueueError) as exc:
+        queue_error = str(exc)
+
+    log_events, malformed_log_line_count = _load_run_log_events(run_log_path)
+
+    report_text = render_report(
+        queue_data=queue_data,
+        queue_error=queue_error,
+        log_events=log_events,
+        generated_at=now.isoformat(),
+        malformed_log_line_count=malformed_log_line_count,
+    )
+
+    os.makedirs(report_dir, exist_ok=True)
+    report_path = os.path.join(report_dir, now.strftime("%Y-%m-%d") + ".md")
+    _atomic_write_text(report_path, report_text)
+    return report_path
 
 
 def _wait_for_sentinel(sentinel_path: str) -> None:

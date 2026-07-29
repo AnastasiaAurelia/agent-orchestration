@@ -10,6 +10,7 @@ calling the module twice in sequence from one thread.
 from __future__ import annotations
 
 import glob
+import inspect
 import json
 import os
 import shutil
@@ -1328,6 +1329,214 @@ class NightshiftQueueTestCase(unittest.TestCase):
             "done",
             "the live, legitimate completion must win -- reap must never steal an active run",
         )
+
+    # -- Milestone 6: deterministic local report ---------------------------------
+
+    def test_report_with_all_successful_runs(self):
+        queue_data = {
+            "tasks": [
+                _task("t1", status="done", attempt_count=1),
+                _task("t2", status="done", attempt_count=1),
+            ]
+        }
+        log_events = [
+            {"timestamp": "2026-07-29T10:00:00+00:00", "task_id": "t1", "event": "done", "attempt_count": 1, "detail": None},
+            {"timestamp": "2026-07-29T10:01:00+00:00", "task_id": "t2", "event": "done", "attempt_count": 1, "detail": None},
+        ]
+
+        report = nsq.render_report(
+            queue_data=queue_data, queue_error=None, log_events=log_events,
+            generated_at="2026-07-29T11:00:00+00:00",
+        )
+
+        self.assertIn("Done: 2", report)
+        self.assertIn("Permanently failed: 0", report)
+        self.assertIn("`t1`", report)
+        self.assertIn("`t2`", report)
+        self.assertIn("done", report)
+
+    def test_report_with_mixed_success_and_failure(self):
+        queue_data = {
+            "tasks": [
+                _task("t1", status="done", attempt_count=1),
+                _task("t2", status="failed", attempt_count=2, max_attempts=2),
+                _task("t3", status="pending", attempt_count=1, max_attempts=3),
+            ]
+        }
+        log_events = [
+            {"timestamp": "2026-07-29T10:00:00+00:00", "task_id": "t1", "event": "done", "attempt_count": 1, "detail": None},
+            {"timestamp": "2026-07-29T10:01:00+00:00", "task_id": "t2", "event": "requeued", "attempt_count": 1, "detail": "failed"},
+            {"timestamp": "2026-07-29T10:02:00+00:00", "task_id": "t2", "event": "failed_permanently", "attempt_count": 2, "detail": "failed"},
+            {"timestamp": "2026-07-29T10:03:00+00:00", "task_id": "t3", "event": "requeued", "attempt_count": 1, "detail": "failed"},
+        ]
+
+        report = nsq.render_report(
+            queue_data=queue_data, queue_error=None, log_events=log_events,
+            generated_at="2026-07-29T11:00:00+00:00",
+        )
+
+        self.assertIn("Done: 1", report)
+        self.assertIn("Permanently failed: 1", report)
+        self.assertIn("Pending retry: 1", report)
+        self.assertIn("permanently failed", report)
+        self.assertIn("requeued for another attempt", report)
+
+    def test_report_distinguishes_timeout_from_other_rejection_reasons(self):
+        queue_data = {"tasks": [_task("t1", status="pending", attempt_count=1, max_attempts=3)]}
+        log_events = [
+            {"timestamp": "2026-07-29T10:00:00+00:00", "task_id": "t1", "event": "requeued", "attempt_count": 1, "detail": "timed_out"},
+        ]
+
+        report = nsq.render_report(
+            queue_data=queue_data, queue_error=None, log_events=log_events,
+            generated_at="2026-07-29T11:00:00+00:00",
+        )
+
+        self.assertIn("timed_out", report)
+
+    def test_crash_recovery_report_shows_recovered_events(self):
+        queue_data = {
+            "tasks": [
+                _task("t1", status="pending", attempt_count=1, max_attempts=3),
+                _task("t2", status="failed", attempt_count=2, max_attempts=2),
+            ]
+        }
+        log_events = [
+            {"timestamp": "2026-07-29T10:00:00+00:00", "task_id": "t1", "event": "recovered_requeued", "attempt_count": 1, "detail": nsq._ABANDONED_RUN_DETAIL},
+            {"timestamp": "2026-07-29T10:01:00+00:00", "task_id": "t2", "event": "recovered_failed", "attempt_count": 2, "detail": nsq._ABANDONED_RUN_DETAIL},
+        ]
+
+        report = nsq.render_report(
+            queue_data=queue_data, queue_error=None, log_events=log_events,
+            generated_at="2026-07-29T11:00:00+00:00",
+        )
+
+        self.assertIn("recovered from an abandoned run, requeued", report)
+        self.assertIn("recovered from an abandoned run, permanently failed", report)
+        self.assertIn("abandoned", report)
+
+    def test_report_with_no_successful_runs(self):
+        queue_data = {
+            "tasks": [
+                _task("t1", status="failed", attempt_count=2, max_attempts=2),
+                _task("t2", status="pending", attempt_count=1, max_attempts=2),
+            ]
+        }
+        log_events = [
+            {"timestamp": "2026-07-29T10:00:00+00:00", "task_id": "t1", "event": "failed_permanently", "attempt_count": 2, "detail": "failed"},
+        ]
+
+        report = nsq.render_report(
+            queue_data=queue_data, queue_error=None, log_events=log_events,
+            generated_at="2026-07-29T11:00:00+00:00",
+        )
+
+        self.assertIn("Done: 0", report)
+        self.assertNotIn("Traceback", report)
+
+    def test_report_with_no_runs_at_all(self):
+        queue_data = {"tasks": []}
+
+        report = nsq.render_report(
+            queue_data=queue_data, queue_error=None, log_events=[],
+            generated_at="2026-07-29T11:00:00+00:00",
+        )
+
+        self.assertIn("Total tasks: 0", report)
+        self.assertIn("No runs recorded yet.", report)
+        self.assertIn("(none)", report)
+
+    def test_malformed_run_log_lines_are_handled_explicitly(self):
+        run_log_path = os.path.join(self.tmpdir, "run_log.jsonl")
+        with open(run_log_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"timestamp": "2026-07-29T10:00:00+00:00", "task_id": "t1", "event": "done", "attempt_count": 1, "detail": None}) + "\n")
+            f.write("{this is not valid json\n")
+            f.write("also not json\n")
+
+        events, malformed_count = nsq._load_run_log_events(run_log_path)
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(malformed_count, 2)
+
+        report = nsq.render_report(
+            queue_data={"tasks": []}, queue_error=None, log_events=events,
+            generated_at="2026-07-29T11:00:00+00:00", malformed_log_line_count=malformed_count,
+        )
+        self.assertIn("2 malformed run-log line(s)", report)
+
+    def test_report_output_is_deterministic_for_identical_input(self):
+        queue_data = {
+            "tasks": [
+                _task("t1", status="done", attempt_count=1),
+                _task("t2", status="pending", attempt_count=0),
+            ]
+        }
+        log_events = [
+            {"timestamp": "2026-07-29T10:00:00+00:00", "task_id": "t1", "event": "done", "attempt_count": 1, "detail": None},
+        ]
+
+        report_1 = nsq.render_report(
+            queue_data=queue_data, queue_error=None, log_events=log_events,
+            generated_at="2026-07-29T11:00:00+00:00",
+        )
+        report_2 = nsq.render_report(
+            queue_data=queue_data, queue_error=None, log_events=log_events,
+            generated_at="2026-07-29T11:00:00+00:00",
+        )
+
+        self.assertEqual(report_1, report_2)
+
+    def test_report_generation_has_no_model_or_network_or_subprocess_dependency(self):
+        source = "".join(
+            inspect.getsource(fn)
+            for fn in (
+                nsq.render_report,
+                nsq.write_report,
+                nsq._load_run_log_events,
+                nsq._atomic_write_text,
+            )
+        )
+        lowered = source.lower()
+        for term in ("subprocess", "socket", "urllib", "requests", "claude", "http.client"):
+            self.assertNotIn(term, lowered, f"report generation must not reference {term!r}")
+
+    def test_write_report_reflects_a_real_crash_recovery_end_to_end(self):
+        run_log_path = os.path.join(self.tmpdir, "run_log.jsonl")
+        _write_raw_queue(
+            self.queue_path,
+            [_task("t1", attempt_count=0, max_attempts=2, working_dir=self.tmpdir)],
+        )
+
+        claim = nsq.claim_next(self.queue_path, claimant_pid=os.getpid(), run_log_path=run_log_path)
+        self.assertEqual(claim.outcome, nsq.ClaimOutcome.CLAIMED)
+        complete = nsq.complete_task(
+            self.queue_path, "t1", owner_pid=os.getpid(), run_log_path=run_log_path
+        )
+        self.assertEqual(complete.outcome, nsq.TransitionOutcome.DONE)
+
+        report_dir = os.path.join(self.tmpdir, "reports")
+        fixed_now = datetime(2026, 7, 29, 12, 0, 0, tzinfo=timezone.utc)
+        report_path = nsq.write_report(
+            self.queue_path, report_dir, run_log_path=run_log_path, now=fixed_now
+        )
+
+        self.assertEqual(os.path.basename(report_path), "2026-07-29.md")
+        with open(report_path, encoding="utf-8") as f:
+            report_text = f.read()
+        self.assertIn("Done: 1", report_text)
+        self.assertIn("`t1`", report_text)
+        self.assertIn("done", report_text)
+
+    def test_write_report_is_useful_when_queue_does_not_exist_yet(self):
+        missing_queue_path = os.path.join(self.tmpdir, "does-not-exist.json")
+        report_dir = os.path.join(self.tmpdir, "reports")
+
+        report_path = nsq.write_report(missing_queue_path, report_dir)
+
+        with open(report_path, encoding="utf-8") as f:
+            report_text = f.read()
+        self.assertIn("Queue unreadable", report_text)
+        self.assertIn("No runs recorded yet.", report_text)
 
     # -- 10. Repository isolation ------------------------------------------------
 
