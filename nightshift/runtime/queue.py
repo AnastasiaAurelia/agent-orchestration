@@ -656,6 +656,33 @@ def _find_task(data: dict, task_id: str) -> Optional[dict]:
     return None
 
 
+def get_task(queue_path: str, task_id: str) -> Optional[dict]:
+    """Read-only lookup of one task's current contract fields.
+
+    Unlocked, exactly like run_acceptance_and_record()'s own initial read --
+    contract fields (title, working_dir, approved_root, executor_command,
+    etc.) are immutable once a task exists, so no lock is needed to read
+    them safely. This exists for adapters that need those fields after
+    claiming (e.g. a Claude-specific executor building a task-specific
+    invocation) without reaching into this module's private helpers or
+    re-implementing queue reading a second time elsewhere.
+
+    Callers needing a live, lock-protected view of *mutable* fields
+    (status, attempt_count) should use claim_next()/complete_task()/
+    fail_task()'s own return values instead -- this is not a substitute
+    for those.
+
+    Returns None if the task doesn't exist, or if the queue can't be read
+    or fails validation -- both are "not found" from this function's point
+    of view; it never guesses or repairs anything.
+    """
+    try:
+        data = _read_and_validate(queue_path)
+    except (json.JSONDecodeError, MalformedQueueError):
+        return None
+    return _find_task(data, task_id)
+
+
 def _recover_abandoned_claims(tasks: list, now: datetime.datetime, stale_threshold_seconds: int):
     """Mutate ``tasks`` in place, recovering abandoned "claimed" entries.
 
