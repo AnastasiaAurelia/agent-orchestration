@@ -333,7 +333,14 @@ class BatchRunnerTestCase(unittest.TestCase):
             ],
         )
         config = self._config(claude_executable=claude_executable)
-        clock = _FakeClock([0, 0, 1000])
+        # index 0: batch start. index 1: iteration-1 top-of-loop check.
+        # index 2: run_one()'s own post-preflight/pre-claim recheck.
+        # index 3: run_claude_executor()'s live recheck immediately before
+        # launch. All four must still read as "within budget" so task t1's
+        # cycle actually completes -- only the *next* iteration's top check
+        # (index 4, and every value after it, since _FakeClock repeats its
+        # last value once exhausted) reads as exhausted.
+        clock = _FakeClock([0, 0, 0, 0, 1000])
 
         result = ce.run_batch(config, max_tasks=5, max_runtime_seconds=10, env=_CLEAN_ENV, clock=clock)
 
@@ -345,6 +352,151 @@ class BatchRunnerTestCase(unittest.TestCase):
         with open(self.queue_path, encoding="utf-8") as f:
             data = nsq.validate_queue(json.load(f))
         self.assertEqual(data["tasks"][1]["status"], "pending")
+
+    # -- A: preflight consumes part of the remaining budget -- the executor
+    #      must only ever receive the *post-preflight* remaining duration,
+    #      never the larger pre-preflight value.
+
+    def test_executor_receives_only_the_post_preflight_remaining_budget(self):
+        working_dir = self._task_working_dir()
+        # A real sleep strictly between the (wrong, stale) pre-preflight
+        # remaining value and the (correct, live) post-preflight/pre-launch
+        # remaining value -- so the executor's own observed outcome
+        # (COMPLETED vs. TIMED_OUT) proves which value it actually got,
+        # rather than merely inspecting an internal number.
+        claude_executable = _write_fake_claude(self.fake_bin_dir, sleep_seconds=4)
+        _write_raw_queue(
+            self.queue_path, [_task(working_dir=working_dir, approved_root=working_dir)]
+        )
+        # The task's own configured timeout is deliberately much larger than
+        # every budget value below, so only the live batch-deadline
+        # recomputation -- never the task's own timeout -- can be what
+        # caps this cycle.
+        config = self._config(claude_executable=claude_executable, claude_timeout_seconds=300)
+        # index 0: batch start (deadline_monotonic = 0 + 10 = 10).
+        # index 1: iteration-1 top-of-loop check -> remaining = 10 (large).
+        # index 2: run_one()'s post-preflight/pre-claim recheck -> remaining
+        #   = 10 - 5 = 5 (simulating preflight having consumed 5 "seconds").
+        # index 3: run_claude_executor()'s live recheck immediately before
+        #   launch -> remaining = 10 - 8 = 2 (simulating claim_next() plus
+        #   get_task() having consumed 3 more "seconds"). This is the one
+        #   value that must actually govern the executor's timeout.
+        clock = _FakeClock([0, 0, 5, 8])
+
+        result = ce.run_batch(config, max_runtime_seconds=10, env=_CLEAN_ENV, clock=clock)
+
+        self.assertEqual(result.attempted_cycles, 1)
+        # sleep_seconds=4 is less than both the pre-preflight remaining (10)
+        # and the mid-preflight remaining (5) but greater than the correct,
+        # live, immediately-pre-launch remaining (2) -- a TIMED_OUT outcome
+        # here is only possible if the executor was actually capped to that
+        # last, smallest, most-recently-recomputed value.
+        self.assertEqual(result.cycle_outcomes[0].executor_outcome, nsq.ExecutorOutcome.TIMED_OUT.value)
+
+    # -- B: deadline expires during preflight, before claim ----------------------
+
+    def test_deadline_expires_during_preflight_before_claim(self):
+        working_dir = self._task_working_dir()
+        dump_path = os.path.join(self.tmpdir, "dump.jsonl")
+        claude_executable = _write_fake_claude(self.fake_bin_dir, dump_path=dump_path)
+        _write_raw_queue(
+            self.queue_path, [_task(working_dir=working_dir, approved_root=working_dir)]
+        )
+        config = self._config(claude_executable=claude_executable)
+        before = _read_raw(self.queue_path)
+        # index 0: batch start. index 1: top-of-loop check -> remaining = 10
+        # (still fine, run_one() gets called). index 2: run_one()'s own
+        # post-preflight/pre-claim recheck -> remaining = 10 - 1000, deeply
+        # exhausted -- claim_next() must never be reached from here.
+        clock = _FakeClock([0, 0, 1000])
+
+        result = ce.run_batch(config, max_runtime_seconds=10, env=_CLEAN_ENV, clock=clock)
+
+        self.assertEqual(result.attempted_cycles, 0)
+        self.assertEqual(result.stop_reason, ce.BatchStopReason.MAX_RUNTIME_REACHED)
+        self.assertEqual(ce.batch_exit_code(result), 2)
+        self.assertFalse(os.path.exists(dump_path), "the executor must never be invoked at all")
+        after = _read_raw(self.queue_path)
+        self.assertEqual(before, after, "a deadline stop before claim must never touch the queue")
+
+    # -- C: deadline expires after preflight but before executor launch ---------
+
+    def test_deadline_expires_after_claim_but_before_executor_launch(self):
+        working_dir = self._task_working_dir()
+        dump_path = os.path.join(self.tmpdir, "dump.jsonl")
+        claude_executable = _write_fake_claude(self.fake_bin_dir, dump_path=dump_path)
+        _write_raw_queue(
+            self.queue_path,
+            [
+                _task(task_id="t1", working_dir=working_dir, approved_root=working_dir, max_attempts=1),
+                _task(task_id="t2", working_dir=working_dir, approved_root=working_dir),
+            ],
+        )
+        config = self._config(claude_executable=claude_executable)
+        # index 0: batch start. index 1: top-of-loop check -> remaining = 10.
+        # index 2: run_one()'s post-preflight/pre-claim recheck -> remaining
+        # = 10 (still fine -- claim_next() succeeds for t1). index 3:
+        # run_claude_executor()'s live recheck immediately before launch ->
+        # remaining = 10 - 1000, deeply exhausted -- Popen() must never be
+        # called.
+        clock = _FakeClock([0, 0, 0, 1000])
+
+        result = ce.run_batch(config, max_tasks=5, max_runtime_seconds=10, env=_CLEAN_ENV, clock=clock)
+
+        self.assertFalse(os.path.exists(dump_path), "the executor must never actually be launched")
+        self.assertEqual(result.attempted_cycles, 1, "the already-claimed task still counts as one attempted cycle")
+        self.assertEqual(result.cycle_outcomes[0].task_id, "t1")
+        self.assertEqual(result.cycle_outcomes[0].executor_outcome, nsq.ExecutorOutcome.TIMED_OUT.value)
+        self.assertEqual(result.task_ids_attempted, ("t1",), "t2 must never be claimed")
+        self.assertEqual(result.stop_reason, ce.BatchStopReason.MAX_RUNTIME_REACHED)
+        with open(self.queue_path, encoding="utf-8") as f:
+            data = nsq.validate_queue(json.load(f))
+        statuses = {t["id"]: t["status"] for t in data["tasks"]}
+        self.assertIn(statuses["t1"], ("pending", "failed"), "t1 must not be left 'claimed'")
+        self.assertEqual(statuses["t2"], "pending", "t2 must never be claimed")
+
+    # -- D: slow preflight plus executor cannot exceed the authoritative budget --
+    #      except for bounded process-cleanup overhead.
+
+    def test_total_elapsed_time_stays_close_to_the_authoritative_budget(self):
+        working_dir = self._task_working_dir()
+        claude_executable = _write_fake_claude(self.fake_bin_dir, sleep_seconds=30)
+        _write_raw_queue(
+            self.queue_path, [_task(working_dir=working_dir, approved_root=working_dir)]
+        )
+        config = self._config(claude_executable=claude_executable, claude_timeout_seconds=300)
+        max_runtime_seconds = 2
+
+        started = time.monotonic()
+        result = ce.run_batch(config, max_runtime_seconds=max_runtime_seconds, env=_CLEAN_ENV)
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(result.stop_reason, ce.BatchStopReason.MAX_RUNTIME_REACHED)
+        # Real (default) monotonic clock, real preflight, real (bounded)
+        # SIGTERM-grace cleanup -- allow generous slack for that fixed,
+        # already-bounded overhead (ce.SIGTERM_GRACE_SECONDS plus a few
+        # seconds for preflight's own small, independently-bounded checks
+        # and general test-machine slowness) without ever allowing the
+        # total to run anywhere close to the full 30s the fake claude asked
+        # to sleep for.
+        self.assertLess(elapsed, max_runtime_seconds + ce.SIGTERM_GRACE_SECONDS + 15)
+
+    # -- E: a smaller configured per-task timeout remains authoritative ----------
+
+    def test_smaller_configured_timeout_remains_authoritative_over_a_large_budget(self):
+        working_dir = self._task_working_dir()
+        claude_executable = _write_fake_claude(self.fake_bin_dir, sleep_seconds=5)
+        _write_raw_queue(
+            self.queue_path, [_task(working_dir=working_dir, approved_root=working_dir)]
+        )
+        # The batch's own remaining runtime (huge) must never widen this
+        # task's own much smaller configured timeout.
+        config = self._config(claude_executable=claude_executable, claude_timeout_seconds=1)
+
+        result = ce.run_batch(config, max_runtime_seconds=100, env=_CLEAN_ENV)
+
+        self.assertEqual(result.attempted_cycles, 1)
+        self.assertEqual(result.cycle_outcomes[0].executor_outcome, nsq.ExecutorOutcome.TIMED_OUT.value)
 
     # -- 6: runtime budget caps a claimed task's own executor timeout ------------
 

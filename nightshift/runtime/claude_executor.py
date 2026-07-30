@@ -107,7 +107,7 @@ import subprocess
 import sys
 import time
 from enum import Enum
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from nightshift.runtime import auth_preflight as _auth_preflight
 from nightshift.runtime import isolation as _isolation
@@ -258,6 +258,40 @@ def _build_permission_denial_message(denials: list) -> str:
 _NEVER_RAN_OUTCOMES = frozenset(
     {_queue.ExecutorOutcome.MISSING_EXECUTABLE, _queue.ExecutorOutcome.POLICY_REJECTED}
 )
+
+
+@dataclasses.dataclass(frozen=True)
+class RuntimeBudget:
+    """An optional batch-level deadline, threaded through run_one() so it can
+    be enforced *inside* a single cycle, not just estimated by a caller
+    before the cycle starts (Milestone 7D follow-up).
+
+    ``deadline_monotonic`` is a fixed point in time on ``clock()``'s own
+    scale, computed once by the caller (run_batch()) before its very first
+    cycle's preflight even begins -- never recomputed or extended
+    afterward. Every check against it (``remaining_seconds()``/
+    ``exhausted()``) simply compares the *current* ``clock()`` reading
+    against this one fixed value, so however much real time a given
+    cycle's own preflight/integrity/capability checks happen to consume is
+    automatically reflected the next time either method is called --
+    nothing about those checks needs to be estimated, subtracted, or
+    special-cased.
+
+    None (the default used everywhere in this module outside run_batch())
+    means "no batch deadline applies" -- every check gated on
+    ``budget is not None`` below is skipped entirely, so run_one()'s own
+    single-cycle behavior and the `run-one` CLI command are completely
+    unaffected by this class's existence.
+    """
+
+    deadline_monotonic: float
+    clock: Callable[[], float] = time.monotonic
+
+    def remaining_seconds(self) -> float:
+        return self.deadline_monotonic - self.clock()
+
+    def exhausted(self) -> bool:
+        return self.remaining_seconds() <= 0
 
 
 def _utcnow() -> datetime.datetime:
@@ -598,7 +632,10 @@ def _rejected_executor_result(
 
 
 def run_claude_executor(
-    task: dict, config: "ClaudeConfig", env: Optional[dict] = None
+    task: dict,
+    config: "ClaudeConfig",
+    env: Optional[dict] = None,
+    budget: Optional["RuntimeBudget"] = None,
 ) -> "_queue.ExecutorResult":
     """Launch exactly one real (or, in tests, fake) Claude process for ``task``.
 
@@ -662,6 +699,31 @@ def run_claude_executor(
             _queue.ExecutorOutcome.POLICY_REJECTED, f"preflight failed: {reason}"
         )
 
+    # Milestone 7D follow-up: recompute the batch deadline's remaining time
+    # here, immediately before the executor is actually launched -- this is
+    # the one authoritative point that matters, since it is measured *after*
+    # every check above (working-directory policy, executable integrity,
+    # CLI capability, preflight gate) has already consumed whatever real
+    # time it consumed. If nothing remains, the executor is never launched
+    # at all -- not even briefly -- and this is reported as TIMED_OUT, the
+    # same outcome a real subprocess timeout would produce, so it flows
+    # through the exact same, already-proven Completion Invariant and
+    # retry/failure transition without any new code path in run_claude_task().
+    effective_timeout = config.claude_timeout_seconds
+    if budget is not None:
+        remaining = budget.remaining_seconds()
+        if remaining <= 0:
+            return _rejected_executor_result(
+                _queue.ExecutorOutcome.TIMED_OUT,
+                "batch runtime budget exhausted before the executor could be "
+                "launched -- classified as a timeout so the task is safely "
+                "retried or failed, exactly like a real subprocess timeout",
+            )
+        # Never widens the task's own configured timeout -- only ever
+        # shrinks it to fit what is actually left of the batch budget at
+        # this exact moment.
+        effective_timeout = min(config.claude_timeout_seconds, remaining)
+
     prompt = _build_prompt(task, config)
     argv = _build_claude_argv(config.claude_executable, prompt)
     # Deliberately not the ``env`` parameter above: that one only ever feeds
@@ -697,7 +759,7 @@ def run_claude_executor(
 
     pid = proc.pid
     try:
-        stdout, stderr = proc.communicate(timeout=config.claude_timeout_seconds)
+        stdout, stderr = proc.communicate(timeout=effective_timeout)
         outcome = _queue.ExecutorOutcome.COMPLETED
         message = None
         # Milestone 7C.1: a nonzero exit here previously still produced
@@ -757,7 +819,7 @@ def run_claude_executor(
             stderr=stderr,
             started_at=started_at,
             ended_at=_utcnow().isoformat(),
-            message=f"exceeded {config.claude_timeout_seconds}s timeout, terminated via SIGTERM",
+            message=f"exceeded {effective_timeout}s timeout, terminated via SIGTERM",
         )
     except subprocess.TimeoutExpired:
         pass
@@ -777,14 +839,17 @@ def run_claude_executor(
         started_at=started_at,
         ended_at=_utcnow().isoformat(),
         message=(
-            f"exceeded {config.claude_timeout_seconds}s timeout, required SIGKILL "
+            f"exceeded {effective_timeout}s timeout, required SIGKILL "
             "after SIGTERM grace period"
         ),
     )
 
 
 def run_claude_task(
-    config: "ClaudeConfig", task_id: str, env: Optional[dict] = None
+    config: "ClaudeConfig",
+    task_id: str,
+    env: Optional[dict] = None,
+    budget: Optional["RuntimeBudget"] = None,
 ) -> "_queue.TaskRun":
     """Run one claimed task's Claude executor, then acceptance if it actually ran.
 
@@ -807,7 +872,10 @@ def run_claude_task(
     command still passed.
 
     ``env`` is forwarded to run_claude_executor()'s own preflight check --
-    see that function's docstring.
+    see that function's docstring. ``budget`` is forwarded to
+    run_claude_executor()'s own live deadline recheck immediately before it
+    launches the executor -- see RuntimeBudget's docstring; None (the
+    default) leaves this function's behavior completely unchanged.
     """
     task = _queue.get_task(config.queue_path, task_id)
     if task is None:
@@ -832,7 +900,7 @@ def run_claude_task(
             executor=executor, acceptance_run=_queue.AcceptanceRun(acceptance=acceptance, transition=transition)
         )
 
-    executor_result = run_claude_executor(task, config, env=env)
+    executor_result = run_claude_executor(task, config, env=env, budget=budget)
 
     if executor_result.outcome in _NEVER_RAN_OUTCOMES:
         transition = _queue.fail_task(
@@ -894,6 +962,15 @@ class CycleResult:
     # Already fully sanitized by auth_preflight.py's own GateResult -- never
     # a raw auth-status payload, token, email, or org id.
     gate: Optional["_auth_preflight.GateResult"] = None
+    # Milestone 7D follow-up: True only when a caller-supplied RuntimeBudget
+    # was already exhausted after preflight passed but before claim_next()
+    # was ever called -- i.e. this cycle claimed nothing, purely because the
+    # batch deadline ran out during this cycle's own preflight. False (the
+    # default) in every other case, including every run-one call that never
+    # passes a budget at all. Lets the batch runner classify this exact
+    # window as max_runtime_reached instead of misreading it as a generic
+    # preflight/CLI-capability failure.
+    deadline_exceeded: bool = False
 
     def to_json_dict(self) -> dict:
         return {
@@ -903,6 +980,7 @@ class CycleResult:
             "report_path": self.report_path,
             "message": self.message,
             "gate": self.gate.to_json_dict() if self.gate is not None else None,
+            "deadline_exceeded": self.deadline_exceeded,
         }
 
 
@@ -911,14 +989,25 @@ def _report_only_cycle_result(
     claim: Optional["_queue.ClaimResult"] = None,
     message: Optional[str] = None,
     gate: Optional["_auth_preflight.GateResult"] = None,
+    deadline_exceeded: bool = False,
 ) -> CycleResult:
     report_path = _queue.write_report(config.queue_path, config.report_dir, run_log_path=config.run_log_path)
     return CycleResult(
-        ran=False, claim=claim, task_run=None, report_path=report_path, message=message, gate=gate
+        ran=False,
+        claim=claim,
+        task_run=None,
+        report_path=report_path,
+        message=message,
+        gate=gate,
+        deadline_exceeded=deadline_exceeded,
     )
 
 
-def run_one(config: "ClaudeConfig", env: Optional[dict] = None) -> CycleResult:
+def run_one(
+    config: "ClaudeConfig",
+    env: Optional[dict] = None,
+    budget: Optional["RuntimeBudget"] = None,
+) -> CycleResult:
     """Run at most one Nightshift Claude cycle: preflight -> claim -> execute
     -> acceptance -> transition -> report -> stop.
 
@@ -934,6 +1023,22 @@ def run_one(config: "ClaudeConfig", env: Optional[dict] = None) -> CycleResult:
     behavior) and is forwarded to every preflight check this function and
     run_claude_task()/run_claude_executor() perform -- see
     run_claude_executor()'s docstring for why this exists.
+
+    ``budget`` (Milestone 7D follow-up) is an optional RuntimeBudget,
+    supplied only by run_batch() below -- None here (the default, and what
+    every direct/CLI call always uses) leaves every check below gated on
+    ``budget is not None`` inert, so this function's own single-cycle
+    behavior is completely unaffected by its existence. When supplied, it
+    is rechecked at two points *in addition to* whatever pre-cycle check
+    run_batch() itself already performed: immediately after preflight
+    passes but before claim_next() is ever called (so a deadline that runs
+    out during this cycle's own preflight is caught before consuming a
+    claim), and forwarded to run_claude_task()/run_claude_executor() for a
+    final, authoritative recheck immediately before the executor process
+    would actually be launched (see run_claude_executor()'s own docstring).
+    Neither check duplicates preflight_gate() itself -- both only ever
+    compare a monotonic clock reading against the one fixed deadline the
+    budget already holds.
     """
     gate = _auth_preflight.preflight_gate(
         config.nightshift_root,
@@ -963,6 +1068,14 @@ def run_one(config: "ClaudeConfig", env: Optional[dict] = None) -> CycleResult:
             ),
         )
 
+    if budget is not None and budget.exhausted():
+        return _report_only_cycle_result(
+            config,
+            message="batch runtime budget exhausted after preflight, before claim",
+            gate=gate,
+            deadline_exceeded=True,
+        )
+
     claim = _queue.claim_next(
         config.queue_path,
         stale_threshold_seconds=config.stale_threshold_seconds,
@@ -972,7 +1085,7 @@ def run_one(config: "ClaudeConfig", env: Optional[dict] = None) -> CycleResult:
     if claim.outcome != _queue.ClaimOutcome.CLAIMED:
         return _report_only_cycle_result(config, claim=claim, message="no task claimed this cycle")
 
-    task_run = run_claude_task(config, claim.task_id, env=env)
+    task_run = run_claude_task(config, claim.task_id, env=env, budget=budget)
 
     report_path = _queue.write_report(config.queue_path, config.report_dir, run_log_path=config.run_log_path)
     return CycleResult(ran=True, claim=claim, task_run=task_run, report_path=report_path)
@@ -1171,23 +1284,35 @@ def run_batch(
 
     Limits are enforced independently, all three checked before every
     claim, in this fixed order: remaining runtime, then max_tasks, then
-    consecutive_failures. The total-runtime deadline is captured with
+    consecutive_failures. The total-runtime deadline (a single
+    RuntimeBudget, see that class's own docstring) is captured with
     ``clock()`` (a monotonic clock by default -- never wall-clock
     timestamps) before the very first cycle's own preflight begins, so
     preflight time is included in the budget from the start.
 
-    Before every claim, this function computes the batch's remaining
-    runtime and refuses to claim if none remains. For the cycle it does
-    attempt, the *executor's* own timeout is capped to
-    min(config.claude_timeout_seconds, remaining_runtime) -- never widening
-    an existing smaller per-cycle timeout, only ever shrinking it to fit
-    what's left of the batch budget. If that capped timeout is what
-    actually expires during execution, run_claude_executor()'s own already-
-    proven SIGTERM-then-bounded-SIGKILL process-group cleanup is what
-    handles it -- unchanged, not duplicated here -- and the existing
-    Completion Invariant guarantees a timed-out executor can never become
-    "done" merely because acceptance happened to pass. The very next loop
-    iteration then re-checks remaining runtime (now exhausted) before ever
+    That one RuntimeBudget -- never re-derived, never a second
+    computation -- is also threaded all the way through run_one() into
+    run_claude_task()/run_claude_executor(), so it is rechecked live at
+    three points, not merely estimated once up front: (1) here, before
+    this function ever calls run_one() for the next cycle; (2) inside
+    run_one() itself, immediately after preflight passes but before
+    claim_next() is called, catching a deadline that expires *during* a
+    cycle's own preflight; and (3) inside run_claude_executor(),
+    immediately before the executor process would actually be launched,
+    which is also where the executor's own timeout is capped to
+    min(config.claude_timeout_seconds, remaining-at-that-moment) -- never
+    widening an existing smaller per-cycle timeout, only ever shrinking it
+    to fit whatever is actually left of the batch budget at that exact
+    moment. If nothing is left at that third checkpoint, the executor is
+    never launched at all (not even briefly) and this is reported as a
+    TIMED_OUT executor outcome, flowing through the existing, unmodified
+    Completion Invariant and retry/failure transition -- so a task can
+    never be left "claimed" because the batch deadline ran out. If the
+    capped timeout the executor *was* actually launched with is what later
+    expires during execution, run_claude_executor()'s own already-proven
+    SIGTERM-then-bounded-SIGKILL process-group cleanup handles it --
+    unchanged, not duplicated here. Either way, the very next loop
+    iteration re-checks the same RuntimeBudget (now exhausted) before ever
     considering another claim.
 
     A pre-claim gate failure (isolation or authentication, surfaced via
@@ -1216,6 +1341,9 @@ def run_batch(
 
     batch_start_monotonic = clock()
     batch_start_wall = _utcnow().isoformat()
+    budget = RuntimeBudget(
+        deadline_monotonic=batch_start_monotonic + max_runtime_seconds, clock=clock
+    )
 
     attempted_cycles = 0
     done_count = 0
@@ -1229,10 +1357,7 @@ def run_batch(
     message = None
 
     while True:
-        elapsed = clock() - batch_start_monotonic
-        remaining_runtime = max_runtime_seconds - elapsed
-
-        if remaining_runtime <= 0:
+        if budget.exhausted():
             stop_reason = BatchStopReason.MAX_RUNTIME_REACHED
             break
         if attempted_cycles >= max_tasks:
@@ -1246,11 +1371,19 @@ def run_batch(
             )
             break
 
-        cycle_config = dataclasses.replace(
-            config, claude_timeout_seconds=min(config.claude_timeout_seconds, remaining_runtime)
-        )
+        result = run_one(config, env=env, budget=budget)
 
-        result = run_one(cycle_config, env=env)
+        if result.deadline_exceeded:
+            # The budget ran out during this cycle's own preflight, after
+            # preflight passed but strictly before claim_next() was ever
+            # called -- nothing was claimed, so no max_tasks unit is
+            # consumed. The next loop iteration's own budget.exhausted()
+            # check would reach the same conclusion regardless; this branch
+            # only exists to stop one call to run_one() sooner and to
+            # attach a precise message.
+            stop_reason = BatchStopReason.MAX_RUNTIME_REACHED
+            message = result.message
+            break
 
         if result.gate is not None and not result.gate.passed:
             # Pre-claim isolation/auth failure -- never consumes a max_tasks
