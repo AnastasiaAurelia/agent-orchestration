@@ -20,9 +20,9 @@ For the design analysis and exact smoke history, see
 |---|---|
 | Deterministic queue | **Implemented and unit-tested.** JSON validation, atomic claim/transition writes, non-blocking file locking, retry caps, and abandoned-claim recovery exist in `nightshift/runtime/queue.py`. |
 | Isolated Linux user | **Operator-managed and exercised during VPS smoke attempts.** The repository documents the dedicated `nightshift` account and restrictive permissions, but application code cannot create or prove this OS boundary. |
-| Authentication preflight | **Implemented and fake/unit-tested; partially exercised on the VPS.** A real attempt got past Claude login, then failed before the combined preflight completed because of a cross-user helper-file permission defect. That defect is fixed; a clean corrected smoke pass is still pending. |
+| Authentication preflight | **Implemented and unit-tested; validated end-to-end on the VPS.** A real attempt initially failed before the combined preflight completed because of a cross-user helper-file permission defect. That defect was fixed, and `smoke-003` recorded a clean, corrected preflight pass (see [Smoke validation history](#smoke-validation-history)). |
 | Policy and working-directory validation | **Implemented and unit-tested.** Commands, child environment, executable resolution, and realpath containment are checked in code. These checks are not a filesystem sandbox. |
-| One-shot Claude executor | **Implemented and fake/unit-tested; real supervised validation is ongoing.** A real VPS invocation exposed an authentication false-success defect that is now fixed. The corrected operator still needs a recorded clean end-to-end pass. |
+| One-shot Claude executor | **Implemented and unit-tested; validated end-to-end on the VPS.** A real VPS invocation initially exposed an authentication false-success defect, now fixed. `smoke-003` recorded a clean end-to-end pass (see [Smoke validation history](#smoke-validation-history)). |
 | Independent acceptance | **Implemented and unit-tested.** Completion requires a successful executor and a passing external acceptance command. The smoke checker also rejects zero or too few discovered tests. |
 | Durable run evidence | **Implemented and unit-tested; failure evidence has been observed on the VPS.** Queue state, JSONL evidence, and deterministic Markdown reports are written outside Claude's working directory. |
 | Bounded multi-task runner | **Not implemented.** `run-one` handles at most one task and stops. |
@@ -32,6 +32,27 @@ For the design analysis and exact smoke history, see
 Most automated tests use fake local executables and temporary directories.
 That proves deterministic behavior without spending Claude budget, but it is
 not the same as a successful real-Claude VPS smoke test.
+
+## Smoke validation history
+
+### smoke-003 (passed)
+
+- VPS full Nightshift test suite: **205/205 passed**.
+- The supervised operator completed **one** supervised cycle and reported:
+  `PASS: smoke-003 completed one supervised cycle and every post-run
+  verification gate passed.`
+- Every structured post-run verification gate passed.
+- Evidence (preserved on the VPS; not copied into this repository):
+  - Report: `/home/nightshift/reports/smoke-003`
+  - Run log: `/home/nightshift/logs/smoke-003-run-log.jsonl`
+- `smoke-003` must not be rerun. `smoke-001`, `smoke-002`, and `smoke-003`
+  evidence must all be preserved and are treated as immutable.
+- **Scope of this result:** it validates one supervised task cycle. It does
+  not validate, and must not be described as validating, scheduling or
+  unattended overnight execution.
+- **Effect on the roadmap:** Milestone 7D (bounded multi-task queue runner)
+  is now unblocked. Milestone 7E (scheduler) remains blocked until a
+  supervised two-task batch smoke passes.
 
 ## Nightshift in one sentence
 
@@ -492,7 +513,9 @@ Current boundaries:
 - One `run-one` invocation processes at most one task.
 - No batch runner, polling worker, scheduler, timer, daemon, or unattended
   overnight mode exists.
-- Real corrected end-to-end supervised smoke validation remains in progress.
+- Real corrected end-to-end supervised smoke validation passed on `smoke-003`
+  (see [Smoke validation history](#smoke-validation-history)). This proves one
+  supervised task cycle, not scheduling or unattended overnight execution.
 - The command policy is denylist-based and assumes a trusted task author; it
   is not a sandbox for arbitrary commands.
 - Path checks do not replace Linux permissions, containers, namespaces,
@@ -503,10 +526,11 @@ Current boundaries:
 
 Planned milestones, without promised timelines:
 
-- Bounded multi-task batch runner.
+- Bounded multi-task batch runner (Milestone 7D) — unblocked by the
+  `smoke-003` pass.
 - Supervised two-task batch smoke.
-- Scheduler/timer, only after its real authentication environment and
-  overlapping-run behavior are proven.
+- Scheduler/timer (Milestone 7E) — remains blocked until a supervised
+  two-task batch smoke passes.
 - Project onboarding workflow.
 - Optional stronger per-project OS isolation.
 
