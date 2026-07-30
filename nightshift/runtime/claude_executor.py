@@ -105,6 +105,8 @@ import signal
 import stat
 import subprocess
 import sys
+import time
+from enum import Enum
 from typing import Optional, Sequence
 
 from nightshift.runtime import auth_preflight as _auth_preflight
@@ -880,6 +882,18 @@ class CycleResult:
     task_run: Optional["_queue.TaskRun"]
     report_path: Optional[str]
     message: Optional[str] = None
+    # Milestone 7D: populated only when the pre-claim isolation/auth gate is
+    # *why* this cycle produced no claim -- None in every other case
+    # (success, executable-integrity failure, CLI-capability failure, or any
+    # claim outcome). This lets a caller (the batch runner below) distinguish
+    # an isolation failure (gate.auth is None -- preflight_gate() rejects
+    # isolation before auth ever runs) from an authentication failure
+    # (gate.auth is not None and not passed) without re-running or
+    # re-implementing the check itself -- reusing this one shared cycle
+    # function's own already-performed check, never a second call to it.
+    # Already fully sanitized by auth_preflight.py's own GateResult -- never
+    # a raw auth-status payload, token, email, or org id.
+    gate: Optional["_auth_preflight.GateResult"] = None
 
     def to_json_dict(self) -> dict:
         return {
@@ -888,14 +902,20 @@ class CycleResult:
             "task_run": self.task_run.to_json_dict() if self.task_run is not None else None,
             "report_path": self.report_path,
             "message": self.message,
+            "gate": self.gate.to_json_dict() if self.gate is not None else None,
         }
 
 
 def _report_only_cycle_result(
-    config: "ClaudeConfig", claim: Optional["_queue.ClaimResult"] = None, message: Optional[str] = None
+    config: "ClaudeConfig",
+    claim: Optional["_queue.ClaimResult"] = None,
+    message: Optional[str] = None,
+    gate: Optional["_auth_preflight.GateResult"] = None,
 ) -> CycleResult:
     report_path = _queue.write_report(config.queue_path, config.report_dir, run_log_path=config.run_log_path)
-    return CycleResult(ran=False, claim=claim, task_run=None, report_path=report_path, message=message)
+    return CycleResult(
+        ran=False, claim=claim, task_run=None, report_path=report_path, message=message, gate=gate
+    )
 
 
 def run_one(config: "ClaudeConfig", env: Optional[dict] = None) -> CycleResult:
@@ -923,7 +943,9 @@ def run_one(config: "ClaudeConfig", env: Optional[dict] = None) -> CycleResult:
     )
     if not gate.passed:
         reason = gate.auth.reason if gate.auth is not None else gate.isolation.reason
-        return _report_only_cycle_result(config, message=f"preflight failed before claim: {reason}")
+        return _report_only_cycle_result(
+            config, message=f"preflight failed before claim: {reason}", gate=gate
+        )
 
     integrity = verify_claude_executable(config.claude_executable)
     if not integrity.ok:
@@ -957,6 +979,369 @@ def run_one(config: "ClaudeConfig", env: Optional[dict] = None) -> CycleResult:
 
 
 # ---------------------------------------------------------------------------
+# Bounded batch runner (Milestone 7D)
+#
+# Repeatedly calls run_one() -- the exact same shared, already-proven
+# one-cycle implementation the `run-one` CLI command uses, unmodified in
+# its own behavior -- until a bounded stop condition is reached. This is a
+# bounded batch command, never a scheduler: it never polls, never sleeps
+# waiting for work, never watches the filesystem, and never runs
+# indefinitely. Every cycle still goes through run_one()'s own preflight,
+# claim, fresh-process executor launch, independent acceptance, and
+# Completion Invariant -- none of that is duplicated here.
+# ---------------------------------------------------------------------------
+
+
+class BatchStopReason(str, Enum):
+    """Why run_batch() stopped. The evidence that produced it, not model
+    confidence, always determines which value is used -- see run_batch()'s
+    own docstring for the exact decision order.
+    """
+
+    QUEUE_EMPTY = "queue_empty"
+    MAX_TASKS_REACHED = "max_tasks_reached"
+    MAX_RUNTIME_REACHED = "max_runtime_reached"
+    MAX_CONSECUTIVE_FAILURES_REACHED = "max_consecutive_failures_reached"
+    AUTHENTICATION_FAILURE = "authentication_failure"
+    PREFLIGHT_FAILURE = "preflight_failure"
+    POLICY_FAILURE = "policy_failure"
+    ISOLATION_FAILURE = "isolation_failure"
+    INTERNAL_ERROR = "internal_error"
+
+
+DEFAULT_MAX_TASKS = 3
+DEFAULT_MAX_RUNTIME_SECONDS = 7200
+DEFAULT_MAX_CONSECUTIVE_FAILURES = 1
+
+# Conservative hard validation bounds -- never silently clamped to, always
+# enforced as an explicit rejection of anything outside them.
+MAX_TASKS_HARD_CAP = 10
+MAX_RUNTIME_SECONDS_HARD_CAP = 28800
+
+
+def _validate_batch_limits(max_tasks, max_runtime_seconds, max_consecutive_failures) -> None:
+    """Reject invalid limits explicitly. Never an unlimited sentinel, never
+    zero-as-unlimited, never a negative value, never silent clamping.
+    """
+    for name, value in (
+        ("max_tasks", max_tasks),
+        ("max_runtime_seconds", max_runtime_seconds),
+        ("max_consecutive_failures", max_consecutive_failures),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ConfigError(f"{name} must be an integer, got {value!r}")
+
+    if not (1 <= max_tasks <= MAX_TASKS_HARD_CAP):
+        raise ConfigError(
+            f"max_tasks must be between 1 and {MAX_TASKS_HARD_CAP}, got {max_tasks}"
+        )
+    if not (1 <= max_runtime_seconds <= MAX_RUNTIME_SECONDS_HARD_CAP):
+        raise ConfigError(
+            "max_runtime_seconds must be between 1 and "
+            f"{MAX_RUNTIME_SECONDS_HARD_CAP}, got {max_runtime_seconds}"
+        )
+    if not (1 <= max_consecutive_failures <= max_tasks):
+        raise ConfigError(
+            "max_consecutive_failures must be between 1 and max_tasks "
+            f"({max_tasks}), got {max_consecutive_failures}"
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class CycleOutcome:
+    """One sanitized, structured summary of a single attempted (claimed) cycle.
+
+    Only ever built from fields queue.py's own dataclasses already expose --
+    never raw stdout/stderr, never a raw Claude JSON result, never
+    credentials or auth identity. ``evidence_excerpt`` mirrors exactly what
+    the durable run log itself would have recorded for this cycle (see
+    queue._safe_log_excerpt()) -- the same sanitization boundary, reused,
+    never a second one.
+    """
+
+    task_id: str
+    executor_outcome: str
+    executor_exit_code: Optional[int]
+    acceptance_outcome: str
+    acceptance_exit_code: Optional[int]
+    transition_outcome: str
+    succeeded: bool
+    evidence_excerpt: Optional[str] = None
+
+    def to_json_dict(self) -> dict:
+        return {
+            "task_id": self.task_id,
+            "executor_outcome": self.executor_outcome,
+            "executor_exit_code": self.executor_exit_code,
+            "acceptance_outcome": self.acceptance_outcome,
+            "acceptance_exit_code": self.acceptance_exit_code,
+            "transition_outcome": self.transition_outcome,
+            "succeeded": self.succeeded,
+            "evidence_excerpt": self.evidence_excerpt,
+        }
+
+
+@dataclasses.dataclass(frozen=True)
+class BatchResult:
+    """The full, structured, deterministic outcome of one run_batch() call."""
+
+    started_at: str
+    ended_at: str
+    elapsed_seconds: float
+    max_tasks: int
+    max_runtime_seconds: int
+    max_consecutive_failures: int
+    attempted_cycles: int
+    done_count: int
+    failed_count: int
+    final_consecutive_failures: int
+    task_ids_attempted: tuple
+    cycle_outcomes: tuple
+    stop_reason: BatchStopReason
+    queue_observed_empty: bool
+    message: Optional[str] = None
+
+    def to_json_dict(self) -> dict:
+        return {
+            "started_at": self.started_at,
+            "ended_at": self.ended_at,
+            "elapsed_seconds": self.elapsed_seconds,
+            "limits": {
+                "max_tasks": self.max_tasks,
+                "max_runtime_seconds": self.max_runtime_seconds,
+                "max_consecutive_failures": self.max_consecutive_failures,
+            },
+            "attempted_cycles": self.attempted_cycles,
+            "done_count": self.done_count,
+            "failed_count": self.failed_count,
+            "final_consecutive_failures": self.final_consecutive_failures,
+            "task_ids_attempted": list(self.task_ids_attempted),
+            "cycle_outcomes": [c.to_json_dict() for c in self.cycle_outcomes],
+            "stop_reason": self.stop_reason.value,
+            "queue_observed_empty": self.queue_observed_empty,
+            "message": self.message,
+        }
+
+
+def batch_exit_code(result: "BatchResult") -> int:
+    """Map a BatchResult to the CLI exit-code contract (Milestone 7D).
+
+    0: the queue was explicitly observed empty and every attempted cycle
+       completed successfully -- a genuinely clean, fully drained batch.
+    2: execution stopped safely on max_tasks or max_runtime, with no
+       task-cycle failure and no blocking error, but queue drainage was
+       never proven (more pending work may or may not remain).
+    1: any task-cycle failure, the consecutive-failure limit, or a
+       preflight/auth/policy/isolation/internal blocking failure.
+
+    Never a generic success message or exit code merely because the
+    controller stopped within its configured limits -- exit 2 exists
+    precisely to keep "stopped within bounds" distinct from "drained".
+    """
+    if result.stop_reason == BatchStopReason.QUEUE_EMPTY and result.failed_count == 0:
+        return 0
+    if (
+        result.stop_reason in (BatchStopReason.MAX_TASKS_REACHED, BatchStopReason.MAX_RUNTIME_REACHED)
+        and result.failed_count == 0
+    ):
+        return 2
+    return 1
+
+
+def run_batch(
+    config: "ClaudeConfig",
+    max_tasks: int = DEFAULT_MAX_TASKS,
+    max_runtime_seconds: int = DEFAULT_MAX_RUNTIME_SECONDS,
+    max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
+    env: Optional[dict] = None,
+    clock=time.monotonic,
+) -> BatchResult:
+    """Process multiple queued tasks by repeatedly calling run_one().
+
+    Terminology (see the module's own milestone notes for the full
+    rationale): max_tasks limits *claimed execution attempts*, not unique
+    task IDs -- a retry attempt on a previously-attempted task consumes one
+    more unit exactly like a first attempt would. A cycle is successful
+    only when the existing Completion Invariant transitions that task to
+    "done"; anything else (requeued, permanently failed, wrong owner,
+    invalid state, a lock/queue-level rejection) counts as a failed cycle
+    and increments consecutive_failures. A successful "done" cycle resets
+    consecutive_failures to zero. An empty queue is never counted as a
+    failure.
+
+    Limits are enforced independently, all three checked before every
+    claim, in this fixed order: remaining runtime, then max_tasks, then
+    consecutive_failures. The total-runtime deadline is captured with
+    ``clock()`` (a monotonic clock by default -- never wall-clock
+    timestamps) before the very first cycle's own preflight begins, so
+    preflight time is included in the budget from the start.
+
+    Before every claim, this function computes the batch's remaining
+    runtime and refuses to claim if none remains. For the cycle it does
+    attempt, the *executor's* own timeout is capped to
+    min(config.claude_timeout_seconds, remaining_runtime) -- never widening
+    an existing smaller per-cycle timeout, only ever shrinking it to fit
+    what's left of the batch budget. If that capped timeout is what
+    actually expires during execution, run_claude_executor()'s own already-
+    proven SIGTERM-then-bounded-SIGKILL process-group cleanup is what
+    handles it -- unchanged, not duplicated here -- and the existing
+    Completion Invariant guarantees a timed-out executor can never become
+    "done" merely because acceptance happened to pass. The very next loop
+    iteration then re-checks remaining runtime (now exhausted) before ever
+    considering another claim.
+
+    A pre-claim gate failure (isolation or authentication, surfaced via
+    CycleResult.gate) or a pre-claim executable-integrity/CLI-capability
+    failure (CycleResult.claim is None with no gate attached) stops the
+    batch immediately and consumes no max_tasks unit at all, since nothing
+    was ever claimed -- a failure before claim must never mutate a pending
+    task, exactly like a single run_one() call already guarantees. Any
+    claim outcome other than CLAIMED/NO_PENDING_TASK (a busy or held lock,
+    a malformed queue, an internal failure) is treated as a blocking
+    internal error and also stops the batch immediately.
+
+    When a claimed cycle's own failure was specifically an
+    ExecutorOutcome/AcceptanceOutcome.POLICY_REJECTED, and that failure is
+    what pushes consecutive_failures to the configured limit, the more
+    specific BatchStopReason.POLICY_FAILURE is used instead of the generic
+    MAX_CONSECUTIVE_FAILURES_REACHED -- reusing the existing, already more
+    specific outcome enum rather than inventing a parallel classification.
+
+    Never polls, never sleeps waiting for work, never watches the
+    filesystem: every iteration either claims and processes exactly one
+    task via run_one() or stops immediately on an observed empty queue or a
+    limit/failure condition.
+    """
+    _validate_batch_limits(max_tasks, max_runtime_seconds, max_consecutive_failures)
+
+    batch_start_monotonic = clock()
+    batch_start_wall = _utcnow().isoformat()
+
+    attempted_cycles = 0
+    done_count = 0
+    failed_count = 0
+    consecutive_failures = 0
+    last_failure_was_policy = False
+    task_ids_attempted = []
+    cycle_outcomes = []
+    stop_reason = None
+    queue_observed_empty = False
+    message = None
+
+    while True:
+        elapsed = clock() - batch_start_monotonic
+        remaining_runtime = max_runtime_seconds - elapsed
+
+        if remaining_runtime <= 0:
+            stop_reason = BatchStopReason.MAX_RUNTIME_REACHED
+            break
+        if attempted_cycles >= max_tasks:
+            stop_reason = BatchStopReason.MAX_TASKS_REACHED
+            break
+        if consecutive_failures >= max_consecutive_failures:
+            stop_reason = (
+                BatchStopReason.POLICY_FAILURE
+                if last_failure_was_policy
+                else BatchStopReason.MAX_CONSECUTIVE_FAILURES_REACHED
+            )
+            break
+
+        cycle_config = dataclasses.replace(
+            config, claude_timeout_seconds=min(config.claude_timeout_seconds, remaining_runtime)
+        )
+
+        result = run_one(cycle_config, env=env)
+
+        if result.gate is not None and not result.gate.passed:
+            # Pre-claim isolation/auth failure -- never consumes a max_tasks
+            # unit; nothing was ever claimed.
+            stop_reason = (
+                BatchStopReason.ISOLATION_FAILURE
+                if result.gate.auth is None
+                else BatchStopReason.AUTHENTICATION_FAILURE
+            )
+            message = result.message
+            break
+
+        if result.claim is None:
+            # Executable-integrity or CLI-capability failure -- also
+            # pre-claim, also consumes no max_tasks unit.
+            stop_reason = BatchStopReason.PREFLIGHT_FAILURE
+            message = result.message
+            break
+
+        if result.claim.outcome == _queue.ClaimOutcome.NO_PENDING_TASK:
+            queue_observed_empty = True
+            stop_reason = BatchStopReason.QUEUE_EMPTY
+            break
+
+        if result.claim.outcome != _queue.ClaimOutcome.CLAIMED:
+            # LOCK_HELD, LOCK_BUSY, MALFORMED_QUEUE, or INTERNAL_FAILURE.
+            stop_reason = BatchStopReason.INTERNAL_ERROR
+            message = result.claim.message
+            break
+
+        # A task was genuinely claimed -- this consumes exactly one
+        # max_tasks unit, whether it succeeds or not, and whether it is a
+        # first attempt or a retry of a previously-attempted task.
+        attempted_cycles += 1
+        task_id = result.claim.task_id
+        task_ids_attempted.append(task_id)
+
+        task_run = result.task_run
+        executor = task_run.executor
+        acceptance = task_run.acceptance_run.acceptance
+        transition = task_run.acceptance_run.transition
+        succeeded = transition.outcome == _queue.TransitionOutcome.DONE
+
+        cycle_outcomes.append(
+            CycleOutcome(
+                task_id=task_id,
+                executor_outcome=executor.outcome.value,
+                executor_exit_code=executor.exit_code,
+                acceptance_outcome=acceptance.reason.value,
+                acceptance_exit_code=acceptance.exit_code,
+                transition_outcome=transition.outcome.value,
+                succeeded=succeeded,
+                evidence_excerpt=_queue._safe_log_excerpt(executor),
+            )
+        )
+
+        if succeeded:
+            done_count += 1
+            consecutive_failures = 0
+            last_failure_was_policy = False
+        else:
+            failed_count += 1
+            consecutive_failures += 1
+            last_failure_was_policy = (
+                executor.outcome == _queue.ExecutorOutcome.POLICY_REJECTED
+                or acceptance.reason == _queue.AcceptanceOutcome.POLICY_REJECTED
+            )
+
+    ended_at = _utcnow().isoformat()
+    elapsed_seconds = clock() - batch_start_monotonic
+
+    return BatchResult(
+        started_at=batch_start_wall,
+        ended_at=ended_at,
+        elapsed_seconds=elapsed_seconds,
+        max_tasks=max_tasks,
+        max_runtime_seconds=max_runtime_seconds,
+        max_consecutive_failures=max_consecutive_failures,
+        attempted_cycles=attempted_cycles,
+        done_count=done_count,
+        failed_count=failed_count,
+        final_consecutive_failures=consecutive_failures,
+        task_ids_attempted=tuple(task_ids_attempted),
+        cycle_outcomes=tuple(cycle_outcomes),
+        stop_reason=stop_reason,
+        queue_observed_empty=queue_observed_empty,
+        message=message,
+    )
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -975,6 +1360,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     run_one_parser = sub.add_parser("run-one")
     run_one_parser.add_argument("--config", required=True, help="path to a JSON ClaudeConfig file")
+
+    run_batch_parser = sub.add_parser("run-batch")
+    run_batch_parser.add_argument("--config", required=True, help="path to a JSON ClaudeConfig file")
+    run_batch_parser.add_argument("--max-tasks", type=int, default=DEFAULT_MAX_TASKS)
+    run_batch_parser.add_argument(
+        "--max-runtime-seconds", type=int, default=DEFAULT_MAX_RUNTIME_SECONDS
+    )
+    run_batch_parser.add_argument(
+        "--max-consecutive-failures", type=int, default=DEFAULT_MAX_CONSECUTIVE_FAILURES
+    )
 
     args = parser.parse_args(argv)
 
@@ -995,6 +1390,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         result = run_one(config)
         print(json.dumps(result.to_json_dict(), indent=2))
         return 0
+
+    if args.command == "run-batch":
+        try:
+            with open(args.config, "r", encoding="utf-8") as f:
+                raw_config = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(json.dumps({"stop_reason": "internal_error", "message": f"could not read config: {exc}"}))
+            return 1
+
+        try:
+            config = ClaudeConfig.load(raw_config)
+        except ConfigError as exc:
+            print(json.dumps({"stop_reason": "internal_error", "message": f"invalid configuration: {exc}"}))
+            return 1
+
+        try:
+            result = run_batch(
+                config,
+                max_tasks=args.max_tasks,
+                max_runtime_seconds=args.max_runtime_seconds,
+                max_consecutive_failures=args.max_consecutive_failures,
+            )
+        except ConfigError as exc:
+            print(json.dumps({"stop_reason": "internal_error", "message": f"invalid batch limits: {exc}"}))
+            return 1
+
+        print(json.dumps(result.to_json_dict(), indent=2))
+        return batch_exit_code(result)
 
     return 1
 
