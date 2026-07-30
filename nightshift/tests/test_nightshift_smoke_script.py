@@ -131,11 +131,12 @@ def _write_fake_claude(
     mode="success",
     fake_token="sk-ant-api03-" + ("a" * 40),
     researchlens_tamper_path=None,
+    auth_payload=None,
 ):
     script = _FAKE_CLAUDE_TEMPLATE.format(
         shebang=f"#!{sys.executable}",
         help_text=_DEFAULT_HELP_TEXT,
-        auth_payload=_DEFAULT_AUTH_PAYLOAD,
+        auth_payload=_DEFAULT_AUTH_PAYLOAD if auth_payload is None else auth_payload,
         mode=mode,
         calculator_src=_VALID_CALCULATOR,
         test_src=_THREE_PASSING_TESTS,
@@ -727,6 +728,251 @@ class NightshiftSmokeScriptTestCase(unittest.TestCase):
         self.assertNotEqual(
             os.geteuid(), 0, "this test file is meant to be exercised as a non-root user"
         )
+
+        result = self._run_script(self._env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PASS", result.stdout)
+
+    # -- Milestone 7C.2.2: permission-safe preflight handoff regression tests ----
+    #
+    # The real VPS run failed with "python3: can't open file '/tmp/tmp.<random>':
+    # [Errno 13] Permission denied" -- a root-owned mktemp helper source file
+    # that the isolated `nightshift` user could not open() by path. The fix
+    # feeds that same helper source to `python3 -` over stdin instead, so the
+    # child process never opens a path at all, only inherits an already-open
+    # file descriptor across fork/exec. Every test below proves some facet of
+    # that fix, or of the surrounding evidence-preservation/SMOKE_ID changes
+    # that came with it, without ever needing a real second Linux user (this
+    # sandbox has none, and no passwordless sudo) -- see each test's own
+    # docstring for exactly what it can and cannot prove in that constraint.
+
+    def test_no_helper_source_file_is_ever_written_to_tmp(self):
+        """Proves items 3 and 4: nothing resembling the embedded helper's own
+        source ever lands on disk under /tmp during a full cycle -- there is
+        therefore no path a different user could ever be denied read access
+        to in the first place."""
+        before_names = set(os.listdir("/tmp"))
+
+        result = self._run_script(self._env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        after_names = set(os.listdir("/tmp"))
+        new_names = after_names - before_names
+        for name in new_names:
+            path = os.path.join("/tmp", name)
+            if not os.path.isfile(path):
+                continue
+            try:
+                with open(path, encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+            except OSError:
+                continue
+            self.assertNotIn(
+                "cmd_preflight",
+                content,
+                f"a file resembling the embedded helper's own source was left at {path}",
+            )
+
+    def test_preflight_succeeds_under_a_strict_root_umask(self):
+        """Proves item 2: a restrictive umask on the invoking (root/admin)
+        process must not prevent the preflight (or the rest of the cycle)
+        from completing -- the stdin-based handoff never depends on any
+        helper file's on-disk permission bits, which is exactly what a
+        strict umask would otherwise affect."""
+        env = self._env()
+
+        result = subprocess.run(
+            ["bash", "-c", 'umask 077 && exec bash "$0"', SCRIPT_PATH],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PASS", result.stdout)
+
+    def test_run_helper_real_mode_invokes_sudo_as_nightshift_with_explicit_home_and_path(self):
+        """Proves item 1 and the HOME/PATH parts of item 4 as a static
+        source-inspection check on the real (non-test-mode) branch of
+        run_helper(): this sandbox has no second real Linux user and no
+        passwordless sudo, so the actual cross-user permission behavior
+        cannot be exercised end-to-end here -- this instead asserts the
+        exact invocation shape that branch constructs, which is what
+        governs which user, HOME, and PATH the real preflight process
+        actually gets when this script runs for real on the VPS."""
+        with open(SCRIPT_PATH, encoding="utf-8") as f:
+            source = f.read()
+
+        start = source.index("run_helper() {")
+        end = source.index("\n}\n", start)
+        run_helper_body = source[start:end]
+
+        self.assertIn('sudo -u "$NIGHTSHIFT_USER" -H', run_helper_body)
+        self.assertIn("PYTHONPATH=", run_helper_body)
+        self.assertIn('PATH="/usr/bin:/bin"', run_helper_body)
+        self.assertIn("python3 -", run_helper_body)
+        self.assertIn("<<< \"$HELPER_PY_SOURCE\"", run_helper_body)
+        # Never a path argument the child would need to open() itself.
+        self.assertNotIn("$HELPER_PY\"", run_helper_body)
+
+    def test_successful_fake_preflight_allows_setup_to_continue(self):
+        """Proves item 5."""
+        result = self._run_script(self._env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        smoke2 = self._smoke2_paths()
+        self.assertTrue(os.path.isdir(smoke2["task_dir"]))
+        self.assertTrue(os.path.isfile(smoke2["queue"]))
+        self.assertTrue(os.path.isfile(smoke2["config"]))
+
+    def test_nonzero_preflight_process_fails_before_any_fake_claude_invocation(self):
+        """Proves item 6, using the same isolation-rejection mechanism as
+        test_preflight_failure_stops_before_invocation (a nonexistent
+        forbidden path makes preflight_gate() -- and therefore the whole
+        helper process -- exit non-zero), but asserting directly that the
+        fake Claude executable's own -p invocation marker (calculator.py)
+        never appears, i.e. Claude was never launched at all."""
+        env = self._env()
+        env["NS_FORBIDDEN_PATH"] = os.path.join(self.tmpdir, "does-not-exist-forbidden-path")
+
+        result = self._run_script(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        smoke2 = self._smoke2_paths()
+        self.assertFalse(os.path.exists(os.path.join(smoke2["task_dir"], "calculator.py")))
+
+    def test_malformed_preflight_json_fails_before_invocation(self):
+        """Proves item 7: a fake `claude auth status --json` that prints
+        text that is not valid JSON at all must still fail closed -- the
+        underlying auth_preflight.run_auth_preflight() classifies this as
+        MALFORMED_OUTPUT, preflight_gate() reports passed=False, and the
+        helper's own exit code (never any JSON this bash script would have
+        to parse) is what the operator script actually checks."""
+        env = self._env()
+        env["NS_CLAUDE_CONFIGURED_PATH"] = _write_fake_claude(
+            self.bin_dir, mode="success", auth_payload="{ this is not valid json"
+        )
+
+        result = self._run_script(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("deterministic preflight", result.stderr)
+        smoke2 = self._smoke2_paths()
+        self.assertFalse(os.path.exists(smoke2["queue"]))
+
+    def test_authentication_rejection_fails_before_invocation(self):
+        """Proves item 9, distinct from the isolation-rejection case: a
+        syntactically valid auth-status payload reporting loggedIn=false
+        must still fail preflight and stop before any Claude invocation."""
+        env = self._env()
+        logged_out_payload = (
+            '{"loggedIn": false, "authMethod": "claude.ai", "apiProvider": "firstParty", '
+            '"subscriptionType": "pro"}'
+        )
+        env["NS_CLAUDE_CONFIGURED_PATH"] = _write_fake_claude(
+            self.bin_dir, mode="success", auth_payload=logged_out_payload
+        )
+
+        result = self._run_script(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("deterministic preflight", result.stderr)
+        smoke2 = self._smoke2_paths()
+        self.assertFalse(os.path.exists(smoke2["queue"]))
+
+    def test_raw_auth_identity_fields_are_not_printed_or_persisted(self):
+        """Proves item 10: a fake auth-status payload carrying an
+        email/orgId (fields auth_preflight.py's own PreflightResult never
+        even parses out) must never surface anywhere in this script's
+        output or in any evidence file it writes."""
+        env = self._env()
+        payload_with_identity_fields = (
+            '{"loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty", '
+            '"subscriptionType": "pro", "email": "should-not-leak@example.com", '
+            '"orgId": "org-should-not-leak-12345"}'
+        )
+        env["NS_CLAUDE_CONFIGURED_PATH"] = _write_fake_claude(
+            self.bin_dir, mode="success", auth_payload=payload_with_identity_fields
+        )
+
+        result = self._run_script(env)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        combined_output = result.stdout + result.stderr
+        self.assertNotIn("should-not-leak@example.com", combined_output)
+        self.assertNotIn("org-should-not-leak-12345", combined_output)
+        smoke2 = self._smoke2_paths()
+        with open(smoke2["run_log"], encoding="utf-8") as f:
+            run_log_text = f.read()
+        self.assertNotIn("should-not-leak@example.com", run_log_text)
+        self.assertNotIn("org-should-not-leak-12345", run_log_text)
+
+    def test_next_smoke_id_cannot_collide_with_preserved_partial_evidence(self):
+        """Proves item 14: after smoke-002 evidence exists (simulating the
+        real VPS's preserved failed-attempt evidence), a fresh attempt under
+        NS_SMOKE_ID=003 must succeed without ever touching it, and both
+        attempts' evidence must coexist afterward, byte-identical to what
+        each attempt itself produced."""
+        first_env = self._env()
+        first_result = self._run_script(first_env)
+        self.assertEqual(first_result.returncode, 0, first_result.stdout + first_result.stderr)
+
+        smoke2 = self._smoke2_paths()
+        with open(smoke2["queue"], "rb") as f:
+            smoke2_queue_before = f.read()
+
+        second_env = self._env(NS_SMOKE_ID="003")
+        # A fresh fake claude/checker is required per attempt -- the queue's
+        # acceptance_command path is baked in at generation time, tied to
+        # this attempt's own CHECKER_PATH/TASK_DIR (smoke-003, not smoke-002).
+        second_result = self._run_script(second_env)
+
+        self.assertEqual(second_result.returncode, 0, second_result.stdout + second_result.stderr)
+        with open(smoke2["queue"], "rb") as f:
+            smoke2_queue_after = f.read()
+        self.assertEqual(
+            smoke2_queue_before, smoke2_queue_after, "smoke-002 evidence must be untouched by smoke-003"
+        )
+
+        smoke3_task_dir = os.path.join(self.nightshift_home, "workspace", "smoke", "task-003")
+        smoke3_queue = os.path.join(self.nightshift_home, "state", "smoke-003-queue.json")
+        self.assertTrue(os.path.isdir(smoke3_task_dir))
+        self.assertTrue(os.path.isfile(smoke3_queue))
+        self.assertNotEqual(smoke2["queue"], smoke3_queue)
+
+    def test_legacy_generic_digest_path_absent_from_executable_script_logic(self):
+        """Proves item 15: the exact old, generic (pre-7C.2.1) digest
+        filenames must not appear anywhere in the script's *executable*
+        logic -- comment-only mentions (if any) are fine and must not trip
+        a naive audit, so this test strips full-line comments before
+        searching, exactly as a correct audit of this concern should."""
+        with open(SCRIPT_PATH, encoding="utf-8") as f:
+            lines = f.readlines()
+        executable_lines = [
+            line for line in lines if line.strip() and not line.strip().startswith("#")
+        ]
+        executable_text = "".join(executable_lines)
+
+        self.assertNotIn("/tmp/researchlens-before.sha256", executable_text)
+        self.assertNotIn("/tmp/researchlens-after.sha256", executable_text)
+
+    def test_full_suite_passes_as_non_root_user_with_root_owned_style_file_under_tmp(self):
+        """Proves item 16 (in combination with test_full_operator_suite_runs_
+        correctly_as_a_non_root_user above): an unrelated, unreadable file
+        already present under /tmp -- standing in for a real root-owned file
+        this process cannot itself open(), the same failure shape the real
+        VPS hit -- must not prevent the operator script (or, by the same
+        mechanism, the rest of this repository's test suite) from passing."""
+        self.assertNotEqual(os.geteuid(), 0)
+        blocker_path = os.path.join(self.tmpdir, "unrelated-unreadable-file")
+        with open(blocker_path, "w", encoding="utf-8") as f:
+            f.write("not readable by design\n")
+        os.chmod(blocker_path, 0o000)
+        # No cleanup chmod needed: removing a file only requires write
+        # permission on its *parent* directory, not on the file itself, so
+        # tearDown()'s shutil.rmtree(self.tmpdir) already handles this fine.
 
         result = self._run_script(self._env())
 

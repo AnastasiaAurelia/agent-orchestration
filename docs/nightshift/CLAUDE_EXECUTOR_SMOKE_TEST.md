@@ -1,4 +1,4 @@
-# Supervised Real-Claude Smoke Test (Milestone 7C, corrected by 7C.1, automated by 7C.2)
+# Supervised Real-Claude Smoke Test (Milestone 7C, corrected by 7C.1, automated by 7C.2, isolated by 7C.2.1, made permission-safe by 7C.2.2)
 
 **Status: not executed.** Nothing in this milestone series runs the command
 below, invokes a real Claude Code session, or touches production. There is
@@ -59,6 +59,78 @@ Read the script itself (`scripts/nightshift-smoke-002.sh`) for the exact,
 literal commands it runs — this document does not duplicate them line by
 line for the primary path; see the appendix below only if you need to run
 the procedure by hand for troubleshooting.
+
+## Before rerunning: check for preserved evidence from a prior attempt
+
+The first real supervised run of this operator failed at the preflight
+gate itself (Milestone 7C.2.2 — see below), leaving `smoke-002` evidence
+(whatever it had already created) preserved on the VPS. **Before running
+the command above again, inspect whether `smoke-002` evidence already
+exists** (the same paths the script itself checks — see the preconditions
+above):
+
+```bash
+sudo -u nightshift -H test -e /home/nightshift/workspace/smoke/task-002 && echo "smoke-002 evidence exists"
+sudo -u nightshift -H test -e /home/nightshift/state/smoke-002-queue.json && echo "smoke-002 evidence exists"
+```
+
+- **If `smoke-002` evidence exists:** do not clear or overwrite it — it is
+  the failed attempt's own evidence. Run the *next* attempt under a new,
+  non-colliding identity instead:
+
+  ```bash
+  sudo env NS_SMOKE_ID=003 bash /home/nightshift/workspace/agent-orchestration/scripts/nightshift-smoke-002.sh
+  ```
+
+  Every path the script touches (task directory, queue, config, checker,
+  run log, reports, tmux session name, and the task's own `id` field) is
+  derived from `NS_SMOKE_ID`, so this alone guarantees no collision with
+  the preserved `smoke-002` evidence — nothing further needs to change.
+  `sudo env VAR=value cmd` (rather than `sudo VAR=value cmd`) is used
+  deliberately: it sets the variable inside the already-root-elevated
+  process's own exec, so it works regardless of the local sudoers
+  `env_reset`/`env_keep` policy.
+
+- **If inspection shows no `smoke-002` evidence was actually created**
+  (for example, if the failure happened before the script ever reached
+  its setup step): rerunning with the default identity (plain `sudo bash
+  .../nightshift-smoke-002.sh`, no `NS_SMOKE_ID` override) is fine. Record
+  which case applied and why before proceeding either way — never decide
+  silently.
+
+## Milestone 7C.2.2: the preflight permission bug and its fix
+
+The first real run got past Claude login but failed here:
+
+```
+python3: can't open file '/tmp/tmp.<random>': [Errno 13] Permission denied
+GATE FAILED: deterministic preflight (isolation + auth) did not pass
+```
+
+**Root cause:** the operator (running as root) wrote its embedded
+verification helper's Python source to a `mktemp` file, then asked
+`nightshift` (a different, unprivileged user, via `sudo -u nightshift -H`)
+to run `python3 <that file>`. A root-created `mktemp` file is mode `0600`
+by default — `nightshift` could not `open()` it by path. This was an
+operator handoff bug, not evidence that isolation or authentication
+actually failed; the preflight was never actually evaluated.
+
+**Fix:** the helper's source is now fed directly over stdin to `python3 -`,
+run as `nightshift` via the same `sudo -u nightshift -H` — never via an
+on-disk file. The child process only ever inherits an already-open file
+descriptor across `fork`/`exec`; it never calls `open()` on a path itself,
+so no file's on-disk permission bits can ever block it. The preflight
+Python process runs as `nightshift`, with `HOME=/home/nightshift` (from
+`sudo`'s own `-H` flag) and an explicit, minimal `PATH`, from the
+repository checkout itself (`cd`'d into before any `nightshift`-targeted
+command runs) — never from `/tmp` or another directory `nightshift` merely
+happens not to be blocked from entering.
+
+This closes off a real class of bug: nothing else in the script asks
+`nightshift` to `open()` a path a different user created, since every
+other cross-user handoff already only ever redirected a command's
+stdout/stderr into a file (inherited as an already-open descriptor, never
+opened by path) rather than passing a path as an argument to be opened.
 
 ## What this smoke test does not prove
 

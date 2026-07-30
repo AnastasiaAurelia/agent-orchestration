@@ -63,37 +63,51 @@ unset _ns_test_only_var
 
 NIGHTSHIFT_USER="${NS_NIGHTSHIFT_USER:-nightshift}"
 
+# Milestone 7C.2.2: which smoke attempt this run is. Defaults to "002" (this
+# script's own identity, unchanged) but a human operator who has confirmed
+# smoke-002 evidence already exists from a prior failed attempt can run the
+# *next* attempt under an entirely new, non-colliding identity -- e.g.
+# `sudo env NS_SMOKE_ID=003 bash .../nightshift-smoke-002.sh` -- without
+# ever needing to touch, clear, or reuse the preserved smoke-002 evidence.
+# Every path below is derived from this one value, so choosing a fresh ID is
+# sufficient on its own to guarantee no collision with any prior attempt.
+SMOKE_ID="${NS_SMOKE_ID:-002}"
+
 NIGHTSHIFT_HOME="${NS_NIGHTSHIFT_HOME:-/home/nightshift}"
 REPO_ROOT="${NS_REPO_ROOT:-$NIGHTSHIFT_HOME/workspace/agent-orchestration}"
 SMOKE_ROOT="${NS_SMOKE_ROOT:-$NIGHTSHIFT_HOME/workspace/smoke}"
-TASK_DIR="$SMOKE_ROOT/task-002"
+TASK_DIR="$SMOKE_ROOT/task-$SMOKE_ID"
 STATE_DIR="${NS_STATE_DIR:-$NIGHTSHIFT_HOME/state}"
 LOGS_DIR="${NS_LOGS_DIR:-$NIGHTSHIFT_HOME/logs}"
 REPORTS_DIR="${NS_REPORTS_DIR:-$NIGHTSHIFT_HOME/reports}"
 
-QUEUE_PATH="$STATE_DIR/smoke-002-queue.json"
-CONFIG_PATH="$STATE_DIR/smoke-002-config.json"
-CHECKER_PATH="$STATE_DIR/smoke-002-acceptance.py"
-RUN_LOG_PATH="$LOGS_DIR/smoke-002-run-log.jsonl"
-REPORT_DIR="$REPORTS_DIR/smoke-002"
-CYCLE_STDOUT="$LOGS_DIR/smoke-002-cycle.stdout.log"
-CYCLE_STDERR="$LOGS_DIR/smoke-002-cycle.stderr.log"
-CYCLE_EXITCODE="$LOGS_DIR/smoke-002-cycle.exitcode"
+QUEUE_PATH="$STATE_DIR/smoke-$SMOKE_ID-queue.json"
+CONFIG_PATH="$STATE_DIR/smoke-$SMOKE_ID-config.json"
+CHECKER_PATH="$STATE_DIR/smoke-$SMOKE_ID-acceptance.py"
+RUN_LOG_PATH="$LOGS_DIR/smoke-$SMOKE_ID-run-log.jsonl"
+REPORT_DIR="$REPORTS_DIR/smoke-$SMOKE_ID"
+CYCLE_STDOUT="$LOGS_DIR/smoke-$SMOKE_ID-cycle.stdout.log"
+CYCLE_STDERR="$LOGS_DIR/smoke-$SMOKE_ID-cycle.stderr.log"
+CYCLE_EXITCODE="$LOGS_DIR/smoke-$SMOKE_ID-cycle.exitcode"
 
-TMUX_SESSION="${NS_TMUX_SESSION:-nightshift-smoke-002}"
+TMUX_SESSION="${NS_TMUX_SESSION:-nightshift-smoke-$SMOKE_ID}"
 
 FORBIDDEN_PATH="${NS_FORBIDDEN_PATH:-/home/ubuntu}"
 RESEARCHLENS_PATH="${NS_RESEARCHLENS_PATH:-/home/ubuntu/ResearchLens}"
 CLAUDE_CONFIGURED_PATH="${NS_CLAUDE_CONFIGURED_PATH:-$NIGHTSHIFT_HOME/.local/bin/claude}"
 
-# Milestone 7C.2.1: named for this specific smoke run, not a generic shared
-# name -- a VPS admin had already created a root-owned
-# /tmp/researchlens-before.sha256 for an unrelated purpose, and the
-# isolated `nightshift` user could not write to it. Test-only overrides
-# (validated above) let each automated test point these at its own
-# temporary path instead of ever touching this fixed production pair.
-RESEARCHLENS_BEFORE_DIGEST="${NS_RESEARCHLENS_BEFORE_DIGEST:-/tmp/nightshift-smoke-002-researchlens-before.sha256}"
-RESEARCHLENS_AFTER_DIGEST="${NS_RESEARCHLENS_AFTER_DIGEST:-/tmp/nightshift-smoke-002-researchlens-after.sha256}"
+# Milestone 7C.2.1: named for this specific smoke attempt (via SMOKE_ID),
+# never a bare generic shared name -- an admin-created, root-owned file at a
+# fixed, non-smoke-specific path once caused the isolated `nightshift` user
+# a write failure here. Test-only overrides (validated above) let each
+# automated test point these at its own temporary path instead of ever
+# touching this fixed production pair. (Deliberately described here without
+# repeating the literal old generic filename verbatim, so a simple
+# string-match audit of this file's executable logic for that legacy name
+# does not also flag a comment that only narrates history and touches no
+# live code path.)
+RESEARCHLENS_BEFORE_DIGEST="${NS_RESEARCHLENS_BEFORE_DIGEST:-/tmp/nightshift-smoke-$SMOKE_ID-researchlens-before.sha256}"
+RESEARCHLENS_AFTER_DIGEST="${NS_RESEARCHLENS_AFTER_DIGEST:-/tmp/nightshift-smoke-$SMOKE_ID-researchlens-after.sha256}"
 
 # smoke-001 evidence -- read-only existence checks only, never written.
 SMOKE1_TASK_DIR="$SMOKE_ROOT/task-001"
@@ -105,7 +119,7 @@ SMOKE1_REPORT_DIR="$REPORTS_DIR/smoke-001"
 MAX_WAIT_SECONDS="${NS_MAX_WAIT_SECONDS:-600}"
 POLL_INTERVAL_SECONDS="${NS_POLL_INTERVAL_SECONDS:-5}"
 CLAUDE_TIMEOUT_SECONDS="${NS_CLAUDE_TIMEOUT_SECONDS:-120}"
-MIN_TEST_COUNT="${NS_MIN_TEST_COUNT:-187}"
+MIN_TEST_COUNT="${NS_MIN_TEST_COUNT:-198}"
 
 # ---------------------------------------------------------------------------
 # Small helpers
@@ -124,6 +138,29 @@ run_as_nightshift() {
   fi
 }
 
+# Milestone 7C.2.2: feeds the embedded helper's Python source directly over
+# stdin to `python3 -`, never via an on-disk file. A root-created `mktemp`
+# file is mode 0600 by default -- fine for *this* process to read, but the
+# real VPS run showed exactly the failure that causes: nightshift, a
+# different, unprivileged user, got Permission Denied trying to open() that
+# path itself. Piping the source over stdin sidesteps this entirely: the
+# underlying temp storage bash's heredoc mechanism uses is still created and
+# opened by this (root) process, but the child (running as nightshift via
+# `sudo -u nightshift -H`) only ever inherits that already-open file
+# descriptor across fork/exec -- it never calls open() on the path itself,
+# so the path's own permission bits never matter. `PYTHONPATH` makes the
+# `nightshift` package importable without needing cwd to matter either;
+# `PATH` is set explicitly and minimally, never inherited, closing off any
+# PATH-poisoning surface for this invocation specifically.
+run_helper() {
+  if [ "$NS_TEST_MODE" = "1" ]; then
+    env PYTHONPATH="$REPO_ROOT" PATH="/usr/bin:/bin" python3 - "$@" <<< "$HELPER_PY_SOURCE"
+  else
+    sudo -u "$NIGHTSHIFT_USER" -H env PYTHONPATH="$REPO_ROOT" PATH="/usr/bin:/bin" python3 - "$@" \
+      <<< "$HELPER_PY_SOURCE"
+  fi
+}
+
 SCRATCH_FILES=()
 register_scratch() { SCRATCH_FILES+=("$1"); }
 
@@ -133,8 +170,8 @@ cleanup() {
     [ -n "$f" ] && rm -f "$f" 2>/dev/null || true
   done
   if [ "$ec" -ne 0 ]; then
-    echo "nightshift-smoke-002.sh exited with status $ec." >&2
-    echo "No smoke-002 evidence was deleted or reset -- everything under" >&2
+    echo "nightshift-smoke-002.sh (attempt smoke-$SMOKE_ID) exited with status $ec." >&2
+    echo "No smoke-$SMOKE_ID evidence was deleted or reset -- everything under" >&2
     echo "$STATE_DIR, $LOGS_DIR, $REPORTS_DIR, and $TASK_DIR has been left" >&2
     echo "in place for investigation. smoke-001 was not touched." >&2
   fi
@@ -145,10 +182,8 @@ trap cleanup EXIT
 # Embedded structured-verification helper (stdlib only, never invokes Claude)
 # ---------------------------------------------------------------------------
 
-HELPER_PY="$(mktemp)"
-register_scratch "$HELPER_PY"
-cat > "$HELPER_PY" <<'PYEOF'
-"""Structured, non-interactive helper for the smoke-002 operator script.
+HELPER_PY_SOURCE="$(cat <<'PYEOF'
+"""Structured, non-interactive helper for the Nightshift smoke operator script.
 
 Two subcommands, both stdlib-only and read-only:
 
@@ -284,6 +319,7 @@ def main(argv):
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
 PYEOF
+)"
 
 # ---------------------------------------------------------------------------
 # Cheap preconditions first (fail fast before the expensive test-suite run)
@@ -299,6 +335,14 @@ fi
 [ -f "$REPO_ROOT/nightshift/runtime/claude_executor.py" ] \
   || fail "$REPO_ROOT does not look like the agent-orchestration checkout"
 
+# Milestone 7C.2.2: move from /tmp (accessible to every account, but not
+# semantically meaningful) to the repository checkout itself -- this is
+# nightshift's own directory, so every later `sudo -u nightshift -H`
+# command (including the preflight helper) runs from a working directory
+# that user can always access, never one it merely happens not to be
+# blocked from.
+cd "$REPO_ROOT"
+
 # -- Preserve smoke-001: every path must already exist, none may be touched.
 for path in \
   "$SMOKE1_TASK_DIR" \
@@ -311,7 +355,9 @@ for path in \
     || fail "smoke-001 evidence missing or moved: $path -- refusing to proceed rather than assume it is safe to ignore"
 done
 
-# -- Refuse over old smoke-002 evidence; never auto-clean.
+# -- Refuse over old evidence for this attempt (smoke-$SMOKE_ID); never
+# auto-clean. Choosing a different NS_SMOKE_ID is how a human deliberately
+# starts a fresh attempt without touching a prior one's preserved evidence.
 for path in \
   "$TASK_DIR" \
   "$QUEUE_PATH" \
@@ -324,7 +370,7 @@ for path in \
   "$CYCLE_EXITCODE" \
 ; do
   if run_as_nightshift test -e "$path"; then
-    fail "smoke-002 evidence already exists at $path -- investigate and deliberately clear prior smoke-002 evidence before rerunning, this script will not overwrite it"
+    fail "smoke-$SMOKE_ID evidence already exists at $path -- investigate and preserve it as failed-attempt evidence, then rerun with a different NS_SMOKE_ID (e.g. NS_SMOKE_ID=003) rather than clearing or overwriting it"
   fi
 done
 # ---------------------------------------------------------------------------
@@ -375,8 +421,7 @@ run_as_nightshift mkdir -p "$SMOKE_ROOT"
 
 PREFLIGHT_LOG="$(mktemp)"
 register_scratch "$PREFLIGHT_LOG"
-if ! run_as_nightshift env PYTHONPATH="$REPO_ROOT" python3 "$HELPER_PY" \
-    preflight "$SMOKE_ROOT" "$FORBIDDEN_PATH" "$CLAUDE_REAL" > "$PREFLIGHT_LOG" 2>&1; then
+if ! run_helper preflight "$SMOKE_ROOT" "$FORBIDDEN_PATH" "$CLAUDE_REAL" > "$PREFLIGHT_LOG" 2>&1; then
   cat "$PREFLIGHT_LOG" >&2
   fail "deterministic preflight (isolation + auth) did not pass"
 fi
@@ -420,8 +465,8 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Set up smoke-002: disposable project, dedicated report dir, trusted
-# checker, one-task queue, Claude executor configuration.
+# Set up this smoke attempt: disposable project, dedicated report dir,
+# trusted checker, one-task queue, Claude executor configuration.
 # ---------------------------------------------------------------------------
 
 run_as_nightshift mkdir -p "$TASK_DIR"
@@ -438,7 +483,7 @@ run_as_nightshift tee "$QUEUE_PATH" > /dev/null <<EOF
 {
   "tasks": [
     {
-      "id": "smoke-002",
+      "id": "smoke-$SMOKE_ID",
       "status": "pending",
       "title": "Create calculator.py with an add(a, b) function that returns a + b, and test_calculator.py with a unittest TestCase covering: positive values (add(2, 3) == 5), negative values (add(-2, -3) == -5), and zero values (add(0, 0) == 0).",
       "attempt_count": 0,
@@ -498,7 +543,7 @@ elapsed=0
 while run_as_nightshift tmux has-session -t "$TMUX_SESSION" 2>/dev/null; do
   if [ "$elapsed" -ge "$MAX_WAIT_SECONDS" ]; then
     run_as_nightshift tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
-    fail "smoke-002 cycle did not finish within ${MAX_WAIT_SECONDS}s -- tmux session terminated, all evidence left in place, Claude was not rerun"
+    fail "smoke-$SMOKE_ID cycle did not finish within ${MAX_WAIT_SECONDS}s -- tmux session terminated, all evidence left in place, Claude was not rerun"
   fi
   sleep "$POLL_INTERVAL_SECONDS"
   elapsed=$((elapsed + POLL_INTERVAL_SECONDS))
@@ -538,8 +583,7 @@ fi
 
 VERIFY_LOG="$(mktemp)"
 register_scratch "$VERIFY_LOG"
-if ! run_as_nightshift env PYTHONPATH="$REPO_ROOT" python3 "$HELPER_PY" \
-    verify "$QUEUE_PATH" "$RUN_LOG_PATH" "$TASK_DIR" "smoke-002" > "$VERIFY_LOG" 2>&1; then
+if ! run_helper verify "$QUEUE_PATH" "$RUN_LOG_PATH" "$TASK_DIR" "smoke-$SMOKE_ID" > "$VERIFY_LOG" 2>&1; then
   cat "$VERIFY_LOG" >&2
   fail "structured post-run verification did not pass (see the VERIFY_FAILED reason above)"
 fi
@@ -551,7 +595,7 @@ if ! run_as_nightshift python3 "$CHECKER_PATH" "$TASK_DIR" > "$RECHECK_LOG" 2>&1
   fail "an independent re-run of the trusted acceptance checker did not pass"
 fi
 
-echo "PASS: smoke-002 completed one supervised cycle and every post-run verification gate passed."
+echo "PASS: smoke-$SMOKE_ID completed one supervised cycle and every post-run verification gate passed."
 echo "Report: $REPORT_DIR"
 echo "Run log: $RUN_LOG_PATH"
 echo "smoke-001 evidence was not modified."
