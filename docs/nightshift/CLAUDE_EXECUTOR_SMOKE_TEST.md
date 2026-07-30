@@ -365,13 +365,16 @@ and not inside the tmux session opened in step 11:
 
 ```bash
 sudo find /home/ubuntu/ResearchLens -exec stat --format='%n|%s|%Y|%a|%U|%G' {} + \
-  | sort | sha256sum | sudo tee /tmp/researchlens-before.sha256 > /dev/null
+  | sort | sha256sum | sudo tee /tmp/nightshift-smoke-002-researchlens-before.sha256 > /dev/null
 ```
 
 This hashes each file's name, size, mtime, permission bits, owner, and
 group — sorted for a deterministic combined digest regardless of directory
 traversal order — into a single line written to
-`/tmp/researchlens-before.sha256`.
+`/tmp/nightshift-smoke-002-researchlens-before.sha256`. The name is
+specific to this smoke run, not a generic shared path (Milestone 7C.2.1) —
+an unrelated, pre-existing root-owned file at a generic name once caused a
+`Permission Denied` for the isolated `nightshift` user.
 
 ### 11. Open a supervised tmux session
 
@@ -454,9 +457,9 @@ Run this as your own admin session (`ubuntu`/root), the same as step 10:
 
 ```bash
 sudo find /home/ubuntu/ResearchLens -exec stat --format='%n|%s|%Y|%a|%U|%G' {} + \
-  | sort | sha256sum | sudo tee /tmp/researchlens-after.sha256 > /dev/null
+  | sort | sha256sum | sudo tee /tmp/nightshift-smoke-002-researchlens-after.sha256 > /dev/null
 
-sudo diff -u /tmp/researchlens-before.sha256 /tmp/researchlens-after.sha256
+sudo diff -u /tmp/nightshift-smoke-002-researchlens-before.sha256 /tmp/nightshift-smoke-002-researchlens-after.sha256
 ```
 
 An empty diff means the two combined digests are identical: the observed

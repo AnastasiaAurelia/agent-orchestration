@@ -23,6 +23,15 @@
 # execution as the invoking user -- see nightshift/tests/test_nightshift_smoke_script.py,
 # which drives this exact script end-to-end against a temporary fixture
 # tree and a fake `claude`/`tmux` pair, never a real Claude invocation.
+#
+# NS_RESEARCHLENS_BEFORE_DIGEST and NS_RESEARCHLENS_AFTER_DIGEST
+# (Milestone 7C.2.1) are test-only overrides for the two ResearchLens
+# digest artifact paths -- honored only when NS_TEST_MODE=1; set outside
+# test mode, the script fails closed immediately rather than silently
+# using or ignoring them. This exists so automated tests never depend on,
+# and can never collide with, the real fixed production digest pair (a
+# pre-existing root-owned file at the old, generic path once caused
+# Permission Denied for the isolated `nightshift` user on the real VPS).
 
 set -Eeuo pipefail
 
@@ -37,6 +46,21 @@ cd /tmp
 # ---------------------------------------------------------------------------
 
 NS_TEST_MODE="${NS_TEST_MODE:-0}"
+
+# Milestone 7C.2.1: NS_RESEARCHLENS_BEFORE_DIGEST/NS_RESEARCHLENS_AFTER_DIGEST
+# are test-only overrides for the two ResearchLens digest artifact paths
+# below. Checked here, before anything else, so a misconfigured *real* run
+# can never silently redirect where the production before/after digest is
+# written just because one of these happened to be set in the environment --
+# fail closed immediately instead.
+for _ns_test_only_var in NS_RESEARCHLENS_BEFORE_DIGEST NS_RESEARCHLENS_AFTER_DIGEST; do
+  if [ "$NS_TEST_MODE" != "1" ] && [ -n "${!_ns_test_only_var:-}" ]; then
+    echo "GATE FAILED: $_ns_test_only_var is a test-only override and must not be set outside NS_TEST_MODE=1" >&2
+    exit 1
+  fi
+done
+unset _ns_test_only_var
+
 NIGHTSHIFT_USER="${NS_NIGHTSHIFT_USER:-nightshift}"
 
 NIGHTSHIFT_HOME="${NS_NIGHTSHIFT_HOME:-/home/nightshift}"
@@ -62,6 +86,15 @@ FORBIDDEN_PATH="${NS_FORBIDDEN_PATH:-/home/ubuntu}"
 RESEARCHLENS_PATH="${NS_RESEARCHLENS_PATH:-/home/ubuntu/ResearchLens}"
 CLAUDE_CONFIGURED_PATH="${NS_CLAUDE_CONFIGURED_PATH:-$NIGHTSHIFT_HOME/.local/bin/claude}"
 
+# Milestone 7C.2.1: named for this specific smoke run, not a generic shared
+# name -- a VPS admin had already created a root-owned
+# /tmp/researchlens-before.sha256 for an unrelated purpose, and the
+# isolated `nightshift` user could not write to it. Test-only overrides
+# (validated above) let each automated test point these at its own
+# temporary path instead of ever touching this fixed production pair.
+RESEARCHLENS_BEFORE_DIGEST="${NS_RESEARCHLENS_BEFORE_DIGEST:-/tmp/nightshift-smoke-002-researchlens-before.sha256}"
+RESEARCHLENS_AFTER_DIGEST="${NS_RESEARCHLENS_AFTER_DIGEST:-/tmp/nightshift-smoke-002-researchlens-after.sha256}"
+
 # smoke-001 evidence -- read-only existence checks only, never written.
 SMOKE1_TASK_DIR="$SMOKE_ROOT/task-001"
 SMOKE1_QUEUE_PATH="$STATE_DIR/smoke-queue.json"
@@ -72,7 +105,7 @@ SMOKE1_REPORT_DIR="$REPORTS_DIR/smoke-001"
 MAX_WAIT_SECONDS="${NS_MAX_WAIT_SECONDS:-600}"
 POLL_INTERVAL_SECONDS="${NS_POLL_INTERVAL_SECONDS:-5}"
 CLAUDE_TIMEOUT_SECONDS="${NS_CLAUDE_TIMEOUT_SECONDS:-120}"
-MIN_TEST_COUNT="${NS_MIN_TEST_COUNT:-178}"
+MIN_TEST_COUNT="${NS_MIN_TEST_COUNT:-187}"
 
 # ---------------------------------------------------------------------------
 # Small helpers
@@ -447,7 +480,8 @@ researchlens_digest() {
   find "$RESEARCHLENS_PATH" -exec stat --format='%n|%s|%Y|%a|%U|%G' {} + | sort | sha256sum | awk '{print $1}'
 }
 
-researchlens_digest > /tmp/researchlens-before.sha256
+mkdir -p "$(dirname "$RESEARCHLENS_BEFORE_DIGEST")" "$(dirname "$RESEARCHLENS_AFTER_DIGEST")"
+researchlens_digest > "$RESEARCHLENS_BEFORE_DIGEST"
 
 # ---------------------------------------------------------------------------
 # Real invocation -- exactly one bounded cycle, inside a dedicated tmux
@@ -483,8 +517,8 @@ fi
 # unchanged, not byte-for-byte content identity of every file.
 # ---------------------------------------------------------------------------
 
-researchlens_digest > /tmp/researchlens-after.sha256
-if ! diff -q /tmp/researchlens-before.sha256 /tmp/researchlens-after.sha256 > /dev/null; then
+researchlens_digest > "$RESEARCHLENS_AFTER_DIGEST"
+if ! diff -q "$RESEARCHLENS_BEFORE_DIGEST" "$RESEARCHLENS_AFTER_DIGEST" > /dev/null; then
   fail "ResearchLens metadata-tree digest changed during the smoke cycle -- investigate before treating anything else here as safe"
 fi
 

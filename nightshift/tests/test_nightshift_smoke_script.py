@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 SCRIPT_PATH = os.path.join(REPO_ROOT, "scripts", "nightshift-smoke-002.sh")
@@ -242,91 +243,125 @@ def _write_fake_tmux(directory):
     return path
 
 
+def _build_fixture(prefix="nightshift-smoke-script-test-"):
+    """Build one complete, independent fixture tree.
+
+    Every path lives under a single fresh tempfile.mkdtemp() -- including a
+    dedicated digest_dir for the ResearchLens before/after digest artifacts
+    (Milestone 7C.2.1) -- so two fixtures built by two separate calls to
+    this function can never share a path, a digest file, or any other
+    artifact, no matter how many times it is called or in what order.
+    Returns a SimpleNamespace with attributes matching the test case's own
+    former self.* names, so setUp() can just splat it onto self.
+    """
+    tmpdir = tempfile.mkdtemp(prefix=prefix)
+    ns = SimpleNamespace(tmpdir=tmpdir)
+    ns.nightshift_home = os.path.join(tmpdir, "home-nightshift")
+    ns.ubuntu_home = os.path.join(tmpdir, "home-ubuntu")
+    ns.researchlens = os.path.join(ns.ubuntu_home, "ResearchLens")
+    ns.bin_dir = os.path.join(tmpdir, "bin")
+    ns.tmux_sessions_dir = os.path.join(tmpdir, "tmux-sessions")
+    ns.digest_dir = os.path.join(tmpdir, "researchlens-digests")
+    for d in (
+        ns.nightshift_home,
+        ns.ubuntu_home,
+        ns.researchlens,
+        ns.bin_dir,
+        ns.tmux_sessions_dir,
+        ns.digest_dir,
+    ):
+        os.makedirs(d, exist_ok=True)
+    with open(os.path.join(ns.researchlens, "app.py"), "w", encoding="utf-8") as f:
+        f.write("# production app\n")
+    with open(os.path.join(ns.researchlens, ".env"), "w", encoding="utf-8") as f:
+        f.write("SECRET=do-not-print-me\n")
+
+    _write_fake_tmux(ns.bin_dir)
+
+    ns.smoke1_task_dir = os.path.join(ns.nightshift_home, "workspace", "smoke", "task-001")
+    ns.smoke1_state_dir = os.path.join(ns.nightshift_home, "state")
+    ns.smoke1_logs_dir = os.path.join(ns.nightshift_home, "logs")
+    ns.smoke1_reports_dir = os.path.join(ns.nightshift_home, "reports", "smoke-001")
+    os.makedirs(ns.smoke1_task_dir)
+    os.makedirs(ns.smoke1_state_dir)
+    os.makedirs(ns.smoke1_logs_dir)
+    os.makedirs(ns.smoke1_reports_dir)
+    ns.smoke1_queue_path = os.path.join(ns.smoke1_state_dir, "smoke-queue.json")
+    ns.smoke1_config_path = os.path.join(ns.smoke1_state_dir, "smoke-config.json")
+    ns.smoke1_run_log_path = os.path.join(ns.smoke1_logs_dir, "smoke-run-log.jsonl")
+    for path, content in (
+        (ns.smoke1_queue_path, '{"tasks": []}\n'),
+        (ns.smoke1_config_path, "{}\n"),
+        (ns.smoke1_run_log_path, ""),
+    ):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+    return ns
+
+
+def _fixture_env(ns, claude_mode="success", **overrides):
+    """Build the env dict for one script invocation against fixture ``ns``.
+
+    ``ns`` may be a NightshiftSmokeScriptTestCase (self) or any other object
+    exposing the same attributes (e.g. one built by _build_fixture()) -- the
+    two independent-fixture tests below rely on that.
+
+    A genuinely minimal base environment, not a copy of this dev shell's own
+    os.environ -- NS_TEST_MODE runs every "nightshift" operation directly (no
+    sudo -u nightshift -H to strip anything), so a real, benign variable
+    already present in the developer's own shell (e.g. SSH_AUTH_SOCK from a
+    normal SSH agent) would otherwise reach auth_preflight's
+    sensitive-variable check and correctly, but unhelpfully, fail closed for
+    a reason unrelated to whatever a given test is actually exercising.
+    """
+    env = {
+        "PATH": ns.bin_dir + os.pathsep + "/usr/bin:/bin",
+        "HOME": os.environ.get("HOME", "/tmp"),
+        "LANG": os.environ.get("LANG", "C"),
+    }
+    env["NS_TEST_MODE"] = "1"
+    # NS_REPO_ROOT below is this actual repository, so the script's own
+    # "run the full test suite" precondition would otherwise recursively
+    # re-invoke this very test file, whose "full setup" tests each do
+    # the same thing again -- unbounded nested self-invocation. These
+    # tests exercise the other eight preconditions and the post-run
+    # verification, not the test-suite gate itself, so it is skipped
+    # here (see the script's own comment at that gate for why this
+    # escape hatch exists and why it can never trigger outside test mode).
+    env["NS_SKIP_TEST_SUITE_CHECK"] = "1"
+    env["NS_NIGHTSHIFT_USER"] = os.environ.get("USER", "root")
+    env["NS_NIGHTSHIFT_HOME"] = ns.nightshift_home
+    env["NS_REPO_ROOT"] = REPO_ROOT
+    env["NS_FORBIDDEN_PATH"] = ns.ubuntu_home
+    env["NS_RESEARCHLENS_PATH"] = ns.researchlens
+    # Test-only digest overrides (Milestone 7C.2.1) -- always paired with
+    # NS_TEST_MODE=1 above, and always unique to this fixture's own tmpdir.
+    # Never the script's own fixed production default.
+    env["NS_RESEARCHLENS_BEFORE_DIGEST"] = os.path.join(ns.digest_dir, "before.sha256")
+    env["NS_RESEARCHLENS_AFTER_DIGEST"] = os.path.join(ns.digest_dir, "after.sha256")
+    env["NS_CLAUDE_CONFIGURED_PATH"] = _write_fake_claude(ns.bin_dir, mode=claude_mode)
+    env["NS_MAX_WAIT_SECONDS"] = "30"
+    env["NS_POLL_INTERVAL_SECONDS"] = "1"
+    env["NS_CLAUDE_TIMEOUT_SECONDS"] = "20"
+    env["NS_MIN_TEST_COUNT"] = "1"  # this repo's real count; kept low so future growth never blocks this test
+    env["FAKE_TMUX_SESSIONS_DIR"] = ns.tmux_sessions_dir
+    env.pop("FAKE_TMUX_ALWAYS_ALIVE", None)
+    env.pop("FAKE_CLAUDE_RESEARCHLENS_TAMPER_PATH", None)
+    for key, value in overrides.items():
+        env[key] = value
+    return env
+
+
 class NightshiftSmokeScriptTestCase(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.mkdtemp(prefix="nightshift-smoke-script-test-")
-        self.nightshift_home = os.path.join(self.tmpdir, "home-nightshift")
-        self.ubuntu_home = os.path.join(self.tmpdir, "home-ubuntu")
-        self.researchlens = os.path.join(self.ubuntu_home, "ResearchLens")
-        self.bin_dir = os.path.join(self.tmpdir, "bin")
-        self.tmux_sessions_dir = os.path.join(self.tmpdir, "tmux-sessions")
-        for d in (
-            self.nightshift_home,
-            self.ubuntu_home,
-            self.researchlens,
-            self.bin_dir,
-            self.tmux_sessions_dir,
-        ):
-            os.makedirs(d, exist_ok=True)
-        with open(os.path.join(self.researchlens, "app.py"), "w", encoding="utf-8") as f:
-            f.write("# production app\n")
-        with open(os.path.join(self.researchlens, ".env"), "w", encoding="utf-8") as f:
-            f.write("SECRET=do-not-print-me\n")
-
-        _write_fake_tmux(self.bin_dir)
-
-        self.smoke1_task_dir = os.path.join(self.nightshift_home, "workspace", "smoke", "task-001")
-        self.smoke1_state_dir = os.path.join(self.nightshift_home, "state")
-        self.smoke1_logs_dir = os.path.join(self.nightshift_home, "logs")
-        self.smoke1_reports_dir = os.path.join(self.nightshift_home, "reports", "smoke-001")
-        os.makedirs(self.smoke1_task_dir)
-        os.makedirs(self.smoke1_state_dir)
-        os.makedirs(self.smoke1_logs_dir)
-        os.makedirs(self.smoke1_reports_dir)
-        self.smoke1_queue_path = os.path.join(self.smoke1_state_dir, "smoke-queue.json")
-        self.smoke1_config_path = os.path.join(self.smoke1_state_dir, "smoke-config.json")
-        self.smoke1_run_log_path = os.path.join(self.smoke1_logs_dir, "smoke-run-log.jsonl")
-        for path, content in (
-            (self.smoke1_queue_path, '{"tasks": []}\n'),
-            (self.smoke1_config_path, "{}\n"),
-            (self.smoke1_run_log_path, ""),
-        ):
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(content)
+        fixture = _build_fixture()
+        self.__dict__.update(vars(fixture))
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _env(self, claude_mode="success", **overrides):
-        # A genuinely minimal environment, not a copy of this dev shell's
-        # own os.environ -- NS_TEST_MODE runs every "nightshift" operation
-        # directly (no sudo -u nightshift -H to strip anything), so a real,
-        # benign variable already present in the developer's own shell
-        # (e.g. SSH_AUTH_SOCK from a normal SSH agent) would otherwise reach
-        # auth_preflight's sensitive-variable check and correctly, but
-        # unhelpfully, fail closed for a reason unrelated to whatever a
-        # given test is actually exercising.
-        env = {
-            "PATH": self.bin_dir + os.pathsep + "/usr/bin:/bin",
-            "HOME": os.environ.get("HOME", "/tmp"),
-            "LANG": os.environ.get("LANG", "C"),
-        }
-        env["NS_TEST_MODE"] = "1"
-        # NS_REPO_ROOT below is this actual repository, so the script's own
-        # "run the full test suite" precondition would otherwise recursively
-        # re-invoke this very test file, whose "full setup" tests each do
-        # the same thing again -- unbounded nested self-invocation. These
-        # tests exercise the other eight preconditions and the post-run
-        # verification, not the test-suite gate itself, so it is skipped
-        # here (see the script's own comment at that gate for why this
-        # escape hatch exists and why it can never trigger outside test mode).
-        env["NS_SKIP_TEST_SUITE_CHECK"] = "1"
-        env["NS_NIGHTSHIFT_USER"] = os.environ.get("USER", "root")
-        env["NS_NIGHTSHIFT_HOME"] = self.nightshift_home
-        env["NS_REPO_ROOT"] = REPO_ROOT
-        env["NS_FORBIDDEN_PATH"] = self.ubuntu_home
-        env["NS_RESEARCHLENS_PATH"] = self.researchlens
-        env["NS_CLAUDE_CONFIGURED_PATH"] = _write_fake_claude(self.bin_dir, mode=claude_mode)
-        env["NS_MAX_WAIT_SECONDS"] = "30"
-        env["NS_POLL_INTERVAL_SECONDS"] = "1"
-        env["NS_CLAUDE_TIMEOUT_SECONDS"] = "20"
-        env["NS_MIN_TEST_COUNT"] = "1"  # this repo's real count; kept low so future growth never blocks this test
-        env["FAKE_TMUX_SESSIONS_DIR"] = self.tmux_sessions_dir
-        env.pop("FAKE_TMUX_ALWAYS_ALIVE", None)
-        env.pop("FAKE_CLAUDE_RESEARCHLENS_TAMPER_PATH", None)
-        for key, value in overrides.items():
-            env[key] = value
-        return env
+        return _fixture_env(self, claude_mode=claude_mode, **overrides)
 
     def _run_script(self, env, timeout=120):
         return subprocess.run(
@@ -540,6 +575,170 @@ class NightshiftSmokeScriptTestCase(unittest.TestCase):
         combined_output = result.stdout + result.stderr
         self.assertNotIn(fake_token, combined_output)
         self.assertNotIn("do-not-print-me", combined_output)
+
+    # -- Milestone 7C.2.1: artifact isolation regression tests -------------------
+    #
+    # The real VPS run failed with "Permission denied" on
+    # /tmp/researchlens-before.sha256 -- a file an admin had already created,
+    # root-owned, at the same fixed generic path this script used to write
+    # to unconditionally. Every test below proves the digest artifacts are
+    # now fully isolated: a smoke-specific default name in production, and a
+    # test-only, per-fixture override that is rejected outside test mode.
+
+    def test_pre_existing_unwritable_file_at_old_generic_path_cannot_affect_tests(self):
+        old_generic_path = "/tmp/researchlens-before.sha256"
+        created_here = not os.path.exists(old_generic_path)
+        if created_here:
+            with open(old_generic_path, "w", encoding="utf-8") as f:
+                f.write("unrelated pre-existing content, simulating a real VPS admin's file\n")
+            os.chmod(old_generic_path, 0o444)
+        try:
+            result = self._run_script(self._env())
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("PASS", result.stdout)
+        finally:
+            if created_here:
+                os.chmod(old_generic_path, 0o644)
+                os.remove(old_generic_path)
+
+    def test_each_run_uses_its_own_configured_unique_digest_paths(self):
+        env = self._env()
+
+        result = self._run_script(env)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        before_path = env["NS_RESEARCHLENS_BEFORE_DIGEST"]
+        after_path = env["NS_RESEARCHLENS_AFTER_DIGEST"]
+        self.assertTrue(before_path.startswith(self.digest_dir))
+        self.assertTrue(after_path.startswith(self.digest_dir))
+        self.assertTrue(os.path.isfile(before_path))
+        self.assertTrue(os.path.isfile(after_path))
+
+    def test_digest_mismatch_test_fails_for_the_mismatch_not_a_permission_error(self):
+        env = self._env(claude_mode="researchlens_tamper")
+        _write_fake_claude(
+            self.bin_dir,
+            mode="researchlens_tamper",
+            researchlens_tamper_path=os.path.join(self.researchlens, "app.py"),
+        )
+
+        result = self._run_script(env)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ResearchLens metadata-tree digest changed", result.stderr)
+        self.assertNotIn("Permission denied", result.stderr)
+        self.assertNotIn("PASS", result.stdout)
+
+    def test_fake_successful_run_reaches_pass_with_isolated_digest_files(self):
+        env = self._env()
+
+        result = self._run_script(env)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PASS", result.stdout)
+        with open(env["NS_RESEARCHLENS_BEFORE_DIGEST"], encoding="utf-8") as f:
+            before_digest = f.read().strip()
+        with open(env["NS_RESEARCHLENS_AFTER_DIGEST"], encoding="utf-8") as f:
+            after_digest = f.read().strip()
+        self.assertTrue(before_digest)
+        self.assertEqual(before_digest, after_digest)
+
+    def test_test_only_digest_overrides_are_rejected_outside_test_mode(self):
+        stray_path = os.path.join(self.tmpdir, "should-not-be-honored.sha256")
+        for var_name in ("NS_RESEARCHLENS_BEFORE_DIGEST", "NS_RESEARCHLENS_AFTER_DIGEST"):
+            with self.subTest(var_name=var_name):
+                env = {
+                    "PATH": "/usr/bin:/bin",
+                    "HOME": os.environ.get("HOME", "/tmp"),
+                    var_name: stray_path,
+                }
+
+                result = self._run_script(env)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    f"{var_name} is a test-only override and must not be set outside NS_TEST_MODE=1",
+                    result.stderr,
+                )
+                self.assertFalse(os.path.exists(stray_path))
+
+    def test_two_consecutive_full_runs_do_not_collide(self):
+        first_env = self._env()
+        first_result = self._run_script(first_env)
+        self.assertEqual(first_result.returncode, 0, first_result.stdout + first_result.stderr)
+
+        second_fixture = _build_fixture(prefix="nightshift-smoke-script-test-second-")
+        self.addCleanup(shutil.rmtree, second_fixture.tmpdir, ignore_errors=True)
+        second_env = _fixture_env(second_fixture)
+
+        second_result = self._run_script(second_env)
+        self.assertEqual(second_result.returncode, 0, second_result.stdout + second_result.stderr)
+
+        # Both runs' own digest files are intact and distinct -- neither run
+        # overwrote or was blocked by the other's artifacts.
+        self.assertNotEqual(
+            first_env["NS_RESEARCHLENS_BEFORE_DIGEST"], second_env["NS_RESEARCHLENS_BEFORE_DIGEST"]
+        )
+        self.assertTrue(os.path.isfile(first_env["NS_RESEARCHLENS_BEFORE_DIGEST"]))
+        self.assertTrue(os.path.isfile(second_env["NS_RESEARCHLENS_BEFORE_DIGEST"]))
+
+    def test_two_independently_created_environments_do_not_share_artifacts(self):
+        env_a = self._env()
+        fixture_b = _build_fixture(prefix="nightshift-smoke-script-test-independent-")
+        self.addCleanup(shutil.rmtree, fixture_b.tmpdir, ignore_errors=True)
+        env_b = _fixture_env(fixture_b)
+
+        self.assertNotEqual(self.tmpdir, fixture_b.tmpdir)
+        self.assertNotEqual(env_a["NS_NIGHTSHIFT_HOME"], env_b["NS_NIGHTSHIFT_HOME"])
+        self.assertNotEqual(env_a["NS_RESEARCHLENS_PATH"], env_b["NS_RESEARCHLENS_PATH"])
+        self.assertNotEqual(
+            env_a["NS_RESEARCHLENS_BEFORE_DIGEST"], env_b["NS_RESEARCHLENS_BEFORE_DIGEST"]
+        )
+        self.assertNotEqual(
+            env_a["NS_RESEARCHLENS_AFTER_DIGEST"], env_b["NS_RESEARCHLENS_AFTER_DIGEST"]
+        )
+
+        result_a = self._run_script(env_a)
+        result_b = self._run_script(env_b)
+
+        self.assertEqual(result_a.returncode, 0, result_a.stdout + result_a.stderr)
+        self.assertEqual(result_b.returncode, 0, result_b.stdout + result_b.stderr)
+
+    def test_no_real_tmp_baseline_files_are_modified_when_overrides_are_used(self):
+        default_before = "/tmp/nightshift-smoke-002-researchlens-before.sha256"
+        default_after = "/tmp/nightshift-smoke-002-researchlens-after.sha256"
+        old_generic_before = "/tmp/researchlens-before.sha256"
+        old_generic_after = "/tmp/researchlens-after.sha256"
+        watched_paths = (default_before, default_after, old_generic_before, old_generic_after)
+        before_state = {p: (os.path.exists(p), _read_bytes_if_exists(p)) for p in watched_paths}
+
+        result = self._run_script(self._env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        after_state = {p: (os.path.exists(p), _read_bytes_if_exists(p)) for p in watched_paths}
+        self.assertEqual(
+            before_state,
+            after_state,
+            "no real, fixed /tmp digest path may be created or modified when "
+            "test-only digest overrides are in effect",
+        )
+
+    def test_full_operator_suite_runs_correctly_as_a_non_root_user(self):
+        self.assertNotEqual(
+            os.geteuid(), 0, "this test file is meant to be exercised as a non-root user"
+        )
+
+        result = self._run_script(self._env())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PASS", result.stdout)
+
+
+def _read_bytes_if_exists(path):
+    if not os.path.exists(path):
+        return None
+    with open(path, "rb") as f:
+        return f.read()
 
 
 if __name__ == "__main__":
