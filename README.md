@@ -29,6 +29,13 @@ same operating rules:
 
 This repo packages those rules into a reusable base.
 
+## Optional: Diana Nightshift
+
+[Diana Nightshift](docs/nightshift/README.md) is an experimental, supervised
+companion capability for giving one bounded task to a fresh Claude process,
+checking it independently, and recording deterministic evidence. It does not
+yet support unattended scheduling, automatic push, or deployment.
+
 ## What It Solves
 
 Agent Orchestration helps prevent common agentic coding failures:
