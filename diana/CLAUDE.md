@@ -42,6 +42,9 @@ trivial changes (typo, one-line config value, rename).
 
 - `skills/plan-review.md` — one-pass multi-lens plan sanity check.
 - `skills/research-first.md` — inspection discipline before fixing/answering.
+- `skills/loop-design.md` — safety pre-flight for recurring work.
+- `skills/project-loop.md` — bounded backlog-to-verified-change workflow using
+  Diana's existing loop state and gates.
 - `commands/fix.md`, `commands/review.md`, `commands/ship.md` — slash commands
   for the corresponding loop stages.
 - `hooks/` — the safety hook (destructive command warnings) and the cost log.

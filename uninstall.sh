@@ -14,7 +14,7 @@
 #   - Never deletes .claude/, .claude/commands/, .claude/skills/, or
 #     .claude/hooks/ themselves — only empty Diana-only subdirectories
 #     (skills/plan-review/, skills/research-first/, skills/minimal-solution/,
-#     skills/loop-design/, templates/diana/) it created.
+#     skills/loop-design/, skills/project-loop/, templates/diana/) it created.
 #   - Edits to shared files (settings.local.json, CLAUDE.md) are backed up
 #     before being modified, since those files may contain non-Diana content.
 #   - Never touches root-level LOOP.md/STATE.md/RUN_LOG.md/BUDGET.md — those
@@ -61,13 +61,14 @@ remove_file "$CLAUDE_DIR/hooks/check-careful.sh"
 remove_file "$CLAUDE_DIR/commands/orchestrate.md"
 remove_file "$CLAUDE_DIR/commands/loop-audit.md"
 remove_file "$CLAUDE_DIR/skills/loop-design/SKILL.md"
+remove_file "$CLAUDE_DIR/skills/project-loop/SKILL.md"
 remove_file "$CLAUDE_DIR/templates/diana/LOOP.md"
 remove_file "$CLAUDE_DIR/templates/diana/STATE.md"
 remove_file "$CLAUDE_DIR/templates/diana/RUN_LOG.md"
 remove_file "$CLAUDE_DIR/templates/diana/BUDGET.md"
 
 # remove Diana-only subdirectories, but only if now empty (never force)
-for d in "$CLAUDE_DIR/skills/plan-review" "$CLAUDE_DIR/skills/research-first" "$CLAUDE_DIR/skills/minimal-solution" "$CLAUDE_DIR/skills/loop-design" "$CLAUDE_DIR/templates/diana"; do
+for d in "$CLAUDE_DIR/skills/plan-review" "$CLAUDE_DIR/skills/research-first" "$CLAUDE_DIR/skills/minimal-solution" "$CLAUDE_DIR/skills/loop-design" "$CLAUDE_DIR/skills/project-loop" "$CLAUDE_DIR/templates/diana"; do
   if [ -d "$d" ] && rmdir "$d" 2>/dev/null; then
     REMOVED+=("${d#"$TARGET"/}/  (empty dir removed)")
   fi

@@ -45,6 +45,7 @@ check_file "$CLAUDE_DIR/hooks/check-careful.sh"          "hook script: check-car
 check_file "$CLAUDE_DIR/commands/orchestrate.md"         "command: /orchestrate"
 check_file "$CLAUDE_DIR/commands/loop-audit.md"          "command: /loop-audit"
 check_file "$CLAUDE_DIR/skills/loop-design/SKILL.md"     "skill: loop-design"
+check_file "$CLAUDE_DIR/skills/project-loop/SKILL.md"    "skill: project-loop"
 check_file "$CLAUDE_DIR/templates/diana/LOOP.md"         "loop template: LOOP.md"
 check_file "$CLAUDE_DIR/templates/diana/STATE.md"        "loop template: STATE.md"
 check_file "$CLAUDE_DIR/templates/diana/RUN_LOG.md"      "loop template: RUN_LOG.md"

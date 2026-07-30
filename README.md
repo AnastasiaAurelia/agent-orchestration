@@ -49,7 +49,9 @@ diana/
 ├── skills/
 │   ├── plan-review.md
 │   ├── research-first.md
-│   └── minimal-solution.md
+│   ├── minimal-solution.md
+│   ├── loop-design.md
+│   └── project-loop.md
 ├── commands/
 │   ├── fix.md
 │   ├── review.md
@@ -130,6 +132,20 @@ It asks:
 
 It does not allow skipping validation, error handling, security, accessibility,
 or explicit requirements.
+
+### `skills/project-loop.md`
+
+Advances an approved backlog one bounded item at a time:
+
+```text
+inspect backlog -> plan -> implement -> test -> adversarial review
+-> commit only when verified -> update state -> select next
+```
+
+It reuses Diana's `LOOP.md`, `STATE.md`, `RUN_LOG.md`, and `BUDGET.md`
+conventions, honors L1/L2/L3 gates, and stops at explicit iteration/runtime
+limits or whenever safe progress requires a human. It does not schedule,
+deploy, push, merge, spawn agents, or create a parallel config/state system.
 
 ## Commands
 
