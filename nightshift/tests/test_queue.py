@@ -938,12 +938,24 @@ class NightshiftQueueTestCase(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(self.tmpdir, "marker.txt")))
 
     def test_executor_nonzero_exit_does_not_prevent_acceptance_from_running(self):
+        # Milestone 7C.1: this test used to assert the opposite of what's
+        # below -- that a passing acceptance command still marked the task
+        # "done" even though the executor itself exited non-zero. That was
+        # the exact flaw a real supervised Claude smoke test exposed (a
+        # failed-authentication Claude session, exit code 1, was reported
+        # "done" because a lenient acceptance command happened to pass).
+        # Acceptance must still *run* here (it remains useful diagnostic
+        # evidence, asserted below), but its PASSED result must never be
+        # sufficient for a "done" transition when the executor did not
+        # succeed -- see queue.run_acceptance_and_record()'s Completion
+        # Invariant.
         _write_raw_queue(
             self.queue_path,
             [
                 _task(
                     "t1",
                     attempt_count=0,
+                    max_attempts=3,
                     working_dir=self.tmpdir,
                     executor_command=[sys.executable, "-c", "import sys; sys.exit(1)"],
                     acceptance_command=[sys.executable, "-c", "pass"],
@@ -959,10 +971,82 @@ class NightshiftQueueTestCase(unittest.TestCase):
         self.assertEqual(run.executor.exit_code, 1)
         self.assertTrue(
             run.acceptance_run.acceptance.passed,
-            "acceptance must still run and be judged on its own merits, "
-            "independent of the executor's own exit code",
+            "acceptance still runs and is recorded as diagnostic evidence, "
+            "even though its own passing result cannot drive completion here",
         )
-        self.assertEqual(run.acceptance_run.transition.outcome, nsq.TransitionOutcome.DONE)
+        self.assertEqual(run.acceptance_run.transition.outcome, nsq.TransitionOutcome.REQUEUED)
+        with open(self.queue_path, encoding="utf-8") as f:
+            data = nsq.validate_queue(json.load(f))
+        self.assertEqual(data["tasks"][0]["status"], "pending")
+
+    def test_executor_nonzero_exit_at_retry_limit_permanently_fails_despite_passing_acceptance(self):
+        _write_raw_queue(
+            self.queue_path,
+            [
+                _task(
+                    "t1",
+                    attempt_count=0,
+                    max_attempts=1,
+                    working_dir=self.tmpdir,
+                    executor_command=[sys.executable, "-c", "import sys; sys.exit(1)"],
+                    acceptance_command=[sys.executable, "-c", "pass"],
+                )
+            ],
+        )
+        claim = nsq.claim_next(self.queue_path, claimant_pid=os.getpid())
+        self.assertEqual(claim.outcome, nsq.ClaimOutcome.CLAIMED)
+
+        run = nsq.run_task(self.queue_path, "t1", owner_pid=os.getpid())
+
+        self.assertTrue(run.acceptance_run.acceptance.passed)
+        self.assertEqual(
+            run.acceptance_run.transition.outcome, nsq.TransitionOutcome.FAILED_PERMANENTLY
+        )
+
+    def test_durable_run_log_records_executor_and_acceptance_evidence_before_transition(self):
+        run_log_path = os.path.join(self.tmpdir, "run_log.jsonl")
+        _write_raw_queue(
+            self.queue_path,
+            [
+                _task(
+                    "t1",
+                    attempt_count=0,
+                    max_attempts=3,
+                    working_dir=self.tmpdir,
+                    executor_command=[sys.executable, "-c", "import sys; sys.exit(1)"],
+                    acceptance_command=[sys.executable, "-c", "pass"],
+                )
+            ],
+        )
+        claim = nsq.claim_next(
+            self.queue_path, claimant_pid=os.getpid(), run_log_path=run_log_path
+        )
+        self.assertEqual(claim.outcome, nsq.ClaimOutcome.CLAIMED)
+
+        run = nsq.run_task(
+            self.queue_path, "t1", owner_pid=os.getpid(), run_log_path=run_log_path
+        )
+        self.assertEqual(run.acceptance_run.transition.outcome, nsq.TransitionOutcome.REQUEUED)
+
+        events, malformed = nsq._load_run_log_events(run_log_path)
+        self.assertEqual(malformed, 0)
+        evidence_events = [e for e in events if e["event"] == "task_run_evidence"]
+        self.assertEqual(len(evidence_events), 1)
+        evidence = evidence_events[0]
+        self.assertEqual(evidence["executor_outcome"], "completed")
+        self.assertEqual(evidence["executor_exit_code"], 1)
+        self.assertEqual(evidence["acceptance_outcome"], "passed")
+        self.assertEqual(evidence["acceptance_exit_code"], 0)
+
+        # The evidence entry must exist strictly before the transition entry
+        # it justifies -- a "requeued"/"done" event must never appear
+        # without the supporting evidence already durably recorded ahead of
+        # it (the ordering, not just presence, is the actual requirement).
+        transition_events = [e for e in events if e["event"] == "requeued"]
+        self.assertEqual(len(transition_events), 1)
+        self.assertLess(
+            events.index(evidence_events[0]), events.index(transition_events[0])
+        )
 
     def test_executor_times_out(self):
         task = _task(

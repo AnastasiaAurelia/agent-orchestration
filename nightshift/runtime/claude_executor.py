@@ -112,6 +112,41 @@ REQUIRED_HELP_MARKERS = (
     "--output-format",
 )
 
+# Milestone 7C.1: conservative, safe-to-check-in-cleartext substrings that
+# indicate a real Claude invocation exited non-zero because it could not
+# authenticate, not because the task itself failed. None of these are
+# secrets -- they are the kind of short status words/codes an API error
+# response or CLI error message uses, never a token or account identifier.
+# Deliberately broad and lowercase-matched: a false positive here only
+# yields a more specific, still-correctly-failing outcome label
+# (AUTH_FAILED instead of a generic nonzero exit); a false negative still
+# correctly fails the attempt via the ordinary nonzero-exit path below --
+# this classification only sharpens *why*, it never loosens the Completion
+# Invariant itself (see queue.run_acceptance_and_record()).
+_AUTH_FAILURE_MARKERS = (
+    "401",
+    "access token has expired",
+    "access token expired",
+    "re-authenticate",
+    "reauthenticate",
+    "authentication_error",
+    "unauthorized",
+    "invalid_api_key",
+    "invalid x-api-key",
+)
+
+
+def _looks_like_auth_failure(exit_code: Optional[int], stdout: str, stderr: str) -> bool:
+    """Best-effort detection of a Claude authentication failure in captured output.
+
+    Only ever consulted when the process already exited non-zero. Never
+    stores or returns the matched text itself -- callers only get a bool.
+    """
+    if not exit_code:
+        return False
+    combined = f"{stdout}\n{stderr}".lower()
+    return any(marker in combined for marker in _AUTH_FAILURE_MARKERS)
+
 # Same "never ran" concept queue.run_task() established in Milestone 7A --
 # duplicated here deliberately (queue._EXECUTOR_NEVER_RAN_OUTCOMES is
 # private, and this module only ever produces a subset of it anyway: a
@@ -557,8 +592,24 @@ def run_claude_executor(
     pid = proc.pid
     try:
         stdout, stderr = proc.communicate(timeout=config.claude_timeout_seconds)
+        outcome = _queue.ExecutorOutcome.COMPLETED
+        message = None
+        # Milestone 7C.1: a nonzero exit here previously still produced
+        # COMPLETED, which -- combined with a lenient acceptance command --
+        # is exactly how a real-world Claude authentication failure was
+        # once wrongly reported as a successful task. This reclassification
+        # never changes exit_code/stdout/stderr, only the outcome label and
+        # message; the Completion Invariant in
+        # queue.run_acceptance_and_record() is what actually prevents a
+        # "done" transition, for this and for any other nonzero exit.
+        if proc.returncode != 0 and _looks_like_auth_failure(proc.returncode, stdout, stderr):
+            outcome = _queue.ExecutorOutcome.AUTH_FAILED
+            message = (
+                "Claude authentication failure detected: nonzero exit code plus "
+                "recognized authentication-failure evidence in captured output"
+            )
         return _queue.ExecutorResult(
-            outcome=_queue.ExecutorOutcome.COMPLETED,
+            outcome=outcome,
             command=tuple(argv),
             pid=pid,
             exit_code=proc.returncode,
@@ -566,6 +617,7 @@ def run_claude_executor(
             stderr=stderr,
             started_at=started_at,
             ended_at=_utcnow().isoformat(),
+            message=message,
         )
     except subprocess.TimeoutExpired:
         pass
@@ -629,6 +681,16 @@ def run_claude_task(
     reason queue.run_task() already does: a lenient acceptance command must
     not mark a never-executed or policy-rejected task "done".
 
+    For every other executor outcome (COMPLETED, TIMED_OUT, AUTH_FAILED),
+    acceptance still runs, but its result is passed to
+    queue.run_acceptance_and_record() together with the executor result
+    itself so that function's Completion Invariant (Milestone 7C.1) can
+    enforce that a passing acceptance result only drives a "done" transition
+    when the executor also actually succeeded (COMPLETED, exit_code 0) --
+    this is the fix for the real-world false-success case where a Claude
+    session failed authentication (nonzero exit) but a lenient acceptance
+    command still passed.
+
     ``env`` is forwarded to run_claude_executor()'s own preflight check --
     see that function's docstring.
     """
@@ -682,7 +744,11 @@ def run_claude_task(
         )
 
     acceptance_run = _queue.run_acceptance_and_record(
-        config.queue_path, task_id, lock_path=config.lock_path, run_log_path=config.run_log_path
+        config.queue_path,
+        task_id,
+        lock_path=config.lock_path,
+        run_log_path=config.run_log_path,
+        executor_result=executor_result,
     )
     return _queue.TaskRun(executor=executor_result, acceptance_run=acceptance_run)
 

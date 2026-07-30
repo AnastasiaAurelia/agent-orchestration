@@ -236,6 +236,7 @@ import datetime
 import fcntl
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -730,17 +731,28 @@ def _append_run_log(
     attempt_count: Optional[int],
     detail: Optional[str] = None,
     now: Optional[datetime.datetime] = None,
+    executor_outcome: Optional[str] = None,
+    executor_exit_code: Optional[int] = None,
+    acceptance_outcome: Optional[str] = None,
+    acceptance_exit_code: Optional[int] = None,
+    evidence_excerpt: Optional[str] = None,
 ) -> None:
     """Best-effort append of one JSONL evidence line for the report generator.
 
     Does nothing if run_log_path is None -- every function that accepts it
     defaults to None, so this is opt-in and fully backward compatible with
-    every earlier milestone's calls. Deliberately narrow: only timestamp,
-    task_id, event, attempt_count, and a short detail string -- never
-    stdout/stderr or environment, so there is nothing here that needs
-    redacting later. Swallows OSError: a failure to log must never fail the
-    actual state transition that already happened; the queue file remains
-    the sole canonical state, this is auxiliary evidence only.
+    every earlier milestone's calls. The five ``executor_*``/``acceptance_*``/
+    ``evidence_excerpt`` fields (Milestone 7C.1) are additive and optional --
+    every existing call site that omits them still produces the exact same
+    entry shape as before, and _load_run_log_events()/render_report() only
+    ever read fields by name, so old and new log lines coexist safely in the
+    same file. ``evidence_excerpt`` is the only field that can ever carry
+    process output text, and only a short, redacted excerpt (see
+    _safe_log_excerpt in claude_executor-adjacent evidence recording) --
+    never a full stdout/stderr capture, an environment, or a raw auth-status
+    payload. Swallows OSError: a failure to log must never fail the actual
+    state transition that already happened; the queue file remains the sole
+    canonical state, this is auxiliary evidence only.
     """
     if run_log_path is None:
         return
@@ -750,6 +762,11 @@ def _append_run_log(
         "event": event,
         "attempt_count": attempt_count,
         "detail": detail,
+        "executor_outcome": executor_outcome,
+        "executor_exit_code": executor_exit_code,
+        "acceptance_outcome": acceptance_outcome,
+        "acceptance_exit_code": acceptance_exit_code,
+        "evidence_excerpt": evidence_excerpt,
     }
     try:
         with open(run_log_path, "a", encoding="utf-8") as f:
@@ -1423,12 +1440,83 @@ class AcceptanceRun:
         }
 
 
+# Token-shaped substrings that must never survive into durable evidence,
+# even inside a short excerpt of captured stdout/stderr (Milestone 7C.1).
+# Deliberately crude and conservative (bearer tokens, "sk-..." style API
+# keys, and any long opaque run of id-like characters) -- a false-positive
+# redaction only loses a little diagnostic text; a false negative could leak
+# a credential into the run log, which is the outcome that must never
+# happen.
+_TOKEN_LIKE_RE = re.compile(
+    r"(sk-[A-Za-z0-9_-]{10,}|Bearer\s+[A-Za-z0-9._-]{10,}|[A-Za-z0-9_-]{40,})",
+    re.IGNORECASE,
+)
+_EVIDENCE_EXCERPT_MAX_LEN = 300
+
+
+def _redact(text: str) -> str:
+    return _TOKEN_LIKE_RE.sub("[REDACTED]", text)
+
+
+def _safe_log_excerpt(executor_result: Optional["ExecutorResult"]) -> Optional[str]:
+    """A short, redacted excerpt of executor output for durable evidence only.
+
+    None for a clean success (COMPLETED, exit_code 0) -- there is nothing
+    diagnostically necessary to retain, and less retained text is less risk.
+    For anything else, prefers stderr (where CLI error/auth messages usually
+    land) falling back to stdout, then redacts token-shaped substrings and
+    bounds the length -- this is deliberately not the full capture already
+    held in the in-memory ExecutorResult (which the terminal CycleResult
+    still prints in full, unchanged from before this milestone); only this
+    bounded, screened excerpt is ever written to the durable run log.
+    """
+    if executor_result is None:
+        return None
+    if executor_result.outcome == ExecutorOutcome.COMPLETED and executor_result.exit_code == 0:
+        return None
+    raw = (executor_result.stderr or executor_result.stdout or "").strip()
+    if not raw:
+        return None
+    return _redact(raw)[:_EVIDENCE_EXCERPT_MAX_LEN]
+
+
+def _executor_succeeded(executor_result: Optional["ExecutorResult"]) -> bool:
+    """The Completion Invariant (Milestone 7C.1): did the executor actually succeed?
+
+    None means "no executor phase to judge" (a direct/standalone caller
+    exercising acceptance on its own, unchanged since before this
+    milestone) -- treated as trivially true so existing direct callers keep
+    their exact prior behavior. Otherwise, only COMPLETED with exit_code
+    exactly 0 counts as success; TIMED_OUT, AUTH_FAILED, and a COMPLETED
+    outcome with any nonzero exit_code are all "did not succeed", regardless
+    of what an acceptance command run afterward decides on its own.
+    """
+    return executor_result is None or (
+        executor_result.outcome == ExecutorOutcome.COMPLETED and executor_result.exit_code == 0
+    )
+
+
+def _executor_failure_detail(executor_result: "ExecutorResult") -> str:
+    """Human-readable, report-visible reason a non-succeeding executor forced failure."""
+    if executor_result.outcome == ExecutorOutcome.AUTH_FAILED:
+        cause = f"executor authentication failure (exit code {executor_result.exit_code})"
+    elif executor_result.outcome == ExecutorOutcome.TIMED_OUT:
+        cause = "executor timed out"
+    else:
+        cause = f"executor nonzero exit code ({executor_result.exit_code})"
+    return (
+        f"{cause}; acceptance result is not sufficient for completion because the "
+        "executor did not succeed"
+    )
+
+
 def run_acceptance_and_record(
     queue_path: str,
     task_id: str,
     owner_pid: Optional[int] = None,
     lock_path: Optional[str] = None,
     run_log_path: Optional[str] = None,
+    executor_result: Optional["ExecutorResult"] = None,
 ) -> AcceptanceRun:
     """Run a task's acceptance command, then apply the resulting transition.
 
@@ -1442,10 +1530,29 @@ def run_acceptance_and_record(
     else in between is still handled safely: the transition call simply
     returns WRONG_OWNER rather than corrupting anything.
 
-    A PASSED acceptance drives complete_task(); every other AcceptanceOutcome
-    (FAILED, TIMED_OUT, MISSING_COMMAND, MALFORMED_CONTRACT) drives
-    fail_task() identically -- from the retry state machine's point of
-    view, all four are simply "this attempt did not succeed".
+    Completion Invariant (Milestone 7C.1): a PASSED acceptance drives
+    complete_task() only when _executor_succeeded(executor_result) is also
+    true. Every other AcceptanceOutcome (FAILED, TIMED_OUT, MISSING_COMMAND,
+    MALFORMED_CONTRACT) drives fail_task() identically, exactly as before --
+    but so does a PASSED acceptance whose executor did not succeed: a
+    trivially-passing acceptance command must never mark a task "done" when
+    the executor that supposedly did the work timed out, failed to
+    authenticate, or exited non-zero. Acceptance still runs and its result
+    is still recorded either way, since it remains useful diagnostic
+    evidence -- it is only the *transition* that the executor's own outcome
+    can veto here, never whether acceptance itself runs.
+
+    ``executor_result``, when given, is the just-completed executor phase
+    this acceptance run follows (see _executor_succeeded()). It is None for
+    a direct/standalone caller exercising acceptance on its own -- that case
+    is unchanged from every milestone before 7C.1.
+
+    A structured, redaction-safe evidence line (event "task_run_evidence")
+    is appended to the run log -- when one is configured -- *before* the
+    complete_task()/fail_task() call that produces the actual transition, so
+    a "done" (or "requeued"/"failed_permanently") log event can never exist
+    without the executor/acceptance evidence that justified it already
+    durably recorded ahead of it.
     """
     if owner_pid is None:
         owner_pid = os.getpid()
@@ -1487,7 +1594,28 @@ def run_acceptance_and_record(
 
     acceptance = run_acceptance(task)
 
-    if acceptance.passed:
+    _append_run_log(
+        run_log_path,
+        "task_run_evidence",
+        task_id,
+        task["attempt_count"],
+        executor_outcome=executor_result.outcome.value if executor_result is not None else None,
+        executor_exit_code=executor_result.exit_code if executor_result is not None else None,
+        acceptance_outcome=acceptance.reason.value,
+        acceptance_exit_code=acceptance.exit_code,
+        evidence_excerpt=_safe_log_excerpt(executor_result),
+    )
+
+    if not _executor_succeeded(executor_result):
+        transition = fail_task(
+            queue_path,
+            task_id,
+            owner_pid=owner_pid,
+            lock_path=lock_path,
+            run_log_path=run_log_path,
+            detail=_executor_failure_detail(executor_result),
+        )
+    elif acceptance.passed:
         transition = complete_task(
             queue_path, task_id, owner_pid=owner_pid, lock_path=lock_path, run_log_path=run_log_path
         )
@@ -1507,9 +1635,24 @@ def run_acceptance_and_record(
 class ExecutorOutcome(str, Enum):
     """How the executor phase of a task run ended.
 
-    COMPLETED and TIMED_OUT mean the executor genuinely ran (to completion
-    or not); run_task() still runs acceptance afterward regardless, exactly
-    as before -- acceptance's verdict is what feeds done/retry/failed.
+    COMPLETED, TIMED_OUT, and AUTH_FAILED all mean the executor genuinely
+    ran (to completion or not); run_task() still runs acceptance afterward
+    regardless, exactly as before -- but since Milestone 7C.1, only a
+    COMPLETED outcome with exit_code == 0 can ever let a passing acceptance
+    result drive complete_task() (see run_acceptance_and_record()'s
+    Completion Invariant). TIMED_OUT, AUTH_FAILED, and a COMPLETED outcome
+    with a nonzero exit_code all force fail_task() regardless of what
+    acceptance decided on its own -- a passing acceptance command must
+    never paper over an executor that timed out, failed to authenticate, or
+    exited non-zero.
+
+    AUTH_FAILED (Milestone 7C.1) is produced only by
+    nightshift.runtime.claude_executor's own post-hoc classification of a
+    nonzero-exit real Claude invocation whose captured output matches
+    recognized authentication-failure evidence (e.g. an HTTP 401, "access
+    token has expired") -- the generic queue.run_executor() here never
+    produces it, since that classification is Claude-specific.
+
     MALFORMED_CONTRACT, MISSING_EXECUTABLE, and POLICY_REJECTED mean the
     executor never ran at all -- run_task() fails the attempt directly for
     these three (see run_task()'s docstring), since there is nothing for
@@ -1522,6 +1665,7 @@ class ExecutorOutcome(str, Enum):
     MISSING_EXECUTABLE = "missing_executable"
     MALFORMED_CONTRACT = "malformed_contract"
     POLICY_REJECTED = "policy_rejected"
+    AUTH_FAILED = "auth_failed"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1801,9 +1945,11 @@ def run_task(
     """Run one claimed task's executor, then run acceptance if it actually ran.
 
     If the executor genuinely ran (COMPLETED or TIMED_OUT), acceptance
-    always runs afterward and is the sole authority on done/retry/failed,
-    exactly as run_acceptance_and_record() already enforces on its own --
-    the executor's own exit code never decides anything by itself.
+    always runs afterward -- but since Milestone 7C.1, its PASSED result can
+    only drive complete_task() when the executor also succeeded (COMPLETED
+    with exit_code exactly 0); see run_acceptance_and_record()'s Completion
+    Invariant. A timed-out or nonzero-exit executor forces fail_task()
+    regardless of what acceptance decided on its own.
 
     If the executor never ran at all (MALFORMED_CONTRACT,
     MISSING_EXECUTABLE, or POLICY_REJECTED), this function fails the
@@ -1856,7 +2002,12 @@ def run_task(
         )
 
     acceptance_run = run_acceptance_and_record(
-        queue_path, task_id, owner_pid=owner_pid, lock_path=lock_path, run_log_path=run_log_path
+        queue_path,
+        task_id,
+        owner_pid=owner_pid,
+        lock_path=lock_path,
+        run_log_path=run_log_path,
+        executor_result=executor_result,
     )
     return TaskRun(executor=executor_result, acceptance_run=acceptance_run)
 
@@ -1878,6 +2029,7 @@ _REPORT_EVENT_LABELS = {
     "failed_permanently": "permanently failed",
     "recovered_requeued": "recovered from an abandoned run, requeued",
     "recovered_failed": "recovered from an abandoned run, permanently failed",
+    "task_run_evidence": "run evidence recorded",
 }
 
 

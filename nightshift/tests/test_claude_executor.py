@@ -701,6 +701,239 @@ class ClaudeExecutorTestCase(unittest.TestCase):
         for name in unexpected:
             self.assertIn(name, ("queue.json.lock",), f"unexpected leftover artifact: {name}")
 
+    # -- Milestone 7C.1: Completion Invariant regression tests -------------------
+    #
+    # The first real supervised smoke test showed a task marked "done" when a
+    # real Claude session failed authentication (nonzero exit) but a lenient
+    # acceptance command happened to pass. Every test below proves a passing
+    # acceptance result can no longer, by itself, mark a task "done" when the
+    # executor did not actually succeed.
+
+    def test_nonzero_exit_with_passing_acceptance_does_not_complete(self):
+        working_dir = self._task_working_dir()
+        claude_executable = _write_fake_claude(self.fake_bin_dir, exit_code=1)
+        _write_raw_queue(
+            self.queue_path,
+            [
+                _task(
+                    working_dir=working_dir,
+                    approved_root=working_dir,
+                    max_attempts=3,
+                    acceptance_command=[sys.executable, "-c", "pass"],
+                )
+            ],
+        )
+        config = self._config(claude_executable=claude_executable)
+        nsq.claim_next(self.queue_path, claimant_pid=os.getpid())
+
+        task_run = ce.run_claude_task(config, "t1", env=_CLEAN_ENV)
+
+        self.assertEqual(task_run.executor.outcome, nsq.ExecutorOutcome.COMPLETED)
+        self.assertEqual(task_run.executor.exit_code, 1)
+        self.assertTrue(
+            task_run.acceptance_run.acceptance.passed,
+            "acceptance still runs and passes on its own terms -- the "
+            "invariant under test is that this alone must not be enough",
+        )
+        self.assertNotEqual(task_run.acceptance_run.transition.outcome, nsq.TransitionOutcome.DONE)
+        self.assertEqual(task_run.acceptance_run.transition.outcome, nsq.TransitionOutcome.REQUEUED)
+
+    def test_simulated_401_access_token_expired_is_classified_as_auth_failure_and_does_not_complete(
+        self,
+    ):
+        working_dir = self._task_working_dir()
+        claude_executable = _write_fake_claude(
+            self.fake_bin_dir,
+            exit_code=1,
+            stderr_text=(
+                "API Error: 401 Unauthorized -- access token has expired, "
+                "please re-authenticate to continue."
+            ),
+        )
+        _write_raw_queue(
+            self.queue_path,
+            [
+                _task(
+                    working_dir=working_dir,
+                    approved_root=working_dir,
+                    max_attempts=3,
+                    acceptance_command=[sys.executable, "-c", "pass"],  # would trivially pass
+                )
+            ],
+        )
+        config = self._config(claude_executable=claude_executable)
+        nsq.claim_next(self.queue_path, claimant_pid=os.getpid())
+
+        task_run = ce.run_claude_task(config, "t1", env=_CLEAN_ENV)
+
+        self.assertEqual(task_run.executor.outcome, nsq.ExecutorOutcome.AUTH_FAILED)
+        self.assertEqual(task_run.executor.exit_code, 1)
+        self.assertTrue(task_run.acceptance_run.acceptance.passed)
+        self.assertNotEqual(task_run.acceptance_run.transition.outcome, nsq.TransitionOutcome.DONE)
+        self.assertEqual(task_run.acceptance_run.transition.outcome, nsq.TransitionOutcome.REQUEUED)
+
+    def test_timeout_with_passing_acceptance_does_not_complete(self):
+        working_dir = self._task_working_dir()
+        claude_executable = _write_fake_claude(self.fake_bin_dir, sleep_seconds=30)
+        _write_raw_queue(
+            self.queue_path,
+            [
+                _task(
+                    working_dir=working_dir,
+                    approved_root=working_dir,
+                    max_attempts=3,
+                    acceptance_command=[sys.executable, "-c", "pass"],
+                )
+            ],
+        )
+        config = self._config(claude_executable=claude_executable, claude_timeout_seconds=1)
+        nsq.claim_next(self.queue_path, claimant_pid=os.getpid())
+
+        task_run = ce.run_claude_task(config, "t1", env=_CLEAN_ENV)
+
+        self.assertEqual(task_run.executor.outcome, nsq.ExecutorOutcome.TIMED_OUT)
+        self.assertTrue(task_run.acceptance_run.acceptance.passed)
+        self.assertNotEqual(task_run.acceptance_run.transition.outcome, nsq.TransitionOutcome.DONE)
+
+    def test_self_reported_success_with_nonzero_exit_and_passing_acceptance_does_not_complete(self):
+        working_dir = self._task_working_dir()
+        claude_executable = _write_fake_claude(
+            self.fake_bin_dir,
+            exit_code=1,
+            stdout_text="SUCCESS! The task is complete and all tests pass.",
+        )
+        _write_raw_queue(
+            self.queue_path,
+            [
+                _task(
+                    working_dir=working_dir,
+                    approved_root=working_dir,
+                    max_attempts=3,
+                    acceptance_command=[sys.executable, "-c", "pass"],
+                )
+            ],
+        )
+        config = self._config(claude_executable=claude_executable)
+        nsq.claim_next(self.queue_path, claimant_pid=os.getpid())
+
+        task_run = ce.run_claude_task(config, "t1", env=_CLEAN_ENV)
+
+        self.assertIn("SUCCESS", task_run.executor.stdout)
+        self.assertTrue(task_run.acceptance_run.acceptance.passed)
+        self.assertNotEqual(task_run.acceptance_run.transition.outcome, nsq.TransitionOutcome.DONE)
+
+    def test_durable_evidence_records_executor_and_acceptance_before_transition(self):
+        working_dir = self._task_working_dir()
+        run_log_path = os.path.join(self.tmpdir, "run_log.jsonl")
+        claude_executable = _write_fake_claude(
+            self.fake_bin_dir,
+            exit_code=1,
+            stderr_text="API Error: 401 Unauthorized -- access token has expired.",
+        )
+        _write_raw_queue(
+            self.queue_path,
+            [
+                _task(
+                    working_dir=working_dir,
+                    approved_root=working_dir,
+                    max_attempts=3,
+                    acceptance_command=[sys.executable, "-c", "pass"],
+                )
+            ],
+        )
+        config = self._config(claude_executable=claude_executable, run_log_path=run_log_path)
+        nsq.claim_next(self.queue_path, claimant_pid=os.getpid(), run_log_path=run_log_path)
+
+        task_run = ce.run_claude_task(config, "t1", env=_CLEAN_ENV)
+        self.assertNotEqual(task_run.acceptance_run.transition.outcome, nsq.TransitionOutcome.DONE)
+
+        events, malformed = nsq._load_run_log_events(run_log_path)
+        self.assertEqual(malformed, 0)
+        evidence_events = [e for e in events if e["event"] == "task_run_evidence"]
+        self.assertEqual(len(evidence_events), 1)
+        evidence = evidence_events[0]
+        self.assertEqual(evidence["executor_outcome"], "auth_failed")
+        self.assertEqual(evidence["executor_exit_code"], 1)
+        self.assertEqual(evidence["acceptance_outcome"], "passed")
+        self.assertIn("401", evidence["evidence_excerpt"])
+
+        transition_events = [e for e in events if e["event"] == "requeued"]
+        self.assertEqual(len(transition_events), 1)
+        self.assertLess(
+            events.index(evidence_events[0]), events.index(transition_events[0])
+        )
+
+    def test_sensitive_token_like_text_is_redacted_from_durable_evidence(self):
+        working_dir = self._task_working_dir()
+        run_log_path = os.path.join(self.tmpdir, "run_log.jsonl")
+        fake_token = "sk-ant-api03-" + ("a" * 40)
+        claude_executable = _write_fake_claude(
+            self.fake_bin_dir,
+            exit_code=1,
+            stderr_text=(
+                f"API Error: 401 Unauthorized. Bearer {fake_token} rejected, "
+                "access token has expired."
+            ),
+        )
+        _write_raw_queue(
+            self.queue_path,
+            [
+                _task(
+                    working_dir=working_dir,
+                    approved_root=working_dir,
+                    max_attempts=3,
+                    acceptance_command=[sys.executable, "-c", "pass"],
+                )
+            ],
+        )
+        config = self._config(claude_executable=claude_executable, run_log_path=run_log_path)
+        nsq.claim_next(self.queue_path, claimant_pid=os.getpid())
+
+        ce.run_claude_task(config, "t1", env=_CLEAN_ENV)
+
+        with open(run_log_path, encoding="utf-8") as f:
+            raw_log_text = f.read()
+        self.assertNotIn(fake_token, raw_log_text)
+        self.assertIn("[REDACTED]", raw_log_text)
+        # The full, unredacted evidence remains available in-memory on the
+        # TaskRun/ExecutorResult the caller already holds (unchanged from
+        # before this milestone) -- only the durable run log is redacted.
+
+    def test_report_reflects_auth_failure_instead_of_claiming_done(self):
+        working_dir = self._task_working_dir()
+        run_log_path = os.path.join(self.tmpdir, "run_log.jsonl")
+        claude_executable = _write_fake_claude(
+            self.fake_bin_dir,
+            exit_code=1,
+            stderr_text="API Error: 401 Unauthorized -- access token has expired.",
+        )
+        _write_raw_queue(
+            self.queue_path,
+            [
+                _task(
+                    working_dir=working_dir,
+                    approved_root=working_dir,
+                    max_attempts=3,
+                    acceptance_command=[sys.executable, "-c", "pass"],
+                )
+            ],
+        )
+        config = self._config(claude_executable=claude_executable, run_log_path=run_log_path)
+
+        result = ce.run_one(config, env=_CLEAN_ENV)
+
+        self.assertTrue(result.ran)
+        self.assertNotEqual(
+            result.task_run.acceptance_run.transition.outcome, nsq.TransitionOutcome.DONE
+        )
+        with open(result.report_path, encoding="utf-8") as f:
+            report_text = f.read()
+        self.assertIn("Done: 0", report_text)
+        self.assertNotIn("Done: 1", report_text)
+        self.assertIn("authentication failure", report_text)
+        self.assertIn("exit code 1", report_text)
+        self.assertIn("not sufficient for completion", report_text)
+
 
 def _read_raw(path):
     with open(path, "rb") as f:

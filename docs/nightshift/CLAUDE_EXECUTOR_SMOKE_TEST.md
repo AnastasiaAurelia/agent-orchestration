@@ -1,10 +1,23 @@
-# Supervised Real-Claude Smoke Test (Milestone 7C)
+# Supervised Real-Claude Smoke Test (Milestone 7C, corrected by 7C.1)
 
 **Status: not executed.** Every command in this document is for a human to
 run manually, later, on the actual VPS, after reading and understanding
 what it does. Nothing in this milestone runs any of these commands, invokes
 a real Claude Code session, or touches production. There is no scheduler,
 no loop, and no automation implied anywhere in this document.
+
+**This is the second, corrected smoke run (`smoke-002`), not a rerun of
+`smoke-001`.** The first real supervised smoke test (`smoke-001`) exposed a
+deterministic false-success bug: a real Claude session that failed
+authentication (nonzero exit) was still marked `done` because the acceptance
+command (`python3 -m unittest discover -v`) exits 0 on zero discovered
+tests. Milestone 7C.1 fixed the underlying completion invariant and
+replaced the acceptance command with a trusted checker (step 6 below).
+**All `smoke-001` evidence (its queue, config, run log, report, and
+`task-001` project) is left exactly as it was — nothing in this document
+reads, modifies, or deletes anything named `smoke-001`.** Everything below
+uses new, independent `smoke-002` names throughout specifically so the two
+runs can never collide or be confused with each other.
 
 This is the supervised, one-shot proof that `nightshift/runtime/claude_executor.py`
 can carry a real Claude Code process through exactly one bounded cycle on
@@ -24,6 +37,23 @@ those run as your own admin session (`ubuntu`/root), never as `nightshift`,
 since the whole point is to check the production tree from outside the
 isolated account's own restricted view of it.
 
+**Before you start:** run `cd /tmp` in your own admin shell (the one you'll
+type `sudo -u nightshift ...` from). The first smoke run produced `Failed
+to restore initial working directory: /home/ubuntu: Permission denied` —
+this is `bash` complaining, when it starts as the `nightshift` user, that it
+inherited a current directory (`/home/ubuntu`) that `nightshift` cannot
+stat. It is otherwise harmless (the command still runs correctly), but it
+is easy to mistake for a real failure, and it is fully avoidable: it only
+happens because the *invoking* admin shell itself was sitting inside
+`/home/ubuntu` when it ran `sudo`. `/tmp` is traversable by every account on
+the box (mode `1777`) regardless of user, so parking your own shell there
+before running anything below avoids the warning entirely — **this changes
+nothing about `/home/ubuntu`'s own permissions**, it only moves where your
+own shell happens to be sitting. As additional defense, the multi-step
+`nightshift` command blocks below also explicitly `cd` into
+`/home/nightshift` themselves via `bash -lc`, so each one's own effective
+working directory is always somewhere `nightshift` can actually use.
+
 ## 1. Push this branch, then pull it into the isolated workspace
 
 From your own local worktree (not on the VPS):
@@ -35,32 +65,37 @@ git push origin feature/nightshift-capability
 Then, as the `nightshift` user on the VPS:
 
 ```bash
-sudo -u nightshift -H git -C /home/nightshift/workspace/agent-orchestration fetch origin
-sudo -u nightshift -H git -C /home/nightshift/workspace/agent-orchestration checkout feature/nightshift-capability
-sudo -u nightshift -H git -C /home/nightshift/workspace/agent-orchestration pull --ff-only origin feature/nightshift-capability
+sudo -u nightshift -H bash -lc '
+  cd /home/nightshift &&
+  git -C /home/nightshift/workspace/agent-orchestration fetch origin &&
+  git -C /home/nightshift/workspace/agent-orchestration checkout feature/nightshift-capability &&
+  git -C /home/nightshift/workspace/agent-orchestration pull --ff-only origin feature/nightshift-capability
+'
 ```
 
 ## 2. Pre-run guards — refuse to proceed over old evidence
 
-This smoke test must start from a clean slate. Run this before creating
-anything, and stop if it stops you — do not delete or overwrite previous
-smoke evidence just to get past this check; look at what is already there
-first and decide on purpose.
+This smoke test must start from a clean slate — for `smoke-002` specifically;
+`smoke-001`'s own evidence is deliberately not part of this check and is
+never touched. Run this before creating anything, and stop if it stops
+you — do not delete or overwrite previous smoke evidence just to get past
+this check; look at what is already there first and decide on purpose.
 
 ```bash
 for path in \
-  /home/nightshift/workspace/smoke/task-001 \
-  /home/nightshift/state/smoke-queue.json \
-  /home/nightshift/state/smoke-config.json \
-  /home/nightshift/logs/smoke-run-log.jsonl \
-  /home/nightshift/reports/smoke-001 \
+  /home/nightshift/workspace/smoke/task-002 \
+  /home/nightshift/state/smoke-002-queue.json \
+  /home/nightshift/state/smoke-002-config.json \
+  /home/nightshift/state/smoke-002-acceptance.py \
+  /home/nightshift/logs/smoke-002-run-log.jsonl \
+  /home/nightshift/reports/smoke-002 \
 ; do
   if sudo -u nightshift -H test -e "$path"; then
-    echo "REFUSING TO PROCEED: $path already exists -- inspect and deliberately clear prior smoke evidence before rerunning this test, do not overwrite it silently." >&2
+    echo "REFUSING TO PROCEED: $path already exists -- inspect and deliberately clear prior smoke-002 evidence before rerunning this test, do not overwrite it silently." >&2
     exit 1
   fi
 done
-echo "Pre-run guard passed: no prior smoke evidence found."
+echo "Pre-run guard passed: no prior smoke-002 evidence found."
 ```
 
 ## 3. Resolve and validate the real Claude executable path
@@ -89,17 +124,20 @@ fi
 echo "Resolved canonical Claude executable: $CLAUDE_REAL"
 ```
 
-Step 7 below writes `$CLAUDE_REAL` (the resolved canonical path) into
-`smoke-config.json` — never the original, possibly-symlinked
+Step 8 below writes `$CLAUDE_REAL` (the resolved canonical path) into
+`smoke-002-config.json` — never the original, possibly-symlinked
 `/home/nightshift/.local/bin/claude` path.
 
 ## 4. Create the disposable smoke project
 
 ```bash
-sudo -u nightshift -H mkdir -p /home/nightshift/workspace/smoke/task-001
-sudo -u nightshift -H git -C /home/nightshift/workspace/smoke/task-001 init
-sudo -u nightshift -H git -C /home/nightshift/workspace/smoke/task-001 config user.email "nightshift-smoke@localhost"
-sudo -u nightshift -H git -C /home/nightshift/workspace/smoke/task-001 config user.name "Nightshift Smoke Test"
+sudo -u nightshift -H bash -lc '
+  cd /home/nightshift &&
+  mkdir -p /home/nightshift/workspace/smoke/task-002 &&
+  git -C /home/nightshift/workspace/smoke/task-002 init &&
+  git -C /home/nightshift/workspace/smoke/task-002 config user.email "nightshift-smoke@localhost" &&
+  git -C /home/nightshift/workspace/smoke/task-002 config user.name "Nightshift Smoke Test"
+'
 ```
 
 This directory is never committed to the `agent-orchestration` repository
@@ -110,34 +148,70 @@ later rerun until it is deliberately cleared).
 ## 5. Create the dedicated report directory
 
 ```bash
-sudo -u nightshift -H mkdir -p /home/nightshift/reports/smoke-001
+sudo -u nightshift -H mkdir -p /home/nightshift/reports/smoke-002
 ```
 
-Using a dedicated `smoke-001` subdirectory, rather than the shared
-`/home/nightshift/reports` root, keeps this test's report isolated from
-any other report history that directory may accumulate — step 12 below
-only ever looks inside `smoke-001`, never the broader directory.
+Using a dedicated `smoke-002` subdirectory, rather than the shared
+`/home/nightshift/reports` root (which also still holds `smoke-001`'s own
+report, untouched), keeps this test's report isolated — step 13 below only
+ever looks inside `smoke-002`, never the broader directory or `smoke-001`'s
+own report.
 
-## 6. Create the one-task queue
+## 6. Install the trusted smoke acceptance checker
 
-Write `/home/nightshift/state/smoke-queue.json` with exactly one pending
-task (as the `nightshift` user, not copy-pasted from an admin shell so the
-file ends up owned correctly):
+The first smoke run's acceptance command was a plain
+`python3 -m unittest discover -v`, which exits `0` — "Ran 0 tests / OK" —
+even when neither project file was ever created. This is the second,
+independent defect Milestone 7C.1 fixed (the first was the completion
+invariant itself, which no longer lets *any* passing acceptance result
+override a Claude session that didn't actually succeed).
+
+The replacement is `nightshift/runtime/smoke_acceptance_checker.py` — an
+already-tested (see `nightshift/tests/test_smoke_acceptance_checker.py`),
+stdlib-only script that requires both `calculator.py` and
+`test_calculator.py` to exist, requires at least three tests to be
+*discovered* (counted structurally, never by parsing "Ran N tests" text),
+and only exits `0` if all of them pass. Install it as a copy owned by
+`nightshift`, outside the Claude-editable `task-002` directory entirely, so
+a Claude session has no way to read or tamper with its own grader:
 
 ```bash
-sudo -u nightshift -H tee /home/nightshift/state/smoke-queue.json > /dev/null <<'EOF'
+sudo -u nightshift -H bash -lc '
+  cd /home/nightshift &&
+  cp /home/nightshift/workspace/agent-orchestration/nightshift/runtime/smoke_acceptance_checker.py \
+     /home/nightshift/state/smoke-002-acceptance.py &&
+  chmod 500 /home/nightshift/state/smoke-002-acceptance.py
+'
+```
+
+`chmod 500` (owner read+execute only, nothing for group or other, not even
+owner-write) means even the `nightshift` account itself cannot accidentally
+edit this copy once installed — if you need to update the checker, remove
+this file deliberately and re-copy it, rather than editing it in place.
+
+## 7. Create the one-task queue
+
+Write `/home/nightshift/state/smoke-002-queue.json` with exactly one
+pending task (as the `nightshift` user, not copy-pasted from an admin shell
+so the file ends up owned correctly). Its `acceptance_command` invokes the
+trusted checker installed in step 6, passing the disposable project
+directory as its one argument — never the generic `unittest discover`
+command `smoke-001` used:
+
+```bash
+sudo -u nightshift -H tee /home/nightshift/state/smoke-002-queue.json > /dev/null <<'EOF'
 {
   "tasks": [
     {
-      "id": "smoke-001",
+      "id": "smoke-002",
       "status": "pending",
       "title": "Create calculator.py with an add(a, b) function that returns a + b, and test_calculator.py with a unittest TestCase covering: positive values (add(2, 3) == 5), negative values (add(-2, -3) == -5), and zero values (add(0, 0) == 0).",
       "attempt_count": 0,
       "max_attempts": 1,
       "claimed_pid": null,
       "claimed_at": null,
-      "acceptance_command": ["python3", "-m", "unittest", "discover", "-v"],
-      "working_dir": "/home/nightshift/workspace/smoke/task-001",
+      "acceptance_command": ["python3", "/home/nightshift/state/smoke-002-acceptance.py", "/home/nightshift/workspace/smoke/task-002"],
+      "working_dir": "/home/nightshift/workspace/smoke/task-002",
       "timeout_seconds": 60,
       "executor_command": ["true"],
       "executor_timeout_seconds": 1,
@@ -154,22 +228,22 @@ reads them; it builds the real Claude invocation entirely from `title` and
 `working_dir` plus its own trusted `ClaudeConfig` (see that module's
 docstring). `max_attempts: 1` keeps this a genuinely one-shot smoke test —
 a failure here should be looked at, not silently retried. `approved_root`
-stays the broader `smoke` directory (not `task-001` itself) since that
+stays the broader `smoke` directory (not `task-002` itself) since that
 field governs the generic queue's own acceptance-command containment check
-independently of `claude_executor.py`'s own boundary in step 7 below.
+independently of `claude_executor.py`'s own boundary in step 8 below.
 
-## 7. Write the Claude executor configuration
+## 8. Write the Claude executor configuration
 
 ```bash
-sudo -u nightshift -H tee /home/nightshift/state/smoke-config.json > /dev/null <<EOF
+sudo -u nightshift -H tee /home/nightshift/state/smoke-002-config.json > /dev/null <<EOF
 {
-  "queue_path": "/home/nightshift/state/smoke-queue.json",
-  "report_dir": "/home/nightshift/reports/smoke-001",
+  "queue_path": "/home/nightshift/state/smoke-002-queue.json",
+  "report_dir": "/home/nightshift/reports/smoke-002",
   "nightshift_root": "/home/nightshift/workspace/smoke",
   "forbidden_paths": ["/home/ubuntu"],
   "claude_executable": "$CLAUDE_REAL",
   "claude_timeout_seconds": 120,
-  "run_log_path": "/home/nightshift/logs/smoke-run-log.jsonl"
+  "run_log_path": "/home/nightshift/logs/smoke-002-run-log.jsonl"
 }
 EOF
 ```
@@ -191,19 +265,19 @@ under this configuration is allowed to touch.
 three-case calculator smoke objective — raise it only if a real, observed
 timeout on this specific task justifies it, not preemptively.
 
-## 8. Confirm tmux is available
+## 9. Confirm tmux is available
 
 ```bash
 if ! command -v tmux > /dev/null 2>&1; then
-  echo "REFUSING TO PROCEED: tmux is not installed. Do not install it as part of this run -- install and verify it deliberately first, then restart from step 8." >&2
+  echo "REFUSING TO PROCEED: tmux is not installed. Do not install it as part of this run -- install and verify it deliberately first, then restart from step 9." >&2
   exit 1
 fi
 ```
 
-## 9. Record the ResearchLens metadata-tree hash — before
+## 10. Record the ResearchLens metadata-tree hash — before
 
 Run this as your own admin session (`ubuntu`/root) — not as `nightshift`,
-and not inside the tmux session opened in step 10:
+and not inside the tmux session opened in step 11:
 
 ```bash
 sudo find /home/ubuntu/ResearchLens -exec stat --format='%n|%s|%Y|%a|%U|%G' {} + \
@@ -215,25 +289,25 @@ group — sorted for a deterministic combined digest regardless of directory
 traversal order — into a single line written to
 `/tmp/researchlens-before.sha256`.
 
-## 10. Open a supervised tmux session
+## 11. Open a supervised tmux session
 
 ```bash
-sudo -u nightshift -H tmux new-session -s nightshift-smoke-001
+sudo -u nightshift -H bash -lc 'cd /home/nightshift && tmux new-session -s nightshift-smoke-002'
 ```
 
 Stay attached and watch it run — this is a supervised smoke test, not an
 unattended one. Do not detach and leave it running unobserved, and do not
 configure tmux to auto-restart the command.
 
-## 11. Run exactly one cycle
+## 12. Run exactly one cycle
 
 Inside the tmux session, you are already running as the `nightshift` user
-(that is who opened it in step 10), so the commands below do not need a
+(that is who opened it in step 11), so the commands below do not need a
 `sudo -u nightshift` prefix:
 
 ```bash
 cd /home/nightshift/workspace/agent-orchestration
-python3 -m nightshift.runtime.claude_executor run-one --config /home/nightshift/state/smoke-config.json
+python3 -m nightshift.runtime.claude_executor run-one --config /home/nightshift/state/smoke-002-config.json
 ```
 
 This prints one JSON `CycleResult` and exits. It does not loop, does not
@@ -244,32 +318,38 @@ preflight, executable integrity, or CLI capability verification rejected
 the run *before* claiming the task, exactly as designed; the task itself
 was never touched.
 
-## 12. Inspect the evidence
+## 13. Inspect the evidence
 
 ```bash
-cat /home/nightshift/state/smoke-queue.json
-cat /home/nightshift/logs/smoke-run-log.jsonl
-ls /home/nightshift/reports/smoke-001
-cat /home/nightshift/reports/smoke-001/*.md
-ls -la /home/nightshift/workspace/smoke/task-001
+cat /home/nightshift/state/smoke-002-queue.json
+cat /home/nightshift/logs/smoke-002-run-log.jsonl
+ls /home/nightshift/reports/smoke-002
+cat /home/nightshift/reports/smoke-002/*.md
+ls -la /home/nightshift/workspace/smoke/task-002
 ps -u nightshift -o pid,ppid,stat,etime,comm
 ```
 
 Confirm: the task transitioned to `done` or `failed`/`requeued` (not stuck
-`claimed`); the run log records one executor entry and one acceptance
-entry; the report names `smoke-001` with the real outcome; the `ps`
-metadata listing shows no lingering `claude`/Python process still running
-under the `nightshift` user after the cycle printed its result (a stale
-row here, not a hung terminal, is the actual signal to look for —
+`claimed`); the run log contains a `task_run_evidence` entry (executor
+outcome/exit code, acceptance outcome/exit code, and — only if the executor
+did not cleanly succeed — a short redacted excerpt) recorded *before* the
+final transition event, and that entry alone is enough to tell whether this
+was a genuine success, an authentication failure, a timeout, or an
+acceptance rejection, without needing the terminal `CycleResult` output;
+the report names `smoke-002` with the real outcome and must not claim
+`Done: 1` unless the checker in step 6 genuinely saw three passing tests;
+the `ps` metadata listing shows no lingering `claude`/Python process still
+running under the `nightshift` user after the cycle printed its result (a
+stale row here, not a hung terminal, is the actual signal to look for —
 `etime`/`stat` make a leftover process obvious without needing full
 command-line detail).
 
-## 13. Inspect the disposable project, but do not commit or push it
+## 14. Inspect the disposable project, but do not commit or push it
 
 ```bash
-sudo -u nightshift -H git -C /home/nightshift/workspace/smoke/task-001 status --short
-sudo -u nightshift -H sed -n '1,200p' /home/nightshift/workspace/smoke/task-001/calculator.py
-sudo -u nightshift -H sed -n '1,240p' /home/nightshift/workspace/smoke/task-001/test_calculator.py
+sudo -u nightshift -H git -C /home/nightshift/workspace/smoke/task-002 status --short
+sudo -u nightshift -H sed -n '1,200p' /home/nightshift/workspace/smoke/task-002/calculator.py
+sudo -u nightshift -H sed -n '1,240p' /home/nightshift/workspace/smoke/task-002/test_calculator.py
 ```
 
 Use `git status --short`, not plain `git diff` — this project's git repo
@@ -284,9 +364,9 @@ Do not run `git add`/`git commit`/`git push` in this directory — it is
 scratch space for this smoke test only, never a real deliverable, and
 never connected to any remote.
 
-## 14. Record the ResearchLens metadata-tree hash — after, and compare
+## 15. Record the ResearchLens metadata-tree hash — after, and compare
 
-Run this as your own admin session (`ubuntu`/root), the same as step 9:
+Run this as your own admin session (`ubuntu`/root), the same as step 10:
 
 ```bash
 sudo find /home/ubuntu/ResearchLens -exec stat --format='%n|%s|%Y|%a|%U|%G' {} + \
@@ -306,7 +386,7 @@ Any non-empty diff output means something in that tree changed and must
 be investigated before treating this smoke test as safe, regardless of
 what the cycle's own report says.
 
-## 15. Stop
+## 16. Stop
 
 ```bash
 exit
@@ -329,7 +409,7 @@ repeated execution.
   the OS-level `nightshift` user permissions (Milestone 7B1/7B2), not
   anything this smoke test observes.
 - Byte-for-byte content identity of every file under ResearchLens before
-  and after the cycle — see step 14's caveat; this test only proves the
+  and after the cycle — see step 15's caveat; this test only proves the
   observed metadata tree is unchanged.
 - Anything about unattended, scheduled, or multi-cycle operation — that is
   explicitly out of scope until a separate, later, explicitly approved
@@ -344,3 +424,10 @@ repeated execution.
   payload).
 - Any credential, token, or `.env` content from ResearchLens or any other
   production service.
+- A raw, unredacted access token, even if a future auth failure's captured
+  output happened to contain one — the durable run log's
+  `task_run_evidence` entries only ever carry a short, token-redacted
+  excerpt (see `queue._safe_log_excerpt`/`queue._redact`, Milestone 7C.1);
+  the full in-memory capture the terminal `CycleResult` still prints is
+  unchanged and should be treated with the same care as any other command
+  output that might contain one.
