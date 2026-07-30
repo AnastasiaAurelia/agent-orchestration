@@ -50,3 +50,7 @@ temp/
 !nightshift/runtime/*.py
 !nightshift/tests/
 !nightshift/tests/*.py
+
+# Diana Nightshift: supervised operator scripts (Milestone 7C.2)
+!scripts/
+!scripts/*.sh
