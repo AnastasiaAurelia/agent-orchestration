@@ -26,6 +26,7 @@ _DEFAULT_HELP_TEXT = (
     "Usage: claude [options] [prompt]\n"
     "  -p, --print\n"
     "  --tools <tools...>\n"
+    "  --allowedTools <tools...>\n"
     "  --permission-mode <mode>\n"
     "  --strict-mcp-config\n"
     "  --disable-slash-commands\n"
@@ -933,6 +934,190 @@ class ClaudeExecutorTestCase(unittest.TestCase):
         self.assertIn("authentication failure", report_text)
         self.assertIn("exit code 1", report_text)
         self.assertIn("not sufficient for completion", report_text)
+
+    # -- Milestone 7C.2.3: bounded non-interactive edits + permission-denial ------
+    #
+    # A real supervised smoke run showed Claude exit 0, report subtype
+    # "success", after a 3-turn session -- while its own structured JSON
+    # result listed both Write calls under permission_denials, and neither
+    # calculator.py nor test_calculator.py was ever created. The fix
+    # switches --permission-mode to acceptEdits, adds --allowedTools with
+    # the same bounded REQUIRED_TOOLS set, and classifies any nonempty
+    # permission_denials as an executor failure regardless of exit code or
+    # self-reported subtype.
+
+    def test_argv_uses_accept_edits_permission_mode(self):
+        argv = ce._build_claude_argv("/path/to/claude", "prompt")
+
+        self.assertIn("acceptEdits", argv)
+        self.assertNotIn("dontAsk", argv)
+        self.assertEqual(ce.DEFAULT_PERMISSION_MODE, "acceptEdits")
+
+    def test_argv_contains_the_bounded_allowed_tools_set(self):
+        argv = ce._build_claude_argv("/path/to/claude", "prompt")
+
+        self.assertIn("--allowedTools", argv)
+        index = argv.index("--allowedTools")
+        self.assertEqual(argv[index + 1], "Read,Write,Edit,Glob,Grep")
+
+    def test_bash_remains_unavailable(self):
+        argv = ce._build_claude_argv("/path/to/claude", "prompt")
+
+        self.assertNotIn("Bash", ce.REQUIRED_TOOLS)
+        for element in argv:
+            self.assertNotIn("Bash", element)
+        # Only --tools and --allowedTools ever carry a tool list, and both
+        # must be exactly the same bounded set -- never widened independently.
+        tools_index = argv.index("--tools")
+        allowed_index = argv.index("--allowedTools")
+        self.assertEqual(argv[tools_index + 1], argv[allowed_index + 1])
+
+    def test_permission_denial_with_exit_zero_is_executor_failure(self):
+        working_dir = self._task_working_dir()
+        denial_result = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "num_turns": 3,
+                "permission_denials": [
+                    {
+                        "tool_name": "Write",
+                        "tool_input": {"file_path": os.path.join(working_dir, "calculator.py")},
+                    },
+                    {
+                        "tool_name": "Write",
+                        "tool_input": {
+                            "file_path": os.path.join(working_dir, "test_calculator.py")
+                        },
+                    },
+                ],
+            }
+        )
+        claude_executable = _write_fake_claude(
+            self.fake_bin_dir, stdout_text=denial_result, exit_code=0
+        )
+        task = _task(working_dir=working_dir, approved_root=working_dir)
+        config = self._config(claude_executable=claude_executable)
+
+        result = ce.run_claude_executor(task, config, env=_CLEAN_ENV)
+
+        self.assertEqual(result.outcome, nsq.ExecutorOutcome.PERMISSION_DENIED)
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Write", result.message)
+        self.assertIn("permission denial", result.message.lower())
+        # Only sanitized tool name + bounded path, never the raw JSON result
+        # (the message's own fixed wording legitimately uses the English
+        # word "subtype" -- what must never appear is the raw JSON key/value
+        # shape from Claude's own result).
+        self.assertNotIn("num_turns", result.message)
+        self.assertNotIn('"subtype"', result.message)
+
+    def test_permission_denial_with_passing_acceptance_cannot_become_done(self):
+        working_dir = self._task_working_dir()
+        denial_result = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "permission_denials": [
+                    {"tool_name": "Write", "tool_input": {"file_path": "calculator.py"}},
+                ],
+            }
+        )
+        claude_executable = _write_fake_claude(
+            self.fake_bin_dir, stdout_text=denial_result, exit_code=0
+        )
+        _write_raw_queue(
+            self.queue_path,
+            [
+                _task(
+                    working_dir=working_dir,
+                    approved_root=working_dir,
+                    max_attempts=3,
+                    acceptance_command=[sys.executable, "-c", "pass"],  # would trivially pass
+                )
+            ],
+        )
+        config = self._config(claude_executable=claude_executable)
+        nsq.claim_next(self.queue_path, claimant_pid=os.getpid())
+
+        task_run = ce.run_claude_task(config, "t1", env=_CLEAN_ENV)
+
+        self.assertEqual(task_run.executor.outcome, nsq.ExecutorOutcome.PERMISSION_DENIED)
+        self.assertTrue(
+            task_run.acceptance_run.acceptance.passed,
+            "acceptance still runs and passes on its own terms -- the invariant "
+            "under test is that this alone must not be enough",
+        )
+        self.assertNotEqual(task_run.acceptance_run.transition.outcome, nsq.TransitionOutcome.DONE)
+        self.assertEqual(task_run.acceptance_run.transition.outcome, nsq.TransitionOutcome.REQUEUED)
+
+    def test_empty_permission_denials_with_valid_output_behaves_normally(self):
+        working_dir = self._task_working_dir()
+        clean_result = json.dumps(
+            {"type": "result", "subtype": "success", "num_turns": 2, "permission_denials": []}
+        )
+        claude_executable = _write_fake_claude(
+            self.fake_bin_dir, stdout_text=clean_result, exit_code=0
+        )
+        _write_raw_queue(
+            self.queue_path,
+            [
+                _task(
+                    working_dir=working_dir,
+                    approved_root=working_dir,
+                    acceptance_command=[sys.executable, "-c", "pass"],
+                )
+            ],
+        )
+        config = self._config(claude_executable=claude_executable)
+        nsq.claim_next(self.queue_path, claimant_pid=os.getpid())
+
+        task_run = ce.run_claude_task(config, "t1", env=_CLEAN_ENV)
+
+        self.assertEqual(task_run.executor.outcome, nsq.ExecutorOutcome.COMPLETED)
+        self.assertTrue(task_run.acceptance_run.acceptance.passed)
+        self.assertEqual(task_run.acceptance_run.transition.outcome, nsq.TransitionOutcome.DONE)
+
+    def test_denial_evidence_excerpt_never_carries_raw_stdout(self):
+        working_dir = self._task_working_dir()
+        run_log_path = os.path.join(self.tmpdir, "run_log.jsonl")
+        denial_result = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "num_turns": 3,
+                "result": "I attempted to write the files but my current permission "
+                "mode blocked the Write tool, so I could not create them.",
+                "permission_denials": [
+                    {"tool_name": "Write", "tool_input": {"file_path": "calculator.py"}},
+                ],
+            }
+        )
+        claude_executable = _write_fake_claude(
+            self.fake_bin_dir, stdout_text=denial_result, exit_code=0
+        )
+        _write_raw_queue(
+            self.queue_path,
+            [
+                _task(
+                    working_dir=working_dir,
+                    approved_root=working_dir,
+                    acceptance_command=[sys.executable, "-c", "pass"],
+                )
+            ],
+        )
+        config = self._config(claude_executable=claude_executable, run_log_path=run_log_path)
+        nsq.claim_next(self.queue_path, claimant_pid=os.getpid())
+
+        ce.run_claude_task(config, "t1", env=_CLEAN_ENV)
+
+        with open(run_log_path, encoding="utf-8") as f:
+            raw_log_text = f.read()
+        # The model's own free text must never reach durable evidence for
+        # this outcome -- only the sanitized tool name + path summary.
+        self.assertNotIn("I attempted to write the files", raw_log_text)
+        self.assertNotIn("num_turns", raw_log_text)
+        self.assertIn("Write", raw_log_text)
 
 
 def _read_raw(path):

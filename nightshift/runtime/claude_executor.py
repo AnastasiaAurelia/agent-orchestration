@@ -17,24 +17,42 @@ implementation, not assumed from memory -- see `claude --help`:
 
   -p, --print              non-interactive: print response and exit
   --tools <tools...>       "Specify the list of available tools from the
-                           built-in set" -- replaces the tool set entirely,
-                           unlike --allowedTools/--disallowedTools, which
-                           read as permission-layer allow/deny on top of
-                           whatever else is available. --tools is the
-                           stronger, more explicit mechanism and is used
-                           alone; --allowedTools/--disallowedTools are not
-                           used here.
+                           built-in set" -- replaces the tool set entirely.
+                           This is the authoritative surface restriction:
+                           Bash, WebFetch, WebSearch, subagents, and
+                           deployment/git-push tools are absent from this
+                           list, not merely "not pre-approved" -- they are
+                           not part of the tool set Claude has access to at
+                           all, regardless of --allowedTools below.
+  --allowedTools <tools...> Milestone 7C.2.3: the *same* bounded set as
+                           --tools (Read,Write,Edit,Glob,Grep), passed
+                           explicitly so acceptEdits pre-approves exactly
+                           those tools without prompting -- this never
+                           widens the tool surface (--tools already fixed
+                           that, and always takes effect first/independently);
+                           it only removes the interactive-approval step
+                           for tools already on the one authoritative list.
   --permission-mode <mode> choices: acceptEdits, auto, bypassPermissions,
-                           manual, dontAsk, plan. bypassPermissions is
-                           explicitly forbidden by this milestone; dontAsk
-                           is used as the best-effort correct choice for
-                           "no interactive prompt without bypassing
-                           permission checks" -- its exact runtime
-                           semantics were NOT independently verified in
-                           this implementation session (no real Claude
-                           invocation is permitted here); this is left for
-                           the supervised VPS smoke test to confirm, not
-                           assumed to be proven.
+                           manual, dontAsk, plan. bypassPermissions remains
+                           explicitly forbidden. dontAsk was this
+                           milestone's original best-effort choice, but the
+                           first real supervised smoke run showed it
+                           actually blocks Write calls outright (Claude's
+                           own final text explained the active mode was
+                           refusing them; both Write attempts appeared in
+                           its structured result's own permission_denials,
+                           exit code 0, subtype "success", zero files ever
+                           created) -- not "no prompt, but still permitted"
+                           as assumed. Milestone 7C.2.3 switches to
+                           acceptEdits (auto-accept file edit operations
+                           specifically, still not a full permission
+                           bypass) plus --allowedTools below, and adds
+                           post-hoc detection of permission_denials in the
+                           captured result as a second, independent safety
+                           net: even if a future CLI version or mode
+                           reintroduces silent denials, this module does
+                           not rely solely on assuming the flag works as
+                           documented.
   --strict-mcp-config      "Only use MCP servers from --mcp-config,
                            ignoring all other MCP configurations" -- used
                            with no --mcp-config supplied at all, so no MCP
@@ -95,7 +113,11 @@ from nightshift.runtime import policy as _policy
 from nightshift.runtime import queue as _queue
 
 REQUIRED_TOOLS = ("Read", "Write", "Edit", "Glob", "Grep")
-DEFAULT_PERMISSION_MODE = "dontAsk"
+# Milestone 7C.2.3: dontAsk turned out to block Write outright on a real
+# supervised smoke run (see the module docstring) -- acceptEdits is the
+# corrected choice, still not bypassPermissions, still bounded to exactly
+# REQUIRED_TOOLS via --tools/--allowedTools together.
+DEFAULT_PERMISSION_MODE = "acceptEdits"
 DEFAULT_CLAUDE_TIMEOUT_SECONDS = 300.0
 SIGTERM_GRACE_SECONDS = 5.0
 AUTH_STATUS_TIMEOUT_SECONDS = 10.0
@@ -105,6 +127,7 @@ VERSION_CHECK_TIMEOUT_SECONDS = 10.0
 REQUIRED_HELP_MARKERS = (
     "--print",
     "--tools",
+    "--allowedTools",
     "--permission-mode",
     "--strict-mcp-config",
     "--disable-slash-commands",
@@ -146,6 +169,85 @@ def _looks_like_auth_failure(exit_code: Optional[int], stdout: str, stderr: str)
         return False
     combined = f"{stdout}\n{stderr}".lower()
     return any(marker in combined for marker in _AUTH_FAILURE_MARKERS)
+
+
+# Milestone 7C.2.3: a real supervised smoke run showed Claude exiting 0,
+# reporting subtype "success", after a 3-turn session -- while its own
+# structured result listed both Write calls it attempted under
+# permission_denials, and zero files were ever actually created. Exit code
+# and self-reported subtype are not sufficient evidence of a genuine
+# success; the structured result's own permission_denials list is checked
+# explicitly, regardless of exit code, as a second, independent signal.
+_MAX_DESCRIBED_DENIALS = 5
+
+
+def _parse_permission_denials(stdout: str) -> Optional[list]:
+    """Best-effort parse of Claude's own JSON result for a permission_denials list.
+
+    Returns None if stdout is not valid JSON, is not a JSON object, or has
+    no ``permission_denials`` list at all -- callers treat None exactly
+    like "no denials found", never as a reason to assume anything else.
+    """
+    try:
+        data = json.loads(stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    denials = data.get("permission_denials")
+    if not isinstance(denials, list):
+        return None
+    return denials
+
+
+def _sanitize_permission_denial(denial) -> dict:
+    """Extract only a tool name and a bounded file-path string from one raw
+    denial entry -- never the full raw entry, never any other tool_input
+    field (e.g. file content for a Write call), never any other part of
+    Claude's own JSON result.
+    """
+    if not isinstance(denial, dict):
+        return {"tool_name": None, "path": None}
+    tool_name = denial.get("tool_name")
+    if not isinstance(tool_name, str):
+        raw_tool = denial.get("tool")
+        tool_name = raw_tool if isinstance(raw_tool, str) else None
+    path = None
+    tool_input = denial.get("tool_input")
+    if isinstance(tool_input, dict):
+        raw_path = tool_input.get("file_path")
+        if not isinstance(raw_path, str):
+            raw_path = tool_input.get("path")
+        if isinstance(raw_path, str):
+            path = raw_path[:300]
+    return {"tool_name": tool_name, "path": path}
+
+
+def _build_permission_denial_message(denials: list) -> str:
+    """Build a short, sanitized summary from raw permission_denials.
+
+    Only ever includes a tool name and a bounded path per denial (see
+    _sanitize_permission_denial) -- never raw credentials, never
+    unrestricted model output, never the full raw JSON result. This is the
+    only text this module derives from a permission denial that is ever
+    allowed into durable evidence -- see queue._safe_log_excerpt(), which
+    deliberately never falls back to raw stdout/stderr for this outcome.
+    """
+    sanitized = [_sanitize_permission_denial(d) for d in denials[:_MAX_DESCRIBED_DENIALS]]
+    parts = []
+    for entry in sanitized:
+        tool = entry["tool_name"] or "unknown-tool"
+        parts.append(f"{tool}({entry['path']})" if entry["path"] else tool)
+    summary = ", ".join(parts) if parts else "no further detail available"
+    omitted = len(denials) - len(sanitized)
+    if omitted > 0:
+        summary += f", and {omitted} more"
+    return (
+        f"Claude reported {len(denials)} permission denial(s) for its own tool calls "
+        f"({summary}) -- classified as a permission failure regardless of exit code or "
+        "self-reported subtype"
+    )
+
 
 # Same "never ran" concept queue.run_task() established in Milestone 7A --
 # duplicated here deliberately (queue._EXECUTOR_NEVER_RAN_OUTCOMES is
@@ -461,6 +563,8 @@ def _build_claude_argv(claude_executable: str, prompt: str) -> list:
         "json",
         "--tools",
         ",".join(REQUIRED_TOOLS),
+        "--allowedTools",
+        ",".join(REQUIRED_TOOLS),
         "--permission-mode",
         DEFAULT_PERMISSION_MODE,
         "--strict-mcp-config",
@@ -602,7 +706,16 @@ def run_claude_executor(
         # message; the Completion Invariant in
         # queue.run_acceptance_and_record() is what actually prevents a
         # "done" transition, for this and for any other nonzero exit.
-        if proc.returncode != 0 and _looks_like_auth_failure(proc.returncode, stdout, stderr):
+        #
+        # Milestone 7C.2.3: checked first, and regardless of exit code --
+        # the real observed failure was exit 0 with subtype "success", so
+        # gating this behind a nonzero exit check (like the auth-failure
+        # check below) would have missed it entirely.
+        denials = _parse_permission_denials(stdout)
+        if denials:
+            outcome = _queue.ExecutorOutcome.PERMISSION_DENIED
+            message = _build_permission_denial_message(denials)
+        elif proc.returncode != 0 and _looks_like_auth_failure(proc.returncode, stdout, stderr):
             outcome = _queue.ExecutorOutcome.AUTH_FAILED
             message = (
                 "Claude authentication failure detected: nonzero exit code plus "

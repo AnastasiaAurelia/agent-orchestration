@@ -1474,6 +1474,18 @@ def _safe_log_excerpt(executor_result: Optional["ExecutorResult"]) -> Optional[s
         return None
     if executor_result.outcome == ExecutorOutcome.COMPLETED and executor_result.exit_code == 0:
         return None
+    if executor_result.outcome == ExecutorOutcome.PERMISSION_DENIED:
+        # Milestone 7C.2.3: a permission-denied executor still ran a real,
+        # possibly multi-turn Claude session -- its raw stdout/stderr can
+        # contain unrestricted model conversation text, not just a short
+        # CLI error message. Only the executor's own already-sanitized
+        # message (tool name + safe path metadata only, built by
+        # claude_executor.py) is ever allowed into durable evidence here;
+        # raw stdout/stderr is deliberately never used as a fallback for
+        # this specific outcome.
+        if not executor_result.message:
+            return None
+        return _redact(executor_result.message)[:_EVIDENCE_EXCERPT_MAX_LEN]
     raw = (executor_result.stderr or executor_result.stdout or "").strip()
     if not raw:
         return None
@@ -1487,9 +1499,12 @@ def _executor_succeeded(executor_result: Optional["ExecutorResult"]) -> bool:
     exercising acceptance on its own, unchanged since before this
     milestone) -- treated as trivially true so existing direct callers keep
     their exact prior behavior. Otherwise, only COMPLETED with exit_code
-    exactly 0 counts as success; TIMED_OUT, AUTH_FAILED, and a COMPLETED
-    outcome with any nonzero exit_code are all "did not succeed", regardless
-    of what an acceptance command run afterward decides on its own.
+    exactly 0 counts as success; TIMED_OUT, AUTH_FAILED, PERMISSION_DENIED
+    (Milestone 7C.2.3 -- exit_code 0 does not save it: Claude's own tool
+    calls were blocked, regardless of what exit code or self-reported
+    subtype it printed), and a COMPLETED outcome with any nonzero exit_code
+    are all "did not succeed", regardless of what an acceptance command run
+    afterward decides on its own.
     """
     return executor_result is None or (
         executor_result.outcome == ExecutorOutcome.COMPLETED and executor_result.exit_code == 0
@@ -1502,6 +1517,12 @@ def _executor_failure_detail(executor_result: "ExecutorResult") -> str:
         cause = f"executor authentication failure (exit code {executor_result.exit_code})"
     elif executor_result.outcome == ExecutorOutcome.TIMED_OUT:
         cause = "executor timed out"
+    elif executor_result.outcome == ExecutorOutcome.PERMISSION_DENIED:
+        # Milestone 7C.2.3: exit_code is commonly 0 here (Claude itself ran
+        # and exited cleanly; it was its own tool calls that were denied) --
+        # the generic "nonzero exit code" fallback below would be actively
+        # misleading for this outcome, so it gets its own branch ahead of it.
+        cause = executor_result.message or "executor permission denial"
     else:
         cause = f"executor nonzero exit code ({executor_result.exit_code})"
     return (
@@ -1635,16 +1656,17 @@ def run_acceptance_and_record(
 class ExecutorOutcome(str, Enum):
     """How the executor phase of a task run ended.
 
-    COMPLETED, TIMED_OUT, and AUTH_FAILED all mean the executor genuinely
-    ran (to completion or not); run_task() still runs acceptance afterward
-    regardless, exactly as before -- but since Milestone 7C.1, only a
-    COMPLETED outcome with exit_code == 0 can ever let a passing acceptance
-    result drive complete_task() (see run_acceptance_and_record()'s
-    Completion Invariant). TIMED_OUT, AUTH_FAILED, and a COMPLETED outcome
-    with a nonzero exit_code all force fail_task() regardless of what
-    acceptance decided on its own -- a passing acceptance command must
-    never paper over an executor that timed out, failed to authenticate, or
-    exited non-zero.
+    COMPLETED, TIMED_OUT, AUTH_FAILED, and PERMISSION_DENIED all mean the
+    executor genuinely ran (to completion or not); run_task() still runs
+    acceptance afterward regardless, exactly as before -- but since
+    Milestone 7C.1, only a COMPLETED outcome with exit_code == 0 can ever
+    let a passing acceptance result drive complete_task() (see
+    run_acceptance_and_record()'s Completion Invariant). TIMED_OUT,
+    AUTH_FAILED, PERMISSION_DENIED, and a COMPLETED outcome with a nonzero
+    exit_code all force fail_task() regardless of what acceptance decided
+    on its own -- a passing acceptance command must never paper over an
+    executor that timed out, failed to authenticate, had its own tool calls
+    denied, or exited non-zero.
 
     AUTH_FAILED (Milestone 7C.1) is produced only by
     nightshift.runtime.claude_executor's own post-hoc classification of a
@@ -1652,6 +1674,16 @@ class ExecutorOutcome(str, Enum):
     recognized authentication-failure evidence (e.g. an HTTP 401, "access
     token has expired") -- the generic queue.run_executor() here never
     produces it, since that classification is Claude-specific.
+
+    PERMISSION_DENIED (Milestone 7C.2.3) is likewise produced only by
+    claude_executor.py's own post-hoc classification: a real Claude
+    invocation whose own structured JSON result reports one or more
+    permission denials for its own tool calls (e.g. a Write blocked by the
+    permission mode in effect) -- classified this way regardless of exit
+    code or any self-reported "success" subtype, since a real observed
+    Nightshift smoke run showed exactly that combination (exit 0, subtype
+    success) while zero of the requested file edits were ever actually
+    applied.
 
     MALFORMED_CONTRACT, MISSING_EXECUTABLE, and POLICY_REJECTED mean the
     executor never ran at all -- run_task() fails the attempt directly for
@@ -1666,6 +1698,7 @@ class ExecutorOutcome(str, Enum):
     MALFORMED_CONTRACT = "malformed_contract"
     POLICY_REJECTED = "policy_rejected"
     AUTH_FAILED = "auth_failed"
+    PERMISSION_DENIED = "permission_denied"
 
 
 @dataclasses.dataclass(frozen=True)

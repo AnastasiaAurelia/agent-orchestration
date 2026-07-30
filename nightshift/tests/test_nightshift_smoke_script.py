@@ -34,6 +34,7 @@ _DEFAULT_HELP_TEXT = (
     "Usage: claude [options] [prompt]\n"
     "  -p, --print\n"
     "  --tools <tools...>\n"
+    "  --allowedTools <tools...>\n"
     "  --permission-mode <mode>\n"
     "  --strict-mcp-config\n"
     "  --disable-slash-commands\n"
