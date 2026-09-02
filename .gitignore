@@ -28,6 +28,8 @@
 !diana/memory/known-issues.md
 !diana/memory/advisor-log.md
 !diana/memory/learned-rules.md
+!diana/governance/
+!diana/governance/risk-tiers.md
 !diana/templates/
 !diana/templates/*.md
 
