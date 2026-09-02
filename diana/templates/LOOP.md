@@ -23,9 +23,12 @@ enough times to trust it. Do not assign L2 or L3 on day one.
   its verification must happen as separate, non-collapsible steps (see
   "Actor/verifier separation" below), and the result waits for human
   approval before anything is committed or merged.
-- **L3 — unattended.** May commit/merge without a human in the loop. Only
-  assign this after the same loop has run at L2 repeatedly with no
-  escalations. Treat any L3 loop as a standing risk, not a convenience.
+- **L3 — unattended preparation, human merge.** After its execution path is
+  separately certified, it may make authorized edits, verify them, and prepare
+  commits, branches, and pull requests without waiting between those steps.
+  It may not autonomously merge into a protected branch: human approval is the
+  permanent merge floor. Assign L3 only after the same loop has run at L2
+  repeatedly with no escalations, and treat it as a standing risk.
 
 ## Actor/verifier separation (non-negotiable)
 
@@ -37,7 +40,8 @@ other than `escalated`. A loop that certifies its own work is the single
 biggest way this goes wrong — `/loop-audit` will fail any loop that can't
 show this separation. Model choice does not change any of this — running a
 step on a stronger or different model is not a separate verification step,
-and is never grounds to skip the human gate at L2/L3.
+and is never grounds to skip an applicable human gate or protected-branch
+human merge approval.
 
 ## Kill switch
 

@@ -56,8 +56,12 @@ missing, tell the user Diana isn't installed with loop support and stop.
      `escalated`, that separate verification must have actually happened.
      Wait for human approval before this is committed or merged;
      recording it in `STATE.md`/`RUN_LOG.md` is not approval.
-   - **L3 (unattended):** same actor/verifier separation as L2, but may
-     commit without waiting for a human.
+   - **L3 (unattended preparation, human merge):** only after the relevant
+     execution path is separately certified, use the same actor/verifier
+     separation as L2. Within authorized scope it may edit, test, commit,
+     create a branch, and open a pull request without waiting between those
+     steps. It must never autonomously merge into a protected branch; human
+     approval remains the merge floor.
 6. **Update `STATE.md`** — prune resolved/stale items, add new findings
    under the right section, and note `Loop action: <what was tried>` next
    to anything the loop acted on.

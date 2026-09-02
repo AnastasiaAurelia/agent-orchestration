@@ -132,7 +132,17 @@ else
   fi
 fi
 
-# --- 4. CLAUDE.md contains the Diana section ---
+# --- 4. AGENTS.md contains canonical Diana policy ---
+AGENTS_MD="$TARGET/AGENTS.md"
+AGENTS_BEGIN="<!-- DIANA-POLICY:BEGIN"
+AGENTS_END="<!-- DIANA-POLICY:END -->"
+if [ -f "$AGENTS_MD" ] && grep -qF "$AGENTS_BEGIN" "$AGENTS_MD" && grep -qF "$AGENTS_END" "$AGENTS_MD"; then
+  pass "AGENTS.md contains the canonical Diana policy"
+else
+  fail "AGENTS.md does not contain the canonical Diana policy"
+fi
+
+# --- 5. CLAUDE.md contains the Diana section ---
 CLAUDE_MD="$TARGET/CLAUDE.md"
 BEGIN_MARKER="<!-- DIANA:BEGIN"
 END_MARKER="<!-- DIANA:END -->"

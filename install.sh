@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Diana installer.
 #
-# Copies Diana's Claude Code base (skills, commands, hooks, CLAUDE.md section)
+# Copies Diana's policy and Claude Code base (skills, commands, hooks,
+# managed AGENTS.md and CLAUDE.md sections)
 # into a target project's .claude/ discovery paths.
 #
 # Usage:
@@ -11,7 +12,7 @@
 #   - Never overwrites an existing file without backing it up first
 #     (suffix: .bak.<timestamp>).
 #   - Only touches Diana-managed entries inside settings.local.json and the
-#     CLAUDE.md Diana section — it does not disturb unrelated content there.
+#     AGENTS.md/CLAUDE.md Diana sections — unrelated content is preserved.
 #   - Re-running is idempotent: unchanged files/entries are left alone and
 #     reported as "unchanged", not re-copied or re-backed-up.
 #   - Loop templates (LOOP.md, STATE.md, RUN_LOG.md, BUDGET.md) are installed
@@ -169,7 +170,57 @@ PYEOF
   esac
 fi
 
-# --- 4. Diana section in root CLAUDE.md ---
+# --- 4. provider-neutral Diana section in root AGENTS.md ---
+AGENTS_MD="$TARGET/AGENTS.md"
+DIANA_AGENTS_MD="$SCRIPT_DIR/AGENTS.md"
+
+AGENTS_RESULT="$(python3 - "$AGENTS_MD" "$DIANA_AGENTS_MD" "$TS" <<'PYEOF'
+import sys, os
+
+target_md, diana_md, ts = sys.argv[1:4]
+with open(diana_md) as f:
+    diana_content = f.read().rstrip("\n")
+
+BEGIN = "<!-- DIANA-POLICY:BEGIN (managed by diana/install.sh — do not hand-edit between markers) -->"
+END = "<!-- DIANA-POLICY:END -->"
+block = BEGIN + "\n\n" + diana_content + "\n\n" + END
+
+if not os.path.exists(target_md):
+    with open(target_md, "w") as f:
+        f.write(block + "\n")
+    print("created")
+    sys.exit(0)
+
+with open(target_md) as f:
+    raw = f.read()
+
+if BEGIN in raw and END in raw:
+    pre = raw.split(BEGIN)[0]
+    post = raw.split(END, 1)[1]
+    new_raw = pre + block + post
+    if new_raw == raw:
+        print("unchanged")
+        sys.exit(0)
+else:
+    sep = "" if raw.endswith("\n\n") else ("\n" if raw.endswith("\n") else "\n\n")
+    new_raw = raw + sep + block + "\n"
+
+with open(target_md + ".bak." + ts, "w") as f:
+    f.write(raw)
+with open(target_md, "w") as f:
+    f.write(new_raw)
+print("updated" if BEGIN in raw else "appended")
+PYEOF
+)"
+
+case "$AGENTS_RESULT" in
+  created)   CREATED+=("AGENTS.md") ;;
+  appended)  UPDATED+=("AGENTS.md  (Diana policy appended; previous version backed up to AGENTS.md.bak.$TS)") ;;
+  updated)   UPDATED+=("AGENTS.md  (Diana policy refreshed; previous version backed up to AGENTS.md.bak.$TS)") ;;
+  unchanged) UNCHANGED+=("AGENTS.md") ;;
+esac
+
+# --- 5. Claude-specific Diana section in root CLAUDE.md ---
 CLAUDE_MD="$TARGET/CLAUDE.md"
 DIANA_CLAUDE_MD="$DIANA_SRC/CLAUDE.md"
 
@@ -223,7 +274,7 @@ case "$MD_RESULT" in
   unchanged) UNCHANGED+=("CLAUDE.md") ;;
 esac
 
-# --- 5. report ---
+# --- 6. report ---
 echo "Diana install → $TARGET"
 echo
 if [ "${#CREATED[@]}" -gt 0 ]; then

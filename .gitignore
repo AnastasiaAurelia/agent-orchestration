@@ -5,6 +5,8 @@
 *
 
 !.gitignore
+!AGENTS.md
+!MEMORY.md
 !README.md
 !install.sh
 !verify.sh

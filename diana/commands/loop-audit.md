@@ -33,11 +33,15 @@ loop's behavior looks off.
    consistent with its track record (`RUN_LOG.md`)? L3 with no L2 history,
    or L2 with a string of `escalated` outcomes and no fixes since, are both
    findings.
+7. **Human merge floor preserved** — an L3 workflow may prepare a pull
+   request only after its execution path is certified, but must not include
+   autonomous protected-branch merge or a branch-protection bypass.
 
 ## Output
 
 Score each loop **L0 (not ready)**, **L1 (report-only ready)**, **L2 (fix +
-verify ready)**, or **L3 (unattended ready)** — this is the *highest* level
+verify ready)**, or **L3 (unattended preparation ready; human merge
+required)** — this is the *highest* level
 the evidence supports, which may be lower than what `LOOP.md` currently
 assigns it. List the specific gaps for anything short of the assigned
 level; if there are none, say so plainly instead of padding the report.

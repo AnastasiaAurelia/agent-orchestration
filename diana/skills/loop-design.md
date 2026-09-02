@@ -46,6 +46,9 @@ out — the blast radius justifies it.
 7. **Level matches maturity** — is the requested level justified by actual
    track record, per `LOOP.md`'s readiness ladder? Default to L1 for
    anything new.
+8. **Human merge floor** — for L3, does the design stop at a prepared pull
+   request and exclude autonomous protected-branch merge or protection
+   bypass? If not, it fails regardless of maturity.
 
 ## Output
 
@@ -61,4 +64,5 @@ Give a verdict, not a design essay:
   yours. Ask via `AskUserQuestion` instead of assigning a level yourself.
 
 Never approve L3 for a loop with no prior run history — there is nothing
-yet to justify unattended trust.
+yet to justify unattended preparation. L3 never removes protected-branch
+human merge approval.
