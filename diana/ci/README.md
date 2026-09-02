@@ -12,3 +12,5 @@ contract. It does not prove semantic risk detection for paths/categories the
 catalog does not yet recognize.
 
 `actions/checkout` is pinned to the v7.0.1 commit inspected on 2026-09-02.
+
+Hosted smoke fixture: documentation-only changes are expected to pass.
