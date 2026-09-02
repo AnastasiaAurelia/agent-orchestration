@@ -24,6 +24,10 @@
 !diana/hooks/cost-report.md
 !diana/memory/
 !diana/memory/README.md
+!diana/memory/decisions.md
+!diana/memory/known-issues.md
+!diana/memory/advisor-log.md
+!diana/memory/learned-rules.md
 !diana/templates/
 !diana/templates/*.md
 

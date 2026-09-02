@@ -55,7 +55,8 @@ cloud service, or billing platform.
 Persistent information has one owner:
 
 - engineering policy: `AGENTS.md`
-- project decisions and known issues: `diana/memory/`
+- project decisions, known issues, advisor outcomes, and approved learned rules:
+  their corresponding files in `diana/memory/`
 - loop state and history: project `STATE.md`, `RUN_LOG.md`, and `BUDGET.md`
 - execution/session telemetry: the external execution runtime
 
