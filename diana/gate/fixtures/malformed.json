@@ -1,0 +1,1 @@
+{"version":1,"dod":"yes","verification":{"present":true,"evidence":["unit tests passed"]},"preflight":[],"diff":{"risk":"SAFE","files":["src/example.py"]},"human_only_conditions":[]}

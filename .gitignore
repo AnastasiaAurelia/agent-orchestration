@@ -30,6 +30,12 @@
 !diana/memory/learned-rules.md
 !diana/governance/
 !diana/governance/risk-tiers.md
+!diana/gate/
+!diana/gate/*.py
+!diana/gate/*.md
+!diana/gate/*.sh
+!diana/gate/fixtures/
+!diana/gate/fixtures/*.json
 !diana/templates/
 !diana/templates/*.md
 

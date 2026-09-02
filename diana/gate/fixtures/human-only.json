@@ -1,0 +1,1 @@
+{"version":1,"dod":{"present":true,"evidence":["criteria checked"]},"verification":{"present":true,"evidence":["unit tests passed"]},"preflight":[],"diff":{"risk":"HUMAN_ONLY","files":["infra/production/release.yml"]},"human_only_conditions":["production_deploy"]}
