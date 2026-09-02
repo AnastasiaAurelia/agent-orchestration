@@ -7,6 +7,10 @@
 !.gitignore
 !AGENTS.md
 !MEMORY.md
+!.claude/
+!.claude/settings.json
+!.claude/hooks/
+!.claude/hooks/check-careful.sh
 !README.md
 !install.sh
 !verify.sh
@@ -22,6 +26,7 @@
 !diana/hooks/hooks.json
 !diana/hooks/check-careful.sh
 !diana/hooks/cost-report.md
+!diana/hooks/README.md
 !diana/memory/
 !diana/memory/README.md
 !diana/memory/decisions.md

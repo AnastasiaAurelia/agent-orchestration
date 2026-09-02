@@ -246,7 +246,8 @@ The installer:
 * creates `.claude/` folders if needed
 * installs Diana commands and skills
 * installs the safety hook
-* merges hook settings into `.claude/settings.local.json`
+* installs the safety hook into committed `.claude/settings.json`
+* keeps the optional cost hook in `.claude/settings.local.json`
 * appends marked Diana sections into root `AGENTS.md` and `CLAUDE.md`
 * backs up existing files before overwriting
 * is safe to run repeatedly
@@ -263,7 +264,7 @@ It verifies:
 
 * required files exist
 * `check-careful.sh` is executable
-* hook config exists
+* portable and local hook configs exist in their intended scopes
 * root `AGENTS.md` and `CLAUDE.md` contain their Diana sections
 
 ## Uninstall

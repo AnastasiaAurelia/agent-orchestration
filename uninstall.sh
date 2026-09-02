@@ -73,7 +73,52 @@ for d in "$CLAUDE_DIR/skills/plan-review" "$CLAUDE_DIR/skills/research-first" "$
   fi
 done
 
-# --- 2. strip Diana hook entries from settings.local.json ---
+# --- 2. strip Diana hook entries from shared and local settings ---
+SHARED_SETTINGS="$CLAUDE_DIR/settings.json"
+
+if [ -f "$SHARED_SETTINGS" ]; then
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "warning: python3 not found — cannot safely strip Diana hooks from $SHARED_SETTINGS." >&2
+  else
+    SHARED_RESULT="$(python3 - "$SHARED_SETTINGS" "$TS" <<'PYEOF'
+import json, sys, copy
+
+settings_path, ts = sys.argv[1:3]
+with open(settings_path) as f:
+    raw_before = f.read()
+try:
+    existing = json.loads(raw_before) if raw_before.strip() else {}
+except Exception:
+    print("invalid-json")
+    sys.exit(0)
+original = copy.deepcopy(existing)
+hooks = existing.get("hooks", {})
+for event in list(hooks):
+    hooks[event] = [entry for entry in hooks[event] if "check-careful.sh" not in json.dumps(entry)]
+    if not hooks[event]:
+        del hooks[event]
+if not hooks and "hooks" in existing:
+    del existing["hooks"]
+if existing == original:
+    print("unchanged")
+    sys.exit(0)
+with open(settings_path + ".bak." + ts, "w") as f:
+    f.write(raw_before)
+with open(settings_path, "w") as f:
+    f.write(json.dumps(existing, indent=2) + "\n")
+print("updated")
+PYEOF
+)"
+    case "$SHARED_RESULT" in
+      updated) UPDATED+=(".claude/settings.json  (Diana hook removed; previous version backed up to .claude/settings.json.bak.$TS)") ;;
+      unchanged) SKIPPED+=(".claude/settings.json  (no Diana hook present)") ;;
+      invalid-json) echo "warning: $SHARED_SETTINGS is invalid JSON — left untouched." >&2 ;;
+    esac
+  fi
+else
+  SKIPPED+=(".claude/settings.json  (not present)")
+fi
+
 SETTINGS="$CLAUDE_DIR/settings.local.json"
 
 if [ -f "$SETTINGS" ]; then

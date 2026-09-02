@@ -100,18 +100,18 @@ install_file "$DIANA_SRC/templates/BUDGET.md"      "$CLAUDE_DIR/templates/diana/
 
 chmod +x "$CLAUDE_DIR/hooks/check-careful.sh"
 
-# --- 3. merge hooks into .claude/settings.local.json ---
-SETTINGS="$CLAUDE_DIR/settings.local.json"
-DIANA_HOOKS_JSON="$DIANA_SRC/hooks/hooks.json"
+# --- 3. merge portable and local hook settings ---
+SHARED_SETTINGS="$CLAUDE_DIR/settings.json"
+LOCAL_SETTINGS="$CLAUDE_DIR/settings.local.json"
+DIANA_SHARED_SETTINGS="$SCRIPT_DIR/.claude/settings.json"
+DIANA_LOCAL_HOOKS="$DIANA_SRC/hooks/hooks.json"
 
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "warning: python3 not found — cannot safely merge hook settings." >&2
-  echo "Manually add the \"hooks\" key from $DIANA_HOOKS_JSON into $SETTINGS." >&2
-else
-  MERGE_RESULT="$(python3 - "$SETTINGS" "$DIANA_HOOKS_JSON" "$TS" install <<'PYEOF'
+merge_hook_settings() {
+  local settings_path="$1" diana_hooks_path="$2"
+  python3 - "$settings_path" "$diana_hooks_path" "$TS" <<'PYEOF'
 import json, sys, os, copy
 
-settings_path, diana_hooks_path, ts, mode = sys.argv[1:5]
+settings_path, diana_hooks_path, ts = sys.argv[1:4]
 
 with open(diana_hooks_path) as f:
     diana_hooks = json.load(f).get("hooks", {})
@@ -140,9 +140,18 @@ else:
 original = copy.deepcopy(existing)
 
 existing.setdefault("hooks", {})
+# Remove prior Diana registrations from either scope so upgrades migrate the
+# portable safety hook out of local settings without disturbing other hooks.
+for event in list(existing["hooks"]):
+    existing["hooks"][event] = [
+        entry for entry in existing["hooks"][event]
+        if not is_diana_entry(event, entry)
+    ]
+    if not existing["hooks"][event]:
+        del existing["hooks"][event]
+
 for event, entries in diana_hooks.items():
     lst = existing["hooks"].setdefault(event, [])
-    lst[:] = [e for e in lst if not is_diana_entry(event, e)]
     lst.extend(copy.deepcopy(entries))
 
 if existing == original:
@@ -159,14 +168,26 @@ with open(settings_path, "w") as f:
 
 print("created" if not existed_before else "updated")
 PYEOF
-)"
-  case "$MERGE_RESULT" in
+}
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "warning: python3 not found — cannot safely merge hook settings." >&2
+  echo "Manually merge $DIANA_SHARED_SETTINGS and $DIANA_LOCAL_HOOKS." >&2
+else
+  SHARED_RESULT="$(merge_hook_settings "$SHARED_SETTINGS" "$DIANA_SHARED_SETTINGS")"
+  case "$SHARED_RESULT" in
+    created)   CREATED+=(".claude/settings.json") ;;
+    updated)   UPDATED+=(".claude/settings.json  (previous version backed up to .claude/settings.json.bak.$TS)") ;;
+    unchanged) UNCHANGED+=(".claude/settings.json") ;;
+    invalid-json) echo "warning: $SHARED_SETTINGS is invalid JSON — left untouched." >&2 ;;
+  esac
+
+  LOCAL_RESULT="$(merge_hook_settings "$LOCAL_SETTINGS" "$DIANA_LOCAL_HOOKS")"
+  case "$LOCAL_RESULT" in
     created)   CREATED+=(".claude/settings.local.json") ;;
     updated)   UPDATED+=(".claude/settings.local.json  (previous version backed up to .claude/settings.local.json.bak.$TS)") ;;
     unchanged) UNCHANGED+=(".claude/settings.local.json") ;;
-    invalid-json)
-      echo "warning: $SETTINGS is not valid JSON — left untouched. Merge the hooks from $DIANA_HOOKS_JSON manually." >&2
-      ;;
+    invalid-json) echo "warning: $LOCAL_SETTINGS is invalid JSON — left untouched." >&2 ;;
   esac
 fi
 
