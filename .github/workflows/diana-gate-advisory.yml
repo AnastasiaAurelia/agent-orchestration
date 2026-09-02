@@ -1,0 +1,46 @@
+name: Diana Gate (advisory)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  diana-gate-advisory:
+    name: Diana Gate (advisory, non-blocking)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build gate input from PR evidence and Git diff
+        env:
+          DIANA_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          DIANA_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: >-
+          python3 diana/ci/build-gate-input.py
+          "$GITHUB_EVENT_PATH"
+          "$RUNNER_TEMP/diana-gate-input.json"
+
+      - name: Evaluate Diana Gate (advisory)
+        id: gate
+        continue-on-error: true
+        run: |
+          set +e
+          python3 diana/gate/diana-gate.py "$RUNNER_TEMP/diana-gate-input.json" > "$RUNNER_TEMP/diana-gate-result.json"
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/diana-gate-result.json"
+          python3 diana/ci/write-summary.py "$RUNNER_TEMP/diana-gate-result.json" >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      - name: Confirm advisory-only behavior
+        if: always()
+        run: |
+          echo "This check is observational and does not enforce merge protection." >> "$GITHUB_STEP_SUMMARY"
+          echo "Diana Gate step outcome: ${{ steps.gate.outcome }}" >> "$GITHUB_STEP_SUMMARY"
