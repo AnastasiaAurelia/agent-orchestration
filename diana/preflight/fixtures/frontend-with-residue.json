@@ -1,0 +1,8 @@
+{
+  "files": {
+    "package.json": "{\"name\":\"demo\",\"dependencies\":{\"react\":\"^18.0.0\"},\"devDependencies\":{\"vite\":\"^5.0.0\"},\"scripts\":{\"test\":\"vitest run\"}}",
+    "index.html": "<!doctype html><html><head><title>Demo</title></head><body><div id=\"root\"></div></body></html>",
+    "src/config.ts": "export const API_BASE_URL = \"http://localhost:4000/api\";\n",
+    "tests/config.test.ts": "// this test file legitimately references http://localhost:9999 and must not be flagged\n"
+  }
+}
