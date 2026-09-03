@@ -1,0 +1,9 @@
+{
+  "files": {
+    "package.json": "{\"name\":\"demo-precision-exclude\",\"dependencies\":{\"react\":\"^18.0.0\"},\"devDependencies\":{\"vite\":\"^5.0.0\"},\"scripts\":{\"test\":\"vitest run\"}}",
+    "index.html": "<!doctype html><html><head><title>Demo</title></head><body><div id=\"root\"></div></body></html>",
+    "src/config.ts": "export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;\n",
+    "tests/config.test.ts": "export const DEBUG_URL = \"http://localhost:5000/api\"; // must be excluded from residue scan\n",
+    "src/config.spec.ts": "export const NEXT_PUBLIC_SECRET_TOKEN = \"abc123\"; // must be excluded from secret-leakage scan\n"
+  }
+}

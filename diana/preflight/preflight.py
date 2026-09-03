@@ -57,7 +57,8 @@ FRONTEND_FRAMEWORK_DEPS = {
     "@angular/core", "solid-js", "astro",
 }
 FRONTEND_SOURCE_EXTS = {".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte", ".html"}
-TEST_FILE_MARKERS = ("test", "spec", "__tests__", "__mocks__")
+TEST_DIR_NAMES = {"test", "tests", "__tests__", "__mocks__"}
+TEST_FILENAME_RE = re.compile(r"^(test_.+|.+_test)\.py$")
 
 SAFE_FILENAME_SUFFIXES = (
     ".example", ".sample", ".template", ".dist", ".test",
@@ -123,11 +124,21 @@ class Ctx:
         return [f for f in self.files if Path(f).suffix in exts]
 
     def is_test_path(self, rel: str) -> bool:
-        parts = Path(rel).parts
-        lower = rel.lower()
-        return any(marker in lower for marker in TEST_FILE_MARKERS) or any(
-            p in {"tests", "test", "__tests__"} for p in parts
-        )
+        path = Path(rel)
+        dir_parts = path.parts[:-1]
+        if any(part in TEST_DIR_NAMES for part in dir_parts):
+            return True
+        name = path.name
+        # *.test.* / *.spec.* (e.g. config.test.ts, config.spec.tsx) — the
+        # marker must be its own dot-separated segment, not a substring of
+        # an ordinary word (e.g. "specification.ts" or "contest/config.ts"
+        # must NOT match).
+        segments = name.split(".")
+        if len(segments) >= 3 and segments[-2] in {"test", "spec"}:
+            return True
+        if TEST_FILENAME_RE.match(name):
+            return True
+        return False
 
 
 def build_ctx(root: Path) -> Ctx:

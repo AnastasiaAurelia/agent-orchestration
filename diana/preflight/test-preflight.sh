@@ -85,6 +85,20 @@ run_case malformed-package-json \
   "build-test-evidence-present:1:FAIL" \
   "exposed-secret-config-files:1:PASS"
 
+# Regression: precise test-path detection. Ordinary production files whose
+# names merely contain "test"/"spec" as a substring (src/contest/config.ts,
+# src/specification.ts) must still be scanned and FAIL on real findings.
+run_case test-path-precision-catch \
+  "localhost-staging-url-residue:1:FAIL" \
+  "frontend-client-secret-leakage:1:FAIL"
+
+# Regression: genuine test-convention files (a tests/ directory, a *.spec.*
+# filename) must still be excluded from residue/secret-leakage scanning even
+# though a production file with a similar substring is now correctly caught.
+run_case test-path-precision-exclude \
+  "localhost-staging-url-residue:1:PASS" \
+  "frontend-client-secret-leakage:1:PASS"
+
 echo "--- CASE F (tool-level): nonexistent repo path ---"
 set +e
 output="$(python3 "$PREFLIGHT" /nonexistent/path/does-not-exist 2>&1)"
