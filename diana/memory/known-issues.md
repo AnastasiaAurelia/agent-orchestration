@@ -11,3 +11,9 @@ rediscovered. Include evidence and the condition for reconsideration.
 ```
 
 No entries yet.
+
+## Phase 1G check-context proof
+
+This line exists only to give the Diana Gate workflow a SAFE diff to
+evaluate on a real PR against merged `main`, proving the stable `Diana Gate`
+check runs from the merged workflow definition. No behavioral change.
