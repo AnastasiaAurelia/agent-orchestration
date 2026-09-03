@@ -5,6 +5,16 @@
 *
 
 !.gitignore
+!AGENTS.md
+!MEMORY.md
+!.claude/
+!.claude/settings.json
+!.claude/hooks/
+!.claude/hooks/check-careful.sh
+!.github/
+!.github/workflows/
+!.github/workflows/diana-gate-advisory.yml
+!.github/pull_request_template.md
 !README.md
 !install.sh
 !verify.sh
@@ -20,8 +30,24 @@
 !diana/hooks/hooks.json
 !diana/hooks/check-careful.sh
 !diana/hooks/cost-report.md
+!diana/hooks/README.md
 !diana/memory/
 !diana/memory/README.md
+!diana/memory/decisions.md
+!diana/memory/known-issues.md
+!diana/memory/advisor-log.md
+!diana/memory/learned-rules.md
+!diana/governance/
+!diana/governance/risk-tiers.md
+!diana/gate/
+!diana/gate/*.py
+!diana/gate/*.md
+!diana/gate/*.sh
+!diana/gate/fixtures/
+!diana/gate/fixtures/*.json
+!diana/ci/
+!diana/ci/*.py
+!diana/ci/*.md
 !diana/templates/
 !diana/templates/*.md
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # check-careful.sh — PreToolUse hook, adapted from gstack's /careful skill.
 # Reads JSON from stdin, checks a Bash command for destructive patterns.
-# Prints {"permissionDecision":"ask","message":"..."} to warn, or {} to allow.
+# Returns current PreToolUse structured output requesting confirmation, or {}.
 set -euo pipefail
 
 INPUT=$(cat)
@@ -80,7 +80,7 @@ fi
 
 if [ -n "$WARN" ]; then
   WARN_ESCAPED=$(printf '%s' "$WARN" | sed 's/"/\\"/g')
-  printf '{"permissionDecision":"ask","message":"[diana/careful] %s"}\n' "$WARN_ESCAPED"
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"[diana/careful] %s"}}\n' "$WARN_ESCAPED"
 else
   echo '{}'
 fi

@@ -2,8 +2,8 @@
 # Diana uninstaller.
 #
 # Removes exactly what install.sh added: the Diana-managed skill/command/hook
-# files, the Diana hook entries inside settings.local.json, and the Diana
-# section inside root CLAUDE.md.
+# files, the Diana hook entries inside settings.local.json, and Diana-managed
+# sections inside root AGENTS.md and CLAUDE.md.
 #
 # Usage:
 #   ./uninstall.sh [target-project-path]
@@ -15,8 +15,8 @@
 #     .claude/hooks/ themselves — only empty Diana-only subdirectories
 #     (skills/plan-review/, skills/research-first/, skills/minimal-solution/,
 #     skills/loop-design/, templates/diana/) it created.
-#   - Edits to shared files (settings.local.json, CLAUDE.md) are backed up
-#     before being modified, since those files may contain non-Diana content.
+#   - Edits to shared files (settings.local.json, AGENTS.md, CLAUDE.md) are
+#     backed up before modification because they may contain unrelated content.
 #   - Never touches root-level LOOP.md/STATE.md/RUN_LOG.md/BUDGET.md — those
 #     are live project state, not Diana-installed files. If found, they're
 #     reported as preserved, not removed.
@@ -73,7 +73,52 @@ for d in "$CLAUDE_DIR/skills/plan-review" "$CLAUDE_DIR/skills/research-first" "$
   fi
 done
 
-# --- 2. strip Diana hook entries from settings.local.json ---
+# --- 2. strip Diana hook entries from shared and local settings ---
+SHARED_SETTINGS="$CLAUDE_DIR/settings.json"
+
+if [ -f "$SHARED_SETTINGS" ]; then
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "warning: python3 not found — cannot safely strip Diana hooks from $SHARED_SETTINGS." >&2
+  else
+    SHARED_RESULT="$(python3 - "$SHARED_SETTINGS" "$TS" <<'PYEOF'
+import json, sys, copy
+
+settings_path, ts = sys.argv[1:3]
+with open(settings_path) as f:
+    raw_before = f.read()
+try:
+    existing = json.loads(raw_before) if raw_before.strip() else {}
+except Exception:
+    print("invalid-json")
+    sys.exit(0)
+original = copy.deepcopy(existing)
+hooks = existing.get("hooks", {})
+for event in list(hooks):
+    hooks[event] = [entry for entry in hooks[event] if "check-careful.sh" not in json.dumps(entry)]
+    if not hooks[event]:
+        del hooks[event]
+if not hooks and "hooks" in existing:
+    del existing["hooks"]
+if existing == original:
+    print("unchanged")
+    sys.exit(0)
+with open(settings_path + ".bak." + ts, "w") as f:
+    f.write(raw_before)
+with open(settings_path, "w") as f:
+    f.write(json.dumps(existing, indent=2) + "\n")
+print("updated")
+PYEOF
+)"
+    case "$SHARED_RESULT" in
+      updated) UPDATED+=(".claude/settings.json  (Diana hook removed; previous version backed up to .claude/settings.json.bak.$TS)") ;;
+      unchanged) SKIPPED+=(".claude/settings.json  (no Diana hook present)") ;;
+      invalid-json) echo "warning: $SHARED_SETTINGS is invalid JSON — left untouched." >&2 ;;
+    esac
+  fi
+else
+  SKIPPED+=(".claude/settings.json  (not present)")
+fi
+
 SETTINGS="$CLAUDE_DIR/settings.local.json"
 
 if [ -f "$SETTINGS" ]; then
@@ -137,7 +182,52 @@ else
   SKIPPED+=(".claude/settings.local.json  (not present)")
 fi
 
-# --- 3. strip Diana section from CLAUDE.md ---
+# --- 3. strip Diana policy section from AGENTS.md ---
+AGENTS_MD="$TARGET/AGENTS.md"
+
+if [ -f "$AGENTS_MD" ]; then
+  AGENTS_RESULT="$(python3 - "$AGENTS_MD" "$TS" <<'PYEOF'
+import sys, os
+
+target_md, ts = sys.argv[1:3]
+BEGIN = "<!-- DIANA-POLICY:BEGIN (managed by diana/install.sh — do not hand-edit between markers) -->"
+END = "<!-- DIANA-POLICY:END -->"
+
+with open(target_md) as f:
+    raw = f.read()
+if BEGIN not in raw or END not in raw:
+    print("absent")
+    sys.exit(0)
+
+pre = raw.split(BEGIN)[0]
+post = raw.split(END, 1)[1]
+new_raw = pre.rstrip("\n")
+if post.strip():
+    new_raw += "\n\n" + post.lstrip("\n")
+else:
+    new_raw += "\n" if new_raw else ""
+
+with open(target_md + ".bak." + ts, "w") as f:
+    f.write(raw)
+if new_raw.strip() == "":
+    os.remove(target_md)
+    print("removed-file")
+else:
+    with open(target_md, "w") as f:
+        f.write(new_raw)
+    print("updated")
+PYEOF
+)"
+  case "$AGENTS_RESULT" in
+    updated)       UPDATED+=("AGENTS.md  (Diana policy removed; previous version backed up to AGENTS.md.bak.$TS)") ;;
+    removed-file)  REMOVED+=("AGENTS.md  (only contained Diana policy; previous version backed up to AGENTS.md.bak.$TS)") ;;
+    absent)        SKIPPED+=("AGENTS.md  (no Diana policy section present)") ;;
+  esac
+else
+  SKIPPED+=("AGENTS.md  (not present)")
+fi
+
+# --- 4. strip Diana section from CLAUDE.md ---
 CLAUDE_MD="$TARGET/CLAUDE.md"
 
 if [ -f "$CLAUDE_MD" ]; then
@@ -184,7 +274,7 @@ else
   SKIPPED+=("CLAUDE.md  (not present)")
 fi
 
-# --- 4. root loop files are live project state — never touched, just noted ---
+# --- 5. root loop files are live project state — never touched, just noted ---
 ROOT_LOOP_FILES=()
 for f in LOOP.md STATE.md RUN_LOG.md BUDGET.md; do
   if [ -f "$TARGET/$f" ]; then
@@ -192,7 +282,7 @@ for f in LOOP.md STATE.md RUN_LOG.md BUDGET.md; do
   fi
 done
 
-# --- 5. report ---
+# --- 6. report ---
 echo "Diana uninstall → $TARGET"
 echo
 if [ "${#REMOVED[@]}" -gt 0 ]; then

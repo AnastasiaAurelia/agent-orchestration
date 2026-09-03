@@ -1,9 +1,11 @@
 # Agent Orchestration
 
-A reusable Claude Code operating base for disciplined agentic project work.
+A reusable, provider-neutral engineering policy and workflow base with Claude
+Code integration.
 
-This repo is a small, portable Claude Code setup that can be installed into any
-project so Claude works with a repeatable workflow:
+This repo installs a small, portable policy and Claude Code workflow into any
+project so compatible agents share the same engineering constitution while
+Claude can use a repeatable workflow:
 
 ```text
 plan -> inspect -> fix -> test -> review -> ship
@@ -11,7 +13,7 @@ plan -> inspect -> fix -> test -> review -> ship
 
 It is intentionally not a giant AgentOps platform, not a multi-agent
 marketplace, not a router service, and not a dashboard. The goal is simple:
-make Claude behave like a disciplined junior PM/engineer inside every repo.
+make agentic project work disciplined and verifiable inside every repo.
 
 ## Why This Exists
 
@@ -64,13 +66,23 @@ diana/
 install.sh
 verify.sh
 uninstall.sh
+AGENTS.md
 ```
 
 ## Core Files
 
+### `AGENTS.md`
+
+The canonical provider-neutral engineering policy: inspect before inferring,
+define Definition of Done, reuse before build, make surgical changes, and
+verify before claiming completion. It also establishes the protected-branch
+human merge floor and distinguishes instruction/hook guardrails from execution
+isolation.
+
 ### `diana/CLAUDE.md`
 
-The operating protocol. It defines the default loop:
+Claude-specific integration that references `AGENTS.md` and exposes the default
+loop:
 
 ```text
 task -> inspect -> plan -> implement -> test -> review -> ship
@@ -234,8 +246,9 @@ The installer:
 * creates `.claude/` folders if needed
 * installs Diana commands and skills
 * installs the safety hook
-* merges hook settings into `.claude/settings.local.json`
-* appends a marked Diana section into root `CLAUDE.md`
+* installs the safety hook into committed `.claude/settings.json`
+* keeps the optional cost hook in `.claude/settings.local.json`
+* appends marked Diana sections into root `AGENTS.md` and `CLAUDE.md`
 * backs up existing files before overwriting
 * is safe to run repeatedly
 
@@ -251,8 +264,8 @@ It verifies:
 
 * required files exist
 * `check-careful.sh` is executable
-* hook config exists
-* root `CLAUDE.md` contains the Diana section
+* portable and local hook configs exist in their intended scopes
+* root `AGENTS.md` and `CLAUDE.md` contain their Diana sections
 
 ## Uninstall
 

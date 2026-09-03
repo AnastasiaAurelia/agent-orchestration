@@ -3,7 +3,7 @@
 Short, project-specific notes worth carrying across sessions — not a system,
 just files.
 
-Three files, created on demand, not up front:
+Canonical project memory has four file owners:
 
 - `decisions.md` — one line per non-obvious decision and why (e.g. "chose
   polling over websockets: infra doesn't support sticky sessions yet").
@@ -28,13 +28,21 @@ Three files, created on demand, not up front:
       confirms that.
   Exists to let Opus and Fable be compared on real occasions later — not
   to justify using either by default.
+- `learned-rules.md` — only durable behavioral rules explicitly approved by
+  a human. Diana does not infer or write rules here autonomously.
 
 Rules:
 
 - Only write here what isn't already obvious from reading the code or git
   log. Don't duplicate the commit history or the README.
+- Put each fact in exactly one owner file; link to it rather than copying it
+  into `AGENTS.md`, `CLAUDE.md`, loop state, or worker-specific memory.
 - Check this directory at the start of a session if it's non-empty.
 - Update it when you learn something that would otherwise cost another
   investigation next time — not after every task.
-- If it's still empty after a few weeks of real use, that's fine — it means
-  the code and commits were self-explanatory enough not to need it.
+- Empty owner files are valid; they make ownership explicit without inventing
+  project history.
+
+Loop execution state/history remains in project-root `STATE.md`, `RUN_LOG.md`,
+and `BUDGET.md`. External worker/session telemetry belongs to its execution
+runtime, not this directory.

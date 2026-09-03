@@ -60,12 +60,12 @@ else
   fail "check-careful.sh is not executable (file missing)"
 fi
 
-# --- 3. settings.local.json contains the Diana hook config ---
-SETTINGS="$CLAUDE_DIR/settings.local.json"
-if [ ! -f "$SETTINGS" ]; then
-  fail "settings.local.json contains Diana hooks  (file missing: .claude/settings.local.json)"
+# --- 3. shared settings contain portable hook; local settings contain cost hook ---
+SHARED_SETTINGS="$CLAUDE_DIR/settings.json"
+if [ ! -f "$SHARED_SETTINGS" ]; then
+  fail "settings.json contains portable Diana hook  (file missing: .claude/settings.json)"
 elif command -v python3 >/dev/null 2>&1; then
-  RESULT="$(python3 - "$SETTINGS" <<'PYEOF'
+  RESULT="$(python3 - "$SHARED_SETTINGS" <<'PYEOF'
 import json, sys
 
 path = sys.argv[1]
@@ -76,63 +76,62 @@ except Exception:
     print("invalid-json")
     sys.exit(0)
 
-hooks = data.get("hooks", {})
-
-def has(event, needle):
-    for entry in hooks.get(event, []):
-        if needle in json.dumps(entry):
-            return True
-    return False
-
-pre = has("PreToolUse", "check-careful.sh")
-stop = has("Stop", "costs.jsonl")
-
-if pre and stop:
-    print("both")
-elif pre:
-    print("pretooluse-only")
-elif stop:
-    print("stop-only")
-else:
-    print("neither")
+blob = json.dumps(data.get("hooks", {}).get("PreToolUse", []))
+print("present" if "check-careful.sh" in blob else "missing")
 PYEOF
 )"
   case "$RESULT" in
-    both)
-      pass "settings.local.json: PreToolUse hook (check-careful.sh) present"
-      pass "settings.local.json: Stop hook (cost log) present"
-      ;;
-    pretooluse-only)
-      pass "settings.local.json: PreToolUse hook (check-careful.sh) present"
-      fail "settings.local.json: Stop hook (cost log) missing"
-      ;;
-    stop-only)
-      fail "settings.local.json: PreToolUse hook (check-careful.sh) missing"
-      pass "settings.local.json: Stop hook (cost log) present"
-      ;;
-    neither)
-      fail "settings.local.json: PreToolUse hook (check-careful.sh) missing"
-      fail "settings.local.json: Stop hook (cost log) missing"
-      ;;
-    invalid-json)
-      fail "settings.local.json is not valid JSON"
-      ;;
+    present) pass "settings.json: portable PreToolUse hook present" ;;
+    missing) fail "settings.json: portable PreToolUse hook missing" ;;
+    invalid-json) fail "settings.json is not valid JSON" ;;
   esac
 else
-  # no python3 — fall back to a plain substring check
-  if grep -q "check-careful.sh" "$SETTINGS" 2>/dev/null; then
-    pass "settings.local.json: check-careful.sh referenced (substring check, python3 unavailable)"
+  if grep -q "check-careful.sh" "$SHARED_SETTINGS" 2>/dev/null; then
+    pass "settings.json: portable hook referenced (substring check)"
   else
-    fail "settings.local.json: check-careful.sh not found (substring check, python3 unavailable)"
+    fail "settings.json: portable hook missing (substring check)"
   fi
-  if grep -q "costs.jsonl" "$SETTINGS" 2>/dev/null; then
+fi
+
+LOCAL_SETTINGS="$CLAUDE_DIR/settings.local.json"
+if [ ! -f "$LOCAL_SETTINGS" ]; then
+  fail "settings.local.json contains Diana cost hook  (file missing)"
+elif command -v python3 >/dev/null 2>&1; then
+  RESULT="$(python3 - "$LOCAL_SETTINGS" <<'PYEOF'
+import json, sys
+try:
+    data=json.load(open(sys.argv[1]))
+except Exception:
+    print("invalid-json")
+    raise SystemExit
+blob=json.dumps(data.get("hooks", {}).get("Stop", []))
+print("present" if "costs.jsonl" in blob else "missing")
+PYEOF
+)"
+  case "$RESULT" in
+    present) pass "settings.local.json: Stop hook (cost log) present" ;;
+    missing) fail "settings.local.json: Stop hook (cost log) missing" ;;
+    invalid-json) fail "settings.local.json is not valid JSON" ;;
+  esac
+else
+  if grep -q "costs.jsonl" "$LOCAL_SETTINGS" 2>/dev/null; then
     pass "settings.local.json: costs.jsonl referenced (substring check, python3 unavailable)"
   else
     fail "settings.local.json: costs.jsonl not found (substring check, python3 unavailable)"
   fi
 fi
 
-# --- 4. CLAUDE.md contains the Diana section ---
+# --- 4. AGENTS.md contains canonical Diana policy ---
+AGENTS_MD="$TARGET/AGENTS.md"
+AGENTS_BEGIN="<!-- DIANA-POLICY:BEGIN"
+AGENTS_END="<!-- DIANA-POLICY:END -->"
+if [ -f "$AGENTS_MD" ] && grep -qF "$AGENTS_BEGIN" "$AGENTS_MD" && grep -qF "$AGENTS_END" "$AGENTS_MD"; then
+  pass "AGENTS.md contains the canonical Diana policy"
+else
+  fail "AGENTS.md does not contain the canonical Diana policy"
+fi
+
+# --- 5. CLAUDE.md contains the Diana section ---
 CLAUDE_MD="$TARGET/CLAUDE.md"
 BEGIN_MARKER="<!-- DIANA:BEGIN"
 END_MARKER="<!-- DIANA:END -->"

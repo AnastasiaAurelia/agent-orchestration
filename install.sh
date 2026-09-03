@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Diana installer.
 #
-# Copies Diana's Claude Code base (skills, commands, hooks, CLAUDE.md section)
+# Copies Diana's policy and Claude Code base (skills, commands, hooks,
+# managed AGENTS.md and CLAUDE.md sections)
 # into a target project's .claude/ discovery paths.
 #
 # Usage:
@@ -11,7 +12,7 @@
 #   - Never overwrites an existing file without backing it up first
 #     (suffix: .bak.<timestamp>).
 #   - Only touches Diana-managed entries inside settings.local.json and the
-#     CLAUDE.md Diana section — it does not disturb unrelated content there.
+#     AGENTS.md/CLAUDE.md Diana sections — unrelated content is preserved.
 #   - Re-running is idempotent: unchanged files/entries are left alone and
 #     reported as "unchanged", not re-copied or re-backed-up.
 #   - Loop templates (LOOP.md, STATE.md, RUN_LOG.md, BUDGET.md) are installed
@@ -99,18 +100,18 @@ install_file "$DIANA_SRC/templates/BUDGET.md"      "$CLAUDE_DIR/templates/diana/
 
 chmod +x "$CLAUDE_DIR/hooks/check-careful.sh"
 
-# --- 3. merge hooks into .claude/settings.local.json ---
-SETTINGS="$CLAUDE_DIR/settings.local.json"
-DIANA_HOOKS_JSON="$DIANA_SRC/hooks/hooks.json"
+# --- 3. merge portable and local hook settings ---
+SHARED_SETTINGS="$CLAUDE_DIR/settings.json"
+LOCAL_SETTINGS="$CLAUDE_DIR/settings.local.json"
+DIANA_SHARED_SETTINGS="$SCRIPT_DIR/.claude/settings.json"
+DIANA_LOCAL_HOOKS="$DIANA_SRC/hooks/hooks.json"
 
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "warning: python3 not found — cannot safely merge hook settings." >&2
-  echo "Manually add the \"hooks\" key from $DIANA_HOOKS_JSON into $SETTINGS." >&2
-else
-  MERGE_RESULT="$(python3 - "$SETTINGS" "$DIANA_HOOKS_JSON" "$TS" install <<'PYEOF'
+merge_hook_settings() {
+  local settings_path="$1" diana_hooks_path="$2"
+  python3 - "$settings_path" "$diana_hooks_path" "$TS" <<'PYEOF'
 import json, sys, os, copy
 
-settings_path, diana_hooks_path, ts, mode = sys.argv[1:5]
+settings_path, diana_hooks_path, ts = sys.argv[1:4]
 
 with open(diana_hooks_path) as f:
     diana_hooks = json.load(f).get("hooks", {})
@@ -139,9 +140,18 @@ else:
 original = copy.deepcopy(existing)
 
 existing.setdefault("hooks", {})
+# Remove prior Diana registrations from either scope so upgrades migrate the
+# portable safety hook out of local settings without disturbing other hooks.
+for event in list(existing["hooks"]):
+    existing["hooks"][event] = [
+        entry for entry in existing["hooks"][event]
+        if not is_diana_entry(event, entry)
+    ]
+    if not existing["hooks"][event]:
+        del existing["hooks"][event]
+
 for event, entries in diana_hooks.items():
     lst = existing["hooks"].setdefault(event, [])
-    lst[:] = [e for e in lst if not is_diana_entry(event, e)]
     lst.extend(copy.deepcopy(entries))
 
 if existing == original:
@@ -158,18 +168,80 @@ with open(settings_path, "w") as f:
 
 print("created" if not existed_before else "updated")
 PYEOF
-)"
-  case "$MERGE_RESULT" in
+}
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "warning: python3 not found — cannot safely merge hook settings." >&2
+  echo "Manually merge $DIANA_SHARED_SETTINGS and $DIANA_LOCAL_HOOKS." >&2
+else
+  SHARED_RESULT="$(merge_hook_settings "$SHARED_SETTINGS" "$DIANA_SHARED_SETTINGS")"
+  case "$SHARED_RESULT" in
+    created)   CREATED+=(".claude/settings.json") ;;
+    updated)   UPDATED+=(".claude/settings.json  (previous version backed up to .claude/settings.json.bak.$TS)") ;;
+    unchanged) UNCHANGED+=(".claude/settings.json") ;;
+    invalid-json) echo "warning: $SHARED_SETTINGS is invalid JSON — left untouched." >&2 ;;
+  esac
+
+  LOCAL_RESULT="$(merge_hook_settings "$LOCAL_SETTINGS" "$DIANA_LOCAL_HOOKS")"
+  case "$LOCAL_RESULT" in
     created)   CREATED+=(".claude/settings.local.json") ;;
     updated)   UPDATED+=(".claude/settings.local.json  (previous version backed up to .claude/settings.local.json.bak.$TS)") ;;
     unchanged) UNCHANGED+=(".claude/settings.local.json") ;;
-    invalid-json)
-      echo "warning: $SETTINGS is not valid JSON — left untouched. Merge the hooks from $DIANA_HOOKS_JSON manually." >&2
-      ;;
+    invalid-json) echo "warning: $LOCAL_SETTINGS is invalid JSON — left untouched." >&2 ;;
   esac
 fi
 
-# --- 4. Diana section in root CLAUDE.md ---
+# --- 4. provider-neutral Diana section in root AGENTS.md ---
+AGENTS_MD="$TARGET/AGENTS.md"
+DIANA_AGENTS_MD="$SCRIPT_DIR/AGENTS.md"
+
+AGENTS_RESULT="$(python3 - "$AGENTS_MD" "$DIANA_AGENTS_MD" "$TS" <<'PYEOF'
+import sys, os
+
+target_md, diana_md, ts = sys.argv[1:4]
+with open(diana_md) as f:
+    diana_content = f.read().rstrip("\n")
+
+BEGIN = "<!-- DIANA-POLICY:BEGIN (managed by diana/install.sh — do not hand-edit between markers) -->"
+END = "<!-- DIANA-POLICY:END -->"
+block = BEGIN + "\n\n" + diana_content + "\n\n" + END
+
+if not os.path.exists(target_md):
+    with open(target_md, "w") as f:
+        f.write(block + "\n")
+    print("created")
+    sys.exit(0)
+
+with open(target_md) as f:
+    raw = f.read()
+
+if BEGIN in raw and END in raw:
+    pre = raw.split(BEGIN)[0]
+    post = raw.split(END, 1)[1]
+    new_raw = pre + block + post
+    if new_raw == raw:
+        print("unchanged")
+        sys.exit(0)
+else:
+    sep = "" if raw.endswith("\n\n") else ("\n" if raw.endswith("\n") else "\n\n")
+    new_raw = raw + sep + block + "\n"
+
+with open(target_md + ".bak." + ts, "w") as f:
+    f.write(raw)
+with open(target_md, "w") as f:
+    f.write(new_raw)
+print("updated" if BEGIN in raw else "appended")
+PYEOF
+)"
+
+case "$AGENTS_RESULT" in
+  created)   CREATED+=("AGENTS.md") ;;
+  appended)  UPDATED+=("AGENTS.md  (Diana policy appended; previous version backed up to AGENTS.md.bak.$TS)") ;;
+  updated)   UPDATED+=("AGENTS.md  (Diana policy refreshed; previous version backed up to AGENTS.md.bak.$TS)") ;;
+  unchanged) UNCHANGED+=("AGENTS.md") ;;
+esac
+
+# --- 5. Claude-specific Diana section in root CLAUDE.md ---
 CLAUDE_MD="$TARGET/CLAUDE.md"
 DIANA_CLAUDE_MD="$DIANA_SRC/CLAUDE.md"
 
@@ -223,7 +295,7 @@ case "$MD_RESULT" in
   unchanged) UNCHANGED+=("CLAUDE.md") ;;
 esac
 
-# --- 5. report ---
+# --- 6. report ---
 echo "Diana install → $TARGET"
 echo
 if [ "${#CREATED[@]}" -gt 0 ]; then
