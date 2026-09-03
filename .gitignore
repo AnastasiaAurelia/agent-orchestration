@@ -13,7 +13,8 @@
 !.claude/hooks/check-careful.sh
 !.github/
 !.github/workflows/
-!.github/workflows/diana-gate-advisory.yml
+!.github/workflows/diana-gate.yml
+!.github/CODEOWNERS
 !.github/pull_request_template.md
 !README.md
 !install.sh
@@ -47,6 +48,7 @@
 !diana/gate/fixtures/*.json
 !diana/ci/
 !diana/ci/*.py
+!diana/ci/*.sh
 !diana/ci/*.md
 !diana/templates/
 !diana/templates/*.md
