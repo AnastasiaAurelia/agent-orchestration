@@ -350,3 +350,4 @@ Make Claude plan, fix, review, and ship more reliably inside any project.
 ```
 
 <!-- diana-phase1g-test-c: disposable documentation marker, safe to remove -->
+<!-- diana-phase1g-test-e: additional reviewable commit to test stale-approval invalidation -->
