@@ -1,4 +1,4 @@
-name: Diana Gate (advisory)
+name: Diana Gate
 
 on:
   pull_request:
@@ -8,8 +8,8 @@ permissions:
   contents: read
 
 jobs:
-  diana-gate-advisory:
-    name: Diana Gate (advisory, non-blocking)
+  diana-gate:
+    name: Diana Gate
     runs-on: ubuntu-latest
     steps:
       - name: Check out pull request
@@ -27,20 +27,12 @@ jobs:
           "$GITHUB_EVENT_PATH"
           "$RUNNER_TEMP/diana-gate-input.json"
 
-      - name: Evaluate Diana Gate (advisory)
-        id: gate
-        continue-on-error: true
+      - name: Evaluate Diana Gate
         run: |
           set +e
           python3 diana/gate/diana-gate.py "$RUNNER_TEMP/diana-gate-input.json" > "$RUNNER_TEMP/diana-gate-result.json"
-          status=$?
+          gate_exit=$?
           set -e
           cat "$RUNNER_TEMP/diana-gate-result.json"
           python3 diana/ci/write-summary.py "$RUNNER_TEMP/diana-gate-result.json" >> "$GITHUB_STEP_SUMMARY"
-          exit "$status"
-
-      - name: Confirm advisory-only behavior
-        if: always()
-        run: |
-          echo "This check is observational and does not enforce merge protection." >> "$GITHUB_STEP_SUMMARY"
-          echo "Diana Gate step outcome: ${{ steps.gate.outcome }}" >> "$GITHUB_STEP_SUMMARY"
+          python3 diana/ci/map-gate-result.py "$gate_exit"
