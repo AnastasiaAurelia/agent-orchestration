@@ -1,0 +1,8 @@
+{
+  "files": {
+    ".env.example": "DATABASE_URL=postgres://user:pass@localhost:5432/app\nSTRIPE_SECRET_KEY=REDACTED_FOR_FIXTURE\n",
+    "docs/security/secrets-rotation-guide.md": "# Secrets rotation guide\n\nThis document explains how to rotate secrets. It contains no real secret material.\n",
+    "config/secrets.example.yaml": "api_key: REPLACE_ME\n",
+    "Makefile": "test:\n\techo running tests\n"
+  }
+}

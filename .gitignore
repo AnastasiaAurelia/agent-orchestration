@@ -50,6 +50,12 @@
 !diana/ci/*.py
 !diana/ci/*.sh
 !diana/ci/*.md
+!diana/preflight/
+!diana/preflight/*.py
+!diana/preflight/*.md
+!diana/preflight/*.sh
+!diana/preflight/fixtures/
+!diana/preflight/fixtures/*.json
 !diana/templates/
 !diana/templates/*.md
 

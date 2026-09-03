@@ -28,3 +28,9 @@ Risk and `human_only_conditions` are classifications produced before the gate.
 The gate validates them, applies sensitive-path escalation, checks evidence and
 blocker preflight results, and produces the deterministic final decision. It is
 a merge-boundary control, not execution isolation.
+
+The `preflight` array is normally produced by
+[`diana/preflight`](../preflight/README.md), reduced to this schema by
+`diana/preflight/reduce_for_gate.py`. Preflight detects quality/safety
+conditions; this gate decides whether the supplied evidence is allowed to
+proceed. The two stay separate components on purpose.

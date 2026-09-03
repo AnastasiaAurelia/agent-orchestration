@@ -1,0 +1,6 @@
+{
+  "files": {
+    "package.json": "{ this is not valid JSON ",
+    "src/index.js": "console.log('hello');\n"
+  }
+}

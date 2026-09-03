@@ -1,0 +1,8 @@
+{
+  "files": {
+    "requirements.txt": "flask==3.0.0\n",
+    "app/main.py": "def add(a, b):\n    return a + b\n",
+    "tests/test_main.py": "from app.main import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n",
+    "pyproject.toml": "[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n"
+  }
+}

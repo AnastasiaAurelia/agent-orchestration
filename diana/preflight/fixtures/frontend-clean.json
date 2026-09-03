@@ -1,0 +1,7 @@
+{
+  "files": {
+    "package.json": "{\"name\":\"demo-clean\",\"dependencies\":{\"react\":\"^18.0.0\"},\"devDependencies\":{\"vite\":\"^5.0.0\"},\"scripts\":{\"test\":\"vitest run\"}}",
+    "index.html": "<!doctype html><html><head><title>Demo</title></head><body><div id=\"root\"></div></body></html>",
+    "src/config.ts": "export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;\n"
+  }
+}
