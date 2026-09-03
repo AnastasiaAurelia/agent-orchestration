@@ -348,3 +348,5 @@ v0.1 is focused on one thing:
 ```text
 Make Claude plan, fix, review, and ship more reliably inside any project.
 ```
+
+<!-- diana-phase1g-test-c: disposable documentation marker, safe to remove -->
