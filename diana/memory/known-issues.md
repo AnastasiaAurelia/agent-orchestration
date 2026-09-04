@@ -12,7 +12,7 @@ rediscovered. Include evidence and the condition for reconsideration.
 
 ## AO requires Electron at pinned version
 
-- Observed: at AO pin `88a86d12027e0e37aa793d2f016165dde18e83`, `ao start` is
+- Observed: at AO pin `ed88a86d12027e0e37aa793d2f016165dde18e83`, `ao start` is
   not a pure headless CLI/daemon path — it requires/launches the Electron
   desktop runtime.
 - Status: open (accepted operational dependency for this pin, not a defect)
