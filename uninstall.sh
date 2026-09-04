@@ -182,6 +182,67 @@ else
   SKIPPED+=(".claude/settings.local.json  (not present)")
 fi
 
+# --- 2b. strip Diana's playwright entry from .mcp.json ---
+MCP_JSON="$TARGET/.mcp.json"
+
+if [ -f "$MCP_JSON" ]; then
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "warning: python3 not found — cannot safely strip the Diana playwright entry from $MCP_JSON." >&2
+  else
+    MCP_RESULT="$(python3 - "$MCP_JSON" "$TS" <<'PYEOF'
+import json, sys, os
+
+mcp_path, ts = sys.argv[1:3]
+
+def is_diana_entry(entry):
+    return "@playwright/mcp" in json.dumps(entry)
+
+with open(mcp_path) as f:
+    raw_before = f.read()
+try:
+    existing = json.loads(raw_before) if raw_before.strip() else {}
+except Exception:
+    print("invalid-json")
+    sys.exit(0)
+
+servers = existing.get("mcpServers", {})
+current = servers.get("playwright")
+
+if current is None:
+    print("absent")
+    sys.exit(0)
+if not is_diana_entry(current):
+    print("foreign")
+    sys.exit(0)
+
+del servers["playwright"]
+if not servers:
+    existing.pop("mcpServers", None)
+
+with open(mcp_path + ".bak." + ts, "w") as f:
+    f.write(raw_before)
+
+if not existing:
+    os.remove(mcp_path)
+    print("removed-file")
+else:
+    with open(mcp_path, "w") as f:
+        f.write(json.dumps(existing, indent=2) + "\n")
+    print("updated")
+PYEOF
+)"
+    case "$MCP_RESULT" in
+      updated)      UPDATED+=(".mcp.json  (Diana playwright MCP entry removed; previous version backed up to .mcp.json.bak.$TS)") ;;
+      removed-file) REMOVED+=(".mcp.json  (only contained the Diana playwright entry; previous version backed up to .mcp.json.bak.$TS)") ;;
+      absent)       SKIPPED+=(".mcp.json  (no Diana playwright entry present)") ;;
+      foreign)      SKIPPED+=(".mcp.json  (playwright entry present but not Diana's — left untouched)") ;;
+      invalid-json) echo "warning: $MCP_JSON is not valid JSON — left untouched." >&2 ;;
+    esac
+  fi
+else
+  SKIPPED+=(".mcp.json  (not present)")
+fi
+
 # --- 3. strip Diana policy section from AGENTS.md ---
 AGENTS_MD="$TARGET/AGENTS.md"
 

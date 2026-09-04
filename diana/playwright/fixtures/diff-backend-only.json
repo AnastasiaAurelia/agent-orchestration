@@ -1,0 +1,7 @@
+{
+  "files": [
+    "diana/gate/diana-gate.py",
+    "diana/ci/build-gate-input.py",
+    "diana/preflight/preflight.py"
+  ]
+}

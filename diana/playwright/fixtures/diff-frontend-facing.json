@@ -1,0 +1,7 @@
+{
+  "files": [
+    "src/components/SignupForm.tsx",
+    "src/styles/app.css",
+    "diana/gate/diana-gate.py"
+  ]
+}

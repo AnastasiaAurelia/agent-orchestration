@@ -121,6 +121,41 @@ else
   fi
 fi
 
+# --- 3b. .mcp.json contains Diana's playwright MCP entry ---
+MCP_JSON="$TARGET/.mcp.json"
+if [ ! -f "$MCP_JSON" ]; then
+  fail ".mcp.json contains the playwright MCP entry  (file missing: .mcp.json)"
+elif command -v python3 >/dev/null 2>&1; then
+  RESULT="$(python3 - "$MCP_JSON" <<'PYEOF'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    print("invalid-json")
+    sys.exit(0)
+entry = data.get("mcpServers", {}).get("playwright")
+if entry is None:
+    print("missing")
+elif "@playwright/mcp" in json.dumps(entry):
+    print("present")
+else:
+    print("foreign")
+PYEOF
+)"
+  case "$RESULT" in
+    present) pass ".mcp.json: playwright MCP entry present" ;;
+    missing) fail ".mcp.json: playwright MCP entry missing" ;;
+    foreign) fail ".mcp.json: playwright key present but not Diana's entry (foreign 'playwright' server — install.sh will not overwrite it)" ;;
+    invalid-json) fail ".mcp.json is not valid JSON" ;;
+  esac
+else
+  if grep -q "@playwright/mcp" "$MCP_JSON" 2>/dev/null; then
+    pass ".mcp.json: playwright MCP entry referenced (substring check)"
+  else
+    fail ".mcp.json: playwright MCP entry missing (substring check)"
+  fi
+fi
+
 # --- 4. AGENTS.md contains canonical Diana policy ---
 AGENTS_MD="$TARGET/AGENTS.md"
 AGENTS_BEGIN="<!-- DIANA-POLICY:BEGIN"
