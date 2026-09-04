@@ -2,8 +2,9 @@
 # Diana installer.
 #
 # Copies Diana's policy and Claude Code base (skills, commands, hooks,
-# managed AGENTS.md and CLAUDE.md sections)
-# into a target project's .claude/ discovery paths.
+# managed AGENTS.md and CLAUDE.md sections, and the Playwright MCP server
+# entry)
+# into a target project's .claude/ discovery paths and root .mcp.json.
 #
 # Usage:
 #   ./install.sh [target-project-path]
@@ -188,6 +189,72 @@ else
     updated)   UPDATED+=(".claude/settings.local.json  (previous version backed up to .claude/settings.local.json.bak.$TS)") ;;
     unchanged) UNCHANGED+=(".claude/settings.local.json") ;;
     invalid-json) echo "warning: $LOCAL_SETTINGS is invalid JSON — left untouched." >&2 ;;
+  esac
+fi
+
+# --- 3b. merge Playwright MCP config into target .mcp.json ---
+MCP_JSON="$TARGET/.mcp.json"
+DIANA_MCP_FRAGMENT="$DIANA_SRC/mcp/playwright.json"
+
+merge_mcp_settings() {
+  python3 - "$MCP_JSON" "$DIANA_MCP_FRAGMENT" "$TS" <<'PYEOF'
+import json, sys, os
+
+mcp_path, fragment_path, ts = sys.argv[1:4]
+
+with open(fragment_path) as f:
+    diana_entry = json.load(f)["mcpServers"]["playwright"]
+
+def is_diana_entry(entry):
+    return "@playwright/mcp" in json.dumps(entry)
+
+existed_before = os.path.exists(mcp_path)
+raw_before = ""
+if existed_before:
+    with open(mcp_path) as f:
+        raw_before = f.read()
+    try:
+        existing = json.loads(raw_before) if raw_before.strip() else {}
+    except Exception:
+        print("invalid-json")
+        sys.exit(0)
+else:
+    existing = {}
+
+servers = existing.setdefault("mcpServers", {})
+current = servers.get("playwright")
+
+# A pre-existing "playwright" key that doesn't carry Diana's @playwright/mcp
+# signature belongs to the user (or another tool) — never overwrite it.
+if current is not None and not is_diana_entry(current):
+    print("foreign")
+    sys.exit(0)
+
+if current == diana_entry:
+    print("unchanged")
+    sys.exit(0)
+
+servers["playwright"] = diana_entry
+new_content = json.dumps(existing, indent=2) + "\n"
+
+if existed_before:
+    with open(mcp_path + ".bak." + ts, "w") as f:
+        f.write(raw_before)
+with open(mcp_path, "w") as f:
+    f.write(new_content)
+
+print("created" if not existed_before else "updated")
+PYEOF
+}
+
+if command -v python3 >/dev/null 2>&1; then
+  MCP_RESULT="$(merge_mcp_settings)"
+  case "$MCP_RESULT" in
+    created)   CREATED+=(".mcp.json") ;;
+    updated)   UPDATED+=(".mcp.json  (playwright MCP entry refreshed; previous version backed up to .mcp.json.bak.$TS)") ;;
+    unchanged) UNCHANGED+=(".mcp.json") ;;
+    foreign)   echo "warning: $MCP_JSON already has a non-Diana 'playwright' MCP server entry — left untouched." >&2 ;;
+    invalid-json) echo "warning: $MCP_JSON is invalid JSON — left untouched." >&2 ;;
   esac
 fi
 

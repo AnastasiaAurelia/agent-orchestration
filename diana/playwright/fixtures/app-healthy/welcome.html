@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Diana Playwright fixture — welcome</title>
+</head>
+<body>
+  <h1 id="welcome-message">Welcome, !</h1>
+  <a id="back" href="index.html">Back</a>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const name = params.get("name") || "";
+    document.getElementById("welcome-message").textContent = "Welcome, " + name + "!";
+  </script>
+</body>
+</html>

@@ -20,9 +20,12 @@
 !install.sh
 !verify.sh
 !uninstall.sh
+!.mcp.json
 
 !diana/
 !diana/CLAUDE.md
+!diana/mcp/
+!diana/mcp/playwright.json
 !diana/skills/
 !diana/skills/*.md
 !diana/commands/
@@ -56,6 +59,17 @@
 !diana/preflight/*.sh
 !diana/preflight/fixtures/
 !diana/preflight/fixtures/*.json
+!diana/playwright/
+!diana/playwright/*.py
+!diana/playwright/*.md
+!diana/playwright/*.sh
+!diana/playwright/*.mjs
+!diana/playwright/fixtures/
+!diana/playwright/fixtures/*.json
+!diana/playwright/fixtures/app-healthy/
+!diana/playwright/fixtures/app-healthy/*.html
+!diana/playwright/fixtures/app-broken/
+!diana/playwright/fixtures/app-broken/*.html
 !diana/templates/
 !diana/templates/*.md
 
