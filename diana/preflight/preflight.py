@@ -59,6 +59,11 @@ FRONTEND_FRAMEWORK_DEPS = {
 FRONTEND_SOURCE_EXTS = {".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte", ".html"}
 TEST_DIR_NAMES = {"test", "tests", "__tests__", "__mocks__"}
 TEST_FILENAME_RE = re.compile(r"^(test_.+|.+_test)\.py$")
+# Genuine shell test-runner filename conventions only: test-*.sh, test_*.sh,
+# *-test.sh, *_test.sh. A hyphen/underscore separator is required next to
+# "test" so lookalikes that merely contain the substring (contest.sh,
+# latest.sh, testdata.sh, specification.sh) do not qualify.
+SHELL_TEST_RUNNER_RE = re.compile(r"^(test[-_].+|.+[-_]test)\.sh$")
 
 SAFE_FILENAME_SUFFIXES = (
     ".example", ".sample", ".template", ".dist", ".test",
@@ -139,6 +144,29 @@ class Ctx:
         if TEST_FILENAME_RE.match(name):
             return True
         return False
+
+    def is_shell_test_runner(self, rel: str) -> bool:
+        if not SHELL_TEST_RUNNER_RE.match(Path(rel).name):
+            return False
+        text = self.text(rel) or ""
+        first_line = text.splitlines()[0] if text else ""
+        return _shebang_is_shell(first_line)
+
+
+def _shebang_is_shell(first_line: str) -> bool:
+    """True if a #! line's actual interpreter is a shell (bash, sh, dash,
+    zsh, ksh, ...), including the common `#!/usr/bin/env bash` form. Checked
+    by interpreter basename rather than a `sh` substring/word-boundary regex,
+    since "bash" has no word boundary before its trailing "sh"."""
+    if not first_line.startswith("#!"):
+        return False
+    tokens = first_line[2:].split()
+    if not tokens:
+        return False
+    interpreter = Path(tokens[0]).name
+    if interpreter == "env" and len(tokens) > 1:
+        interpreter = Path(tokens[1]).name
+    return interpreter.endswith("sh")
 
 
 def build_ctx(root: Path) -> Ctx:
@@ -221,6 +249,9 @@ def has_test_evidence(ctx: Ctx) -> tuple[bool, list[str]]:
             text = ctx.text(f) or ""
             if re.search(r"\b(pytest|npm test|npm run test|go test|cargo test|yarn test|pnpm test)\b", text):
                 return True, [f"{f} runs a recognized test command"]
+    shell_test_runners = sorted(f for f in ctx.files if ctx.is_shell_test_runner(f))
+    if shell_test_runners:
+        return True, [f"shell test runner found: {f}" for f in shell_test_runners]
     return False, detail or ["no recognized build/test entrypoint found"]
 
 

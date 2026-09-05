@@ -99,6 +99,18 @@ run_case test-path-precision-exclude \
   "localhost-staging-url-residue:1:PASS" \
   "frontend-client-secret-leakage:1:PASS"
 
+# Regression: a genuine shell test runner (test-*.sh with a #!.../sh
+# shebang) is recognized as build/test evidence on its own, with no
+# package.json/pyproject/Makefile/CI test command present.
+run_case shell-test-runner \
+  "build-test-evidence-present:1:PASS"
+
+# Regression: shell filenames that merely contain a "test"-like substring
+# without the required test[-_]/-[_]test convention must not false-positive
+# as test-runner evidence.
+run_case shell-test-lookalike \
+  "build-test-evidence-present:1:FAIL"
+
 echo "--- CASE F (tool-level): nonexistent repo path ---"
 set +e
 output="$(python3 "$PREFLIGHT" /nonexistent/path/does-not-exist 2>&1)"
