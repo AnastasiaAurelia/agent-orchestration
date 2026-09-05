@@ -1,0 +1,7 @@
+{
+  "files": {
+    "scripts/contest.sh": "#!/usr/bin/env bash\necho unrelated announcement script, not a test runner\n",
+    "scripts/latest.sh": "#!/usr/bin/env bash\necho prints the latest release tag, not a test runner\n",
+    "scripts/testdata.sh": "#!/usr/bin/env bash\necho generates fixture data, not a test runner\n"
+  }
+}

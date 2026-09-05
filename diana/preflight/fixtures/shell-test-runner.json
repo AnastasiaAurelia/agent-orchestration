@@ -1,0 +1,5 @@
+{
+  "files": {
+    "scripts/test-smoke.sh": "#!/usr/bin/env bash\nset -euo pipefail\necho smoke test passed\n"
+  }
+}
