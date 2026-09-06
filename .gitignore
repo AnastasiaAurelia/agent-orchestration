@@ -19,6 +19,7 @@
 !README.md
 !install.sh
 !verify.sh
+!test-verify.sh
 !uninstall.sh
 !.mcp.json
 

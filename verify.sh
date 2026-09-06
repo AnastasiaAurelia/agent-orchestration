@@ -182,5 +182,11 @@ if [ "$FAIL_COUNT" -eq 0 ]; then
   exit 0
 else
   echo "$FAIL_COUNT check(s) failed. Run install.sh $TARGET to fix."
+  if [ -f "$TARGET/diana/gate/diana-gate.py" ] && [ ! -f "$CLAUDE_DIR/commands/fix.md" ]; then
+    echo
+    echo "Note: this looks like Diana's own source repository, not a project Diana"
+    echo "was installed into — failures above are expected; run against a target"
+    echo "project instead, or use install.sh to install Diana here."
+  fi
   exit 1
 fi
