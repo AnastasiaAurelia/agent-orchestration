@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Fake `ao`: for `spawn`, records the exact argv it was invoked with (so a
+# test can assert the adapter is the only place that constructs `ao spawn`
+# syntax, and that --harness is always claude-code) and reports success.
+set -euo pipefail
+case "$1" in
+  spawn)
+    : "${FAKE_AO_SPAWN_ARGV_FILE:?FAKE_AO_SPAWN_ARGV_FILE must be set}"
+    printf '%s\n' "$@" > "$FAKE_AO_SPAWN_ARGV_FILE"
+    echo "spawned session fake-session-1 (idle) [prompt 10 B, system 10 B]"
+    ;;
+  *)
+    echo "fake-ao-spawn-record: unhandled command: $*" >&2
+    exit 1
+    ;;
+esac

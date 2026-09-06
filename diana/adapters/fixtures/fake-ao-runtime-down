@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Fake `ao`: correct pinned version, but the daemon itself is not ready
+# (models AO installed but not running / crashed).
+set -euo pipefail
+case "$1" in
+  version)
+    echo "0.12.10"
+    ;;
+  doctor)
+    echo '{"ok":false,"checks":[{"level":"FAIL","section":"Core","name":"daemon","message":"run file points to a dead process"}]}'
+    ;;
+  *)
+    echo "fake-ao-runtime-down: unhandled command: $*" >&2
+    exit 1
+    ;;
+esac

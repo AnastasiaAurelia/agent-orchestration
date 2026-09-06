@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 2,
+  "appPath": "/fake/mount/agent-orchestrator",
+  "version": "0.12.10",
+  "installedAt": "2026-01-01T00:00:00.000Z",
+  "lastReconciledAt": "2026-01-01T00:00:00.000Z",
+  "installSource": "unknown"
+}

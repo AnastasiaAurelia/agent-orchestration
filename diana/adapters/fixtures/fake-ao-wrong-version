@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Fake `ao`: reports a real but non-pinned semver.
+set -euo pipefail
+case "$1" in
+  version)
+    echo "0.9.0"
+    ;;
+  doctor)
+    echo '{"ok":true,"checks":[{"level":"PASS","section":"Core","name":"daemon","message":"ready"}]}'
+    ;;
+  *)
+    echo "fake-ao-wrong-version: unhandled command: $*" >&2
+    exit 1
+    ;;
+esac

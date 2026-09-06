@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Fake `ao`: reports the pinned version directly (models a future AO build
+# where `ao version` itself prints a real semver, not "dev").
+set -euo pipefail
+case "$1" in
+  version)
+    echo "0.12.10"
+    ;;
+  doctor)
+    echo '{"ok":true,"checks":[{"level":"PASS","section":"Core","name":"daemon","message":"ready"}]}'
+    ;;
+  *)
+    echo "fake-ao-compatible: unhandled command: $*" >&2
+    exit 1
+    ;;
+esac
