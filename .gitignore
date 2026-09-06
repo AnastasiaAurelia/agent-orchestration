@@ -57,6 +57,13 @@
 !diana/adapters/fixtures/
 !diana/adapters/fixtures/*.json
 !diana/adapters/fixtures/fake-ao-*
+
+!diana/ship/
+!diana/ship/*.py
+!diana/ship/*.md
+!diana/ship/*.sh
+!diana/ship/fixtures/
+!diana/ship/fixtures/fake-gh-*
 !diana/ci/
 !diana/ci/*.py
 !diana/ci/*.sh

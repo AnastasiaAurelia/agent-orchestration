@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Fake `gh`: records its full argv, NUL-separated so a multi-line --body
+# value round-trips safely, and prints a fake PR URL, mirroring a real
+# `gh pr create` success.
+set -euo pipefail
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  : "${FAKE_GH_ARGV_FILE:?FAKE_GH_ARGV_FILE must be set}"
+  printf '%s\0' "$@" > "$FAKE_GH_ARGV_FILE"
+  echo "https://github.com/fake/repo/pull/999"
+  exit 0
+fi
+echo "fake-gh-create-ok: unhandled command: $*" >&2
+exit 1
