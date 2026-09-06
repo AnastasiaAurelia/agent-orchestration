@@ -47,6 +47,25 @@ never approved for any mutation). `review-verdict` only validates the
 consistency (e.g. a `PASS` decision cannot coexist with a failing
 `dod_checks` entry) - the same "detect/validate, don't itself decide
 semantics" split every other Diana component already follows.
+
+Phase 11 (bounded multi-worker execution) adds three more subcommands,
+still no scheduler, DAG engine, or worker-fleet abstraction - just enough
+glue for exactly two concurrent actor workers plus the existing single
+reviewer flow reused unchanged:
+
+    plan-validate      - validate a 2-worker plan's shape and prove the two
+                         declared allowed_files scopes are disjoint, before
+                         anything is spawned
+    cross-worker-check - prove two workers' *actual* changed-file lists
+                         (from two separate verify-diff calls) don't
+                         intersect, after they commit
+    integrate          - merge both worker branches onto a fresh
+                         integration branch using plain `git merge`, fail
+                         closed on any conflict
+
+`review-verdict`, `reviewer-readonly-check`, `gate`, and `open-pr` are
+reused completely unchanged for the post-integration reviewer/verification
+stage - Phase 11 does not invent a second reviewer framework.
 """
 
 from __future__ import annotations
@@ -56,7 +75,7 @@ import json
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -335,6 +354,153 @@ def cmd_correction_prompt(args: argparse.Namespace) -> dict:
     return ok("correction-prompt", prompt=prompt)
 
 
+class InvalidPath(ValueError):
+    pass
+
+
+def _normalize_repo_path(raw: Any) -> str:
+    if not isinstance(raw, str) or not raw or "\\" in raw:
+        raise InvalidPath("path must be a non-empty POSIX path string")
+    path = PurePosixPath(raw)
+    if path.is_absolute() or ".." in path.parts:
+        raise InvalidPath("path must stay repository-relative")
+    return str(path)
+
+
+def cmd_plan_validate(args: argparse.Namespace) -> dict:
+    """Validate a Phase 11 multi-worker plan's shape and prove the two
+    workers' declared scopes are disjoint, before anything is spawned.
+    Deliberately bounded to exactly two "actor" workers - see MEMORY.md's
+    Phase 11 roadmap entry: no more workers or roles until repository
+    evidence proves one is actually necessary, so this schema is not
+    generalized past what is proven needed today.
+    """
+    plan = load_json_arg(args.plan, None)
+    if not isinstance(plan, dict) or set(plan) != {"goal", "risk", "dod", "workers"}:
+        return fail("plan-validate", "malformed_plan", "plan must be an object with exactly goal/risk/dod/workers")
+
+    if not isinstance(plan["goal"], str) or not plan["goal"].strip():
+        return fail("plan-validate", "malformed_plan", "goal must be a non-empty string")
+
+    if plan["risk"] != "SAFE":
+        return fail(
+            "plan-validate", "risk_not_eligible",
+            f"plan risk is {plan['risk']!r}; Phase 11 multi-worker execution requires SAFE",
+        )
+
+    dod = plan["dod"]
+    if (
+        not isinstance(dod, dict) or set(dod) != {"present", "evidence"}
+        or not isinstance(dod.get("present"), bool) or dod.get("present") is not True
+        or not isinstance(dod.get("evidence"), list) or not dod["evidence"]
+        or any(not isinstance(item, str) or not item.strip() for item in dod["evidence"])
+    ):
+        return fail(
+            "plan-validate", "missing_dod",
+            'dod must be {"present": true, "evidence": [non-empty strings]}',
+        )
+
+    workers = plan["workers"]
+    if not isinstance(workers, list) or len(workers) != 2:
+        return fail(
+            "plan-validate", "invalid_worker_count",
+            "Phase 11 supports exactly two actor workers, not more or fewer",
+        )
+
+    seen_ids: set[str] = set()
+    per_worker_files: list[tuple[str, set[str]]] = []
+    for worker in workers:
+        if not isinstance(worker, dict) or set(worker) != {"id", "role", "allowed_files"}:
+            return fail("plan-validate", "malformed_worker", "each worker must have exactly id/role/allowed_files")
+        worker_id = worker["id"]
+        if not isinstance(worker_id, str) or not worker_id.strip():
+            return fail("plan-validate", "malformed_worker", "worker id must be a non-empty string")
+        if worker_id in seen_ids:
+            return fail("plan-validate", "duplicate_worker_id", f"duplicate worker id: {worker_id}")
+        seen_ids.add(worker_id)
+        if worker["role"] != "actor":
+            return fail("plan-validate", "unsupported_role", f"unsupported worker role: {worker['role']!r}")
+        allowed = worker["allowed_files"]
+        if not isinstance(allowed, list) or not allowed:
+            return fail("plan-validate", "malformed_worker", f"worker {worker_id} allowed_files must be a non-empty list")
+        try:
+            normalized = {_normalize_repo_path(p) for p in allowed}
+        except InvalidPath as exc:
+            return fail("plan-validate", "malformed_worker", f"worker {worker_id}: {exc}")
+        forbidden_hit = sorted(f for f in normalized if f.startswith(FORBIDDEN_PREFIXES))
+        if forbidden_hit:
+            return fail(
+                "plan-validate", "forbidden_scope_declared",
+                f"worker {worker_id} declares a path this pipeline never allows a worker to change",
+                files=forbidden_hit,
+            )
+        per_worker_files.append((worker_id, normalized))
+
+    (id_a, files_a), (id_b, files_b) = per_worker_files
+    overlap = sorted(files_a & files_b)
+    if overlap:
+        return fail(
+            "plan-validate", "overlapping_scopes",
+            f"worker {id_a!r} and {id_b!r} declare overlapping allowed_files",
+            files=overlap,
+        )
+
+    return ok("plan-validate", workers=[w for w, _ in per_worker_files])
+
+
+def cmd_cross_worker_check(args: argparse.Namespace) -> dict:
+    """Prove two workers' actual changed-file lists (each already proven
+    in-scope by its own verify-diff call) don't intersect each other. A
+    clean per-worker scope check does not by itself prove the two workers
+    didn't independently touch the same file - this does."""
+    files_a = load_json_arg(args.files_a, None)
+    files_b = load_json_arg(args.files_b, None)
+    if not isinstance(files_a, list) or not isinstance(files_b, list):
+        return fail("cross-worker-check", "invalid_input", "--files-a and --files-b must be JSON arrays")
+
+    overlap = sorted(set(files_a) & set(files_b))
+    if overlap:
+        return fail(
+            "cross-worker-check", "overlapping_changed_files",
+            "both workers changed the same file(s)",
+            files=overlap,
+        )
+    return ok("cross-worker-check")
+
+
+def cmd_integrate(args: argparse.Namespace) -> dict:
+    """Create a fresh integration branch/worktree from --base, merge both
+    worker branches into it with plain `git merge`, and fail closed on any
+    conflict. No custom merge engine - if the branches disjoint-scope
+    checks already proved cannot conflict on paths still somehow conflict
+    (e.g. a moved/renamed file), git's own conflict detection is trusted
+    and surfaced, not resolved automatically."""
+    result = run(["git", "-C", args.repo, "worktree", "add", "-b", args.integration_branch, args.worktree_path, args.base])
+    if result.returncode != 0:
+        return fail("integrate", "worktree_add_failed", result.stderr.strip() or result.stdout.strip())
+
+    for branch in (args.branch_a, args.branch_b):
+        merge = run(["git", "-C", args.worktree_path, "merge", "--no-ff", "--no-edit", branch])
+        if merge.returncode != 0:
+            run(["git", "-C", args.worktree_path, "merge", "--abort"])
+            return fail(
+                "integrate", "integration_conflict",
+                merge.stderr.strip() or merge.stdout.strip(),
+                branch=branch,
+            )
+
+    head = run(["git", "-C", args.worktree_path, "rev-parse", "HEAD"])
+    if head.returncode != 0:
+        return fail("integrate", "repo_unreadable", head.stderr.strip())
+
+    return ok(
+        "integrate",
+        integration_branch=args.integration_branch,
+        worktree=args.worktree_path,
+        commit=head.stdout.strip(),
+    )
+
+
 def cmd_gate(args: argparse.Namespace) -> dict:
     files = load_json_arg(args.files, None)
     if not isinstance(files, list) or not files:
@@ -503,6 +669,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--risk", required=True)
     p.add_argument("--verdict", required=True)
     p.set_defaults(func=cmd_correction_prompt)
+
+    p = sub.add_parser("plan-validate")
+    p.add_argument("--plan", required=True)
+    p.set_defaults(func=cmd_plan_validate)
+
+    p = sub.add_parser("cross-worker-check")
+    p.add_argument("--files-a", required=True)
+    p.add_argument("--files-b", required=True)
+    p.set_defaults(func=cmd_cross_worker_check)
+
+    p = sub.add_parser("integrate")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--base", required=True)
+    p.add_argument("--branch-a", required=True)
+    p.add_argument("--branch-b", required=True)
+    p.add_argument("--integration-branch", required=True)
+    p.add_argument("--worktree-path", required=True)
+    p.set_defaults(func=cmd_integrate)
 
     p = sub.add_parser("gate")
     p.add_argument("--repo", required=True)
