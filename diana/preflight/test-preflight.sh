@@ -74,7 +74,8 @@ run_case backend-only \
   "convex-auth-config-present:0:SKIP" \
   "oversized-static-assets:0:SKIP" \
   "dependency-lockfile-present:0:SKIP" \
-  "missing-404-page-evidence:0:SKIP"
+  "missing-404-page-evidence:0:SKIP" \
+  "os-cruft-files-committed:1:PASS"
 
 # CASE B: frontend repository with localhost/staging residue -> FAIL.
 run_case frontend-with-residue \
@@ -186,6 +187,14 @@ echo "PASS oversized-static-asset (real byte-size threshold, no bloated fixture 
 
 run_case small-static-asset \
   "oversized-static-assets:1:PASS"
+
+# Phase 11: os-cruft-files-committed. Always-applicable check that FAILs
+# when an OS-generated cruft file (.DS_Store, Thumbs.db, desktop.ini) is
+# committed anywhere in the repository. The negative case (no cruft files
+# present) is covered above via the existing backend-only fixture rather
+# than a redundant dedicated fixture.
+run_case os-cruft-present \
+  "os-cruft-files-committed:1:FAIL"
 
 echo "--- CASE F (tool-level): nonexistent repo path ---"
 set +e
