@@ -113,6 +113,8 @@ STATIC_ASSET_EXTS = {
 }
 MAX_ASSET_BYTES = 1_000_000
 
+OS_CRUFT_FILENAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
+
 NPM_LOCKFILE_NAMES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml"}
 
 NEXT_APP_NOT_FOUND_PATHS = {
@@ -468,6 +470,13 @@ def check_dependency_lockfile_present(ctx: Ctx) -> tuple[str, list[str]]:
     return "FAIL", ["pyproject.toml declares [tool.poetry] without a committed poetry.lock"]
 
 
+def check_os_cruft_files_committed(ctx: Ctx) -> tuple[str, list[str]]:
+    hits = [rel for rel in ctx.files if Path(rel).name in OS_CRUFT_FILENAMES]
+    if hits:
+        return "FAIL", [f"OS-generated cruft file committed: {rel}" for rel in hits]
+    return "PASS", ["no OS-generated cruft files found"]
+
+
 def check_missing_404_page(ctx: Ctx) -> tuple[str, list[str]]:
     found = (NEXT_APP_NOT_FOUND_PATHS | NEXT_PAGES_404_PATHS | STATIC_404_PATHS) & set(ctx.files)
     if found:
@@ -580,6 +589,16 @@ CATALOG: list[CheckSpec] = [
         auto_fixable=False,
         applicable_when=has_dependency_manifest,
         run=check_dependency_lockfile_present,
+    ),
+    CheckSpec(
+        id="os-cruft-files-committed",
+        category="quality",
+        severity="WARNING",
+        check_type="DETERMINISTIC",
+        evidence_required=True,
+        auto_fixable=False,
+        applicable_when=lambda ctx: True,
+        run=check_os_cruft_files_committed,
     ),
     CheckSpec(
         id="missing-404-page-evidence",

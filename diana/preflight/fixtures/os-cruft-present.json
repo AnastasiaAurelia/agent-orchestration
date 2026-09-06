@@ -1,0 +1,7 @@
+{
+  "files": {
+    "README.md": "# Sample repo\n\nMinimal fixture for os-cruft-files-committed regression coverage.\n",
+    ".DS_Store": "bplist00\n",
+    "src/main.py": "def main():\n    return True\n"
+  }
+}
