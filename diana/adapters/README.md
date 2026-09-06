@@ -67,6 +67,75 @@ and requires its `Core`/`daemon` check to report `PASS`, to distinguish "AO
 installed at the right version but its daemon isn't running"
 (`ao_runtime_unavailable`) from a version mismatch.
 
+## Attended mutation approvals: no supported CLI, so no private API either
+
+AO 0.12.10 exposes no supported CLI command anywhere for resolving a
+pending Claude tool-call permission prompt (empirically confirmed:
+inspected the full `ao --help` command tree — `agent`, `browser`, `dev`,
+`orchestrator`, `pr`, `project`, `review`, `send`, `session`, `spawn`,
+`status`, `stop`, `doctor`, `version`, and every subcommand under each —
+none resolve, approve, or deny a permission request; `ao review`
+submits/triggers *GitHub PR* code reviews, unrelated to Claude tool-call
+approvals).
+
+That means there is no supported way to centralize approval-resolution in
+this adapter without reaching into AO's private daemon HTTP API
+(`/api/v1/.../approvals/.../resolve`) or its private SQLite database —
+both explicitly out of bounds (see the top of this file). Adding an
+`approve()`/`resolve_approval()` method here would not remove that private
+dependency, only relocate it.
+
+What `status` (this adapter, wrapping the public `ao session get --json`)
+already exposes is enough to *detect* that a session needs attention,
+without resolving anything privately: the returned `session.status` (e.g.
+`"needs_input"`) and `session.activity.state` (e.g. `"waiting_input"`)
+change from a session's normal `"idle"`/working states the moment AO is
+waiting on it for anything — including, but not limited to, a pending
+mutation approval. Production workflows (`/diana-ship`,
+`diana/commands/diana-ship.md`) poll exactly this public field to know
+*when* to surface the session to a human; they do not and must not
+attempt to distinguish "waiting for a tool approval" from "waiting for the
+next chat message" via any private signal, since the human looking at
+AO's own UI can already tell the difference at a glance.
+
+**Resolving** the approval itself is therefore the certified attended
+worker profile's actual supported path: a human interacts with AO's own
+desktop UI. Because AO here runs on a private, worker-owned virtual
+display (`:50`, not the operator's own desktop — see
+`diana/memory/known-issues.md`'s "diana-worker has no usable display" entry),
+that means a temporary, loopback-only VNC bridge to that display when
+visual access is actually needed:
+
+```
+Xvfb :50 already running (private, worker-owned, -nolisten tcp)
+        │
+one-time VNC server bound to 127.0.0.1 only, started only when needed
+        │
+human connects a VNC client to 127.0.0.1:<port> (never 0.0.0.0, never a
+public interface; never the operator's own DISPLAY :1)
+        │
+human sees AO's real pending-approval prompt and chooses Allow Once
+        │
+VNC server torn down immediately afterward - not a persistent service
+```
+
+No sudo, no `xhost`, no persistent credential, no `allow_always`. This is
+the same shape of bridge used ad hoc during Phases 4-6; the fix here is
+making it the documented *production* path rather than an unstated
+prerequisite, and removing the private-HTTP shortcut from `/diana-ship`'s
+own instructions.
+
+**Historical note, not a production dependency**: during the attended
+Phase 6-10 experiments, the operator resolved actor/reviewer approvals
+directly via AO's private daemon HTTP endpoint
+(`POST /api/v1/sessions/{id}/conversation/approvals/{requestId}/resolve`,
+body `{"decisionId": "allow"}`) as a stand-in for a human clicking through
+AO's UI, since that operator session already had loopback access to the
+daemon. That was legitimate, truthful evidence for those specific pilot
+runs — it is not deleted or rewritten here — but it must not be read as
+license for *production* `/diana-ship` runs to depend on the same private
+endpoint, and it no longer is (see `diana/commands/diana-ship.md`).
+
 ## Known limitation: `ao session kill` does not fail clearly on an unknown id
 
 Verified directly against the real 0.12.10 daemon: `ao session get
