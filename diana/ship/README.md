@@ -1,4 +1,4 @@
-# Diana ship (Phase 9 single-worker MVP)
+# Diana ship (Phase 9 single-worker MVP + Phase 10 independent reviewer)
 
 `ship.py` is thin, deterministic glue composing existing Diana components
 into one pipeline — it reimplements none of them:
@@ -101,17 +101,88 @@ caller's preamble, an explicit **"NO AUTO MERGE PERFORMED"** line, then the
 `gh pr create`. Returns the PR URL; `merged` is always `false` in the
 result — there is no code path that could make it otherwise.
 
+## Phase 10: independent reviewer subcommands
+
+`ship.py` never judges an implementation against its DoD itself — that is
+inherently a semantic-judgment task only a live, independent Claude Code
+reviewer session can perform (spawned exactly like the actor, through
+`diana/adapters/ao.py spawn`, but never granted a mutation approval — see
+`/diana-ship` step 8 for the exact reviewer prompt and attended-approval
+rules). These three subcommands only validate the *shape* of that
+judgment deterministically and enforce internal consistency, the same
+"detect, don't decide semantics" split every other Diana component
+follows — a reviewer verdict is workflow orchestration state, not a
+`diana-gate.py` decision; the reviewer literally cannot say "merge is
+allowed," only "implementation satisfies independent review."
+
+### `review-verdict --verdict '<reviewer's final JSON>'`
+
+The reviewer result contract is:
+
+```json
+{
+  "decision": "PASS",
+  "summary": "one-sentence verdict",
+  "findings": [{"severity": "...", "description": "...", "evidence": "..."}],
+  "dod_checks": [{"criterion": "...", "result": "PASS", "evidence": "..."}]
+}
+```
+
+Fails closed (`ok: false`, exit `1`) on:
+
+- **no output at all** (`no_verdict_produced`) — a crashed, stalled, or
+  refusing reviewer session must look identical to an explicit failure,
+  never silently treated as a pass;
+- **malformed shape** (`malformed_verdict`) — wrong/missing top-level
+  keys, an invalid `decision`, an empty `findings`/`dod_checks` entry
+  missing a required field, or a **self-contradictory** verdict (`PASS`
+  alongside any `dod_checks` entry marked `FAIL` — a reviewer cannot claim
+  overall success while also reporting a failing criterion, and this
+  script does not trust that combination rather than picking a side);
+- **`decision: "FAIL"`** (`review_failed`) — requires at least one
+  `findings` entry or one failing `dod_checks` entry (a bare "FAIL" with
+  no stated reason is itself treated as malformed, not a valid rejection).
+
+On success, returns the verdict's `summary`/`findings`/`dod_checks`
+verbatim so the calling session can decide whether to continue.
+
+### `reviewer-readonly-check --repo --expected-head`
+
+The read-only guarantee, checked directly rather than taken on the
+reviewer's word: fails closed (`reviewer_mutation_detected`) if the
+reviewer's worktree `HEAD` no longer equals `--expected-head` (it
+committed something) or `git status --porcelain` is non-empty (it left
+uncommitted changes). Either one means the reviewer attempted a mutation
+and the run must be treated as failed, regardless of what its JSON verdict
+said.
+
+### `correction-prompt --goal --dod --risk --verdict '<reviewer's FAIL JSON>'`
+
+Pure string templating — no LLM call, no judgment of its own. Turns a
+`FAIL` verdict into a scoped correction task for a **new** actor spawn
+(`/diana-ship` step 8): restates the goal/DoD/risk, quotes the reviewer's
+summary/findings/`dod_checks` verbatim, and appends fixed instructions
+(fix only the listed issues, no unrelated refactor, stay in scope, commit
+and stop, no merge/deploy). This is the smallest safe return-to-actor
+mechanism Phase 10 needed — not a retry engine. `/diana-ship` bounds this
+to at most one correction cycle; nothing in `ship.py` itself loops.
+
 ## Tests
 
 `test-ship.sh` covers all 10 required Phase 9 cases (plus one bonus: a
-forbidden path rejected even when declared "allowed") using fakes for AO
-(reusing `diana/adapters/fixtures/fake-ao-*` from Phase 7 directly — no
-duplicated fixtures) and `gh` (`fixtures/fake-gh-create-*`), and the real
+forbidden path rejected even when declared "allowed") and all 10 required
+Phase 10 reviewer-orchestration cases, using fakes for AO (reusing
+`diana/adapters/fixtures/fake-ao-*` from Phase 7 directly — no duplicated
+fixtures) and `gh` (`fixtures/fake-gh-create-*`), and the real
 `preflight.py`/`reduce_for_gate.py`/`diana-gate.py`/`browser_applicable.py`
 against small throwaway git repos (those four are already deterministic,
 fast, and independently tested — faking them too would just duplicate
 their own test suites without adding confidence). No live AO daemon or
-real `gh` call is ever required to run this suite.
+real `gh` call is ever required to run this suite — deterministic proof
+that a reviewer *can* be caught crashing/lying/mutating is separate from
+the real, once-only proof (recorded in the Phase 10 PR evidence, not
+repeated here as an automated test) that a genuine live AO reviewer
+session actually catches a genuine planted defect.
 
 ## Known limitations
 
@@ -143,3 +214,15 @@ real `gh` call is ever required to run this suite.
   `ship.py` plus every component it composes, none of which travel with a
   plain per-project command-file copy today; wiring it up is future
   productionization work, not a Phase 9 change.
+- The actor-correction cycle (`/diana-ship` step 8) is bounded to exactly
+  one automatic cycle by convention in the command's instructions, not by
+  any counter or state `ship.py` tracks — there is no correction-loop code
+  to audit because there is no loop, only a single documented step a live
+  session follows once and then stops on a second failure.
+- `diana/adapters/ao.py` has no "send a follow-up message to a running
+  session" capability, and Phase 10 deliberately did not add one (out of
+  scope, and it would create a second, message-continuation way to mutate
+  a session alongside the existing spawn-based one). The correction cycle
+  therefore always spawns a **new** actor session that checks out the
+  original actor's branch itself, rather than continuing the original
+  session's conversation.

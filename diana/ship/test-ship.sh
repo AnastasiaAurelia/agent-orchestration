@@ -255,4 +255,163 @@ if [ "$merge_hits" -ne 0 ]; then
 fi
 echo "PASS case-10-pr-created-no-merge-code-path"
 
+echo "=== Phase 10: independent reviewer orchestration ==="
+
+pass_verdict='{"decision":"PASS","summary":"implementation satisfies the DoD","findings":[],"dod_checks":[{"criterion":"add a subtract helper","result":"PASS","evidence":"app/main.py defines sub()"}]}'
+fail_verdict='{"decision":"FAIL","summary":"implementation does not satisfy the DoD","findings":[{"severity":"BLOCKER","description":"sub() adds instead of subtracting","evidence":"app/main.py: return a + b"}],"dod_checks":[{"criterion":"add a subtract helper","result":"FAIL","evidence":"app/main.py: return a + b"}]}'
+
+echo "--- CASE 1: actor valid + reviewer PASS -> Gate stage permitted ---"
+repo10a="$(mktemp -d)"; make_repo "$repo10a"
+out="$(python3 "$SHIP" review-verdict --verdict "$pass_verdict")"
+assert_field "$out" "ok" "true"
+out="$(python3 "$SHIP" gate --repo "$repo10a" --files '["app/main.py"]' \
+  --dod '{"present":true,"evidence":["add a subtract helper"]}' \
+  --verification '{"present":true,"evidence":["ran app/test_main.sh"]}' \
+  --risk SAFE)"
+assert_field "$out" "ok" "true"
+assert_field "$out" "gate_decision" "\"PASS\""
+rm -rf "$repo10a"
+echo "PASS phase10-case-1-reviewer-pass-permits-gate"
+
+echo "--- CASE 2: reviewer FAIL -> Gate not called, no PR ---"
+set +e
+out="$(python3 "$SHIP" review-verdict --verdict "$fail_verdict")"
+status=$?
+set -e
+[ "$status" -eq 1 ] || { echo "FAIL phase10-case-2: expected exit 1, got $status" >&2; exit 1; }
+assert_field "$out" "ok" "false"
+assert_field "$out" "error" "\"review_failed\""
+echo "PASS phase10-case-2-reviewer-fail-blocks-gate"
+
+echo "--- CASE 3: reviewer malformed output -> fail closed ---"
+set +e
+out="$(python3 "$SHIP" review-verdict --verdict '{"decision":"PASS","summary":"x"}')"
+status=$?
+set -e
+[ "$status" -eq 1 ] || { echo "FAIL phase10-case-3: expected exit 1, got $status" >&2; exit 1; }
+assert_field "$out" "ok" "false"
+assert_field "$out" "error" "\"malformed_verdict\""
+echo "PASS phase10-case-3-malformed-verdict-fails-closed"
+
+echo "--- CASE 4: reviewer process/session failure (no output at all) -> fail closed ---"
+set +e
+out="$(python3 "$SHIP" review-verdict --verdict "")"
+status=$?
+set -e
+[ "$status" -eq 1 ] || { echo "FAIL phase10-case-4: expected exit 1, got $status" >&2; exit 1; }
+assert_field "$out" "ok" "false"
+assert_field "$out" "error" "\"no_verdict_produced\""
+echo "PASS phase10-case-4-reviewer-crash-fails-closed"
+
+echo "--- CASE 5: reviewer attempts/reports mutation -> fail closed ---"
+repo10b="$(mktemp -d)"; make_repo "$repo10b"
+head10b="$(git -C "$repo10b" rev-parse HEAD)"
+echo "reviewer should never write this" > "$repo10b/reviewer-tampered.txt"
+set +e
+out="$(python3 "$SHIP" reviewer-readonly-check --repo "$repo10b" --expected-head "$head10b")"
+status=$?
+set -e
+[ "$status" -eq 1 ] || { echo "FAIL phase10-case-5a: expected exit 1, got $status" >&2; exit 1; }
+assert_field "$out" "ok" "false"
+assert_field "$out" "error" "\"reviewer_mutation_detected\""
+git -C "$repo10b" clean -q -fd
+# Also cover a reviewer that went further and committed.
+echo "committed by reviewer" > "$repo10b/sneaky.txt"
+git -C "$repo10b" add -A && git -C "$repo10b" commit -q -m "reviewer should never do this"
+set +e
+out="$(python3 "$SHIP" reviewer-readonly-check --repo "$repo10b" --expected-head "$head10b")"
+status=$?
+set -e
+[ "$status" -eq 1 ] || { echo "FAIL phase10-case-5b: expected exit 1, got $status" >&2; exit 1; }
+assert_field "$out" "ok" "false"
+assert_field "$out" "error" "\"reviewer_mutation_detected\""
+rm -rf "$repo10b"
+echo "PASS phase10-case-5-reviewer-mutation-detected"
+
+echo "--- CASE 6: reviewer findings surface to the actor correction path ---"
+out="$(python3 "$SHIP" correction-prompt --goal "add a subtract helper" \
+  --dod '{"present":true,"evidence":["add a subtract helper"]}' --risk SAFE \
+  --verdict "$fail_verdict")"
+assert_field "$out" "ok" "true"
+prompt_text="$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['prompt'])" "$out")"
+case "$prompt_text" in
+  *"sub() adds instead of subtracting"*) ;;
+  *) echo "FAIL phase10-case-6: correction prompt did not surface the reviewer's finding" >&2; exit 1 ;;
+esac
+case "$prompt_text" in
+  *"unrelated refactor"*) ;;
+  *) echo "FAIL phase10-case-6: correction prompt missing scope-discipline instruction" >&2; exit 1 ;;
+esac
+echo "PASS phase10-case-6-findings-surfaced-to-correction-prompt"
+
+echo "--- CASE 7: corrected actor output + FRESH reviewer PASS -> continue (same code path as case 1, no special-cased 'round 2' state) ---"
+repo10c="$(mktemp -d)"; make_repo "$repo10c"
+out="$(python3 "$SHIP" review-verdict --verdict "$pass_verdict")"
+assert_field "$out" "ok" "true"
+out="$(python3 "$SHIP" gate --repo "$repo10c" --files '["app/main.py"]' \
+  --dod '{"present":true,"evidence":["add a subtract helper"]}' \
+  --verification '{"present":true,"evidence":["ran app/test_main.sh after correction"]}' \
+  --risk SAFE)"
+assert_field "$out" "ok" "true"
+assert_field "$out" "gate_decision" "\"PASS\""
+rm -rf "$repo10c"
+echo "PASS phase10-case-7-corrected-output-fresh-reviewer-pass"
+
+echo "--- CASE 8: reviewer PASS but Preflight BLOCKER/FAIL -> no PR ---"
+repo10d="$(mktemp -d)"
+echo "STRIPE_SECRET_KEY=whatever" > "$repo10d/.env"
+out="$(python3 "$SHIP" review-verdict --verdict "$pass_verdict")"
+assert_field "$out" "ok" "true"
+set +e
+out="$(python3 "$SHIP" gate --repo "$repo10d" --files '["app.py"]' \
+  --dod '{"present":true,"evidence":["x"]}' \
+  --verification '{"present":true,"evidence":["y"]}' \
+  --risk SAFE)"
+status=$?
+set -e
+[ "$status" -eq 1 ] || { echo "FAIL phase10-case-8: expected exit 1, got $status" >&2; exit 1; }
+assert_field "$out" "ok" "false"
+assert_field "$out" "error" "\"gate_not_pass\""
+rm -rf "$repo10d"
+echo "PASS phase10-case-8-reviewer-pass-preflight-blocker-still-blocks"
+
+echo "--- CASE 9: reviewer PASS but Diana Gate FAIL (non-preflight reason) -> no PR ---"
+repo10e="$(mktemp -d)"; make_repo "$repo10e"
+out="$(python3 "$SHIP" review-verdict --verdict "$pass_verdict")"
+assert_field "$out" "ok" "true"
+set +e
+out="$(python3 "$SHIP" gate --repo "$repo10e" --files '["app/main.py"]' \
+  --dod '{"present":true,"evidence":["x"]}' \
+  --verification '{"present":false,"evidence":[]}' \
+  --risk SAFE)"
+status=$?
+set -e
+[ "$status" -eq 1 ] || { echo "FAIL phase10-case-9: expected exit 1, got $status" >&2; exit 1; }
+assert_field "$out" "ok" "false"
+assert_field "$out" "error" "\"gate_not_pass\""
+rm -rf "$repo10e"
+echo "PASS phase10-case-9-reviewer-pass-gate-fail-still-blocks"
+
+echo "--- CASE 10: reviewer PASS + verification PASS + Gate PASS -> ready/open PR path, STOP before merge ---"
+repo10f="$(mktemp -d)"; make_repo "$repo10f"
+out="$(python3 "$SHIP" review-verdict --verdict "$pass_verdict")"
+assert_field "$out" "ok" "true"
+out="$(python3 "$SHIP" gate --repo "$repo10f" --files '["app/main.py"]' \
+  --dod '{"present":true,"evidence":["add a subtract helper"]}' \
+  --verification '{"present":true,"evidence":["ran app/test_main.sh"]}' \
+  --risk SAFE)"
+assert_field "$out" "ok" "true"
+gate_evidence10f="$(python3 -c "import json,sys; print(json.dumps(json.loads(sys.argv[1])['evidence']))" "$out")"
+argv_file10f="$(mktemp)"
+export FAKE_GH_ARGV_FILE="$argv_file10f"
+out="$(python3 "$SHIP" open-pr --gate-evidence "$gate_evidence10f" \
+  --head-branch worker --title "add subtract helper" --body-preamble "feature: add subtract helper" \
+  --gh-bin "$SHIP_FIXTURES/fake-gh-create-ok")"
+unset FAKE_GH_ARGV_FILE
+assert_field "$out" "ok" "true"
+assert_field "$out" "merged" "false"
+rm -f "$argv_file10f"
+rm -rf "$repo10f"
+echo "PASS phase10-case-10-reviewer-pass-verification-pass-gate-pass-ready-pr"
+
 echo "All Diana ship workflow tests passed."
