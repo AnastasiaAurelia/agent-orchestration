@@ -1,0 +1,6 @@
+{
+  "files": {
+    "package.json": "{\"name\":\"demo-stripe\",\"dependencies\":{\"stripe\":\"^15.0.0\"}}",
+    "src/routes/webhook.ts": "import Stripe from 'stripe';\nconst stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);\nexport function handler(req: any) {\n  const event = stripe.webhooks.constructEvent(req.body, req.headers['stripe-signature'], process.env.STRIPE_WEBHOOK_SECRET!);\n  return event;\n}\n"
+  }
+}

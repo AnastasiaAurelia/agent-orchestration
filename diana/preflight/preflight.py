@@ -97,6 +97,32 @@ LOCALHOST_STAGING_RES = [
 
 STRIPE_DEP_NAMES = {"stripe"}
 
+# Web-delivered images/fonts/video committed directly into the repo (not
+# inside an ignored build/vendor dir - see IGNORED_DIRS) above this size
+# generally have not been optimized for delivery. 1,000,000 bytes (~1 MB) is
+# a deliberately conservative threshold: common web-performance guidance
+# (e.g. web.dev's advice that a compressed hero image typically targets well
+# under a few hundred KB) treats a single raw asset at or above 1 MB as
+# needing compression/optimization before shipping, regardless of format.
+# This is a quality/performance signal, not a security one - see its
+# WARNING severity in CATALOG.
+STATIC_ASSET_EXTS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif",
+    ".mp4", ".mov", ".webm",
+    ".woff", ".woff2", ".ttf", ".otf",
+}
+MAX_ASSET_BYTES = 1_000_000
+
+NPM_LOCKFILE_NAMES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml"}
+
+NEXT_APP_NOT_FOUND_PATHS = {
+    "app/not-found.tsx", "app/not-found.jsx", "app/not-found.ts", "app/not-found.js",
+}
+NEXT_PAGES_404_PATHS = {
+    "pages/404.tsx", "pages/404.jsx", "pages/404.ts", "pages/404.js",
+}
+STATIC_404_PATHS = {"public/404.html", "404.html"}
+
 
 class InvalidInput(ValueError):
     pass
@@ -127,6 +153,15 @@ class Ctx:
 
     def files_with_ext(self, exts: set[str]) -> list[str]:
         return [f for f in self.files if Path(f).suffix in exts]
+
+    def size(self, rel: str) -> Optional[int]:
+        try:
+            return (self.root / rel).stat().st_size
+        except OSError:
+            return None
+
+    def top_level_dirs(self) -> set[str]:
+        return {Path(f).parts[0] for f in self.files if len(Path(f).parts) > 1}
 
     def is_test_path(self, rel: str) -> bool:
         path = Path(rel)
@@ -224,6 +259,47 @@ def stripe_detected(ctx: Ctx) -> bool:
 
 def convex_detected(ctx: Ctx) -> bool:
     return any(Path(f).parts[0] == "convex" for f in ctx.files)
+
+
+def uses_next(ctx: Ctx) -> bool:
+    if ctx.package_json is None:
+        return False
+    deps = {}
+    deps.update(ctx.package_json.get("dependencies") or {})
+    deps.update(ctx.package_json.get("devDependencies") or {})
+    return "next" in deps
+
+
+def is_routed_web_app(ctx: Ctx) -> bool:
+    """A multi-page/routed site, where a custom 404 convention actually
+    applies - narrower than is_frontend so a plain single-file demo or a
+    component library (which has no routing at all) correctly SKIPs. Only
+    two conventions are recognized deliberately, to keep false positives
+    low: a Next.js app with a pages/ or app/ router directory, or a classic
+    public/index.html-rooted static site (CRA/Vite-style), which is the
+    layout convention most static hosts' own 404.html applies to."""
+    if not is_frontend(ctx):
+        return False
+    if uses_next(ctx) and ({"pages", "app"} & ctx.top_level_dirs()):
+        return True
+    return "public/index.html" in ctx.files
+
+
+def has_static_binary_assets(ctx: Ctx) -> bool:
+    return bool(ctx.files_with_ext(STATIC_ASSET_EXTS))
+
+
+def has_dependency_manifest(ctx: Ctx) -> bool:
+    """npm/yarn/pnpm (any package.json, even unparseable - the lockfile
+    question doesn't depend on package.json's content) or genuine Poetry
+    usage (a [tool.poetry] table, not just any pyproject.toml - many
+    non-Poetry Python projects use pyproject.toml only for pytest/build
+    config, like this repository's own backend-only fixture)."""
+    if "package.json" in ctx.files:
+        return True
+    if "pyproject.toml" in ctx.files:
+        return "[tool.poetry]" in (ctx.text("pyproject.toml") or "")
+    return False
 
 
 def has_test_evidence(ctx: Ctx) -> tuple[bool, list[str]]:
@@ -335,37 +411,71 @@ def check_build_test_evidence(ctx: Ctx) -> tuple[str, list[str]]:
     return ("PASS" if ok else "FAIL"), detail
 
 
-def check_stack_specific_safety(ctx: Ctx) -> tuple[str, list[str]]:
+def check_stripe_webhook_verification(ctx: Ctx) -> tuple[str, list[str]]:
     findings: list[str] = []
     failed = False
-    if stripe_detected(ctx):
-        webhook_files = [
-            f for f in ctx.files_with_ext(FRONTEND_SOURCE_EXTS | {".py"})
-            if "webhook" in Path(f).name.lower()
-        ]
-        for rel in webhook_files:
-            text = ctx.text(rel) or ""
-            if "stripe" not in text.lower():
-                continue
-            verified = "constructevent" in text.lower() or "construct_event" in text.lower()
-            if not verified:
-                failed = True
-                findings.append(f"{rel}: Stripe webhook handler without signature verification")
-        if not webhook_files:
-            findings.append("Stripe detected; no webhook handler found to check")
-    if convex_detected(ctx):
-        has_auth_config = any(
-            Path(f).parts[:1] == ("convex",) and Path(f).stem == "auth.config"
-            for f in ctx.files
-        )
-        if not has_auth_config:
+    webhook_files = [
+        f for f in ctx.files_with_ext(FRONTEND_SOURCE_EXTS | {".py"})
+        if "webhook" in Path(f).name.lower()
+    ]
+    for rel in webhook_files:
+        text = ctx.text(rel) or ""
+        if "stripe" not in text.lower():
+            continue
+        verified = "constructevent" in text.lower() or "construct_event" in text.lower()
+        if not verified:
             failed = True
-            findings.append("Convex functions present without convex/auth.config.*")
+            findings.append(f"{rel}: Stripe webhook handler without signature verification")
         else:
-            findings.append("convex/auth.config.* present")
-    if not findings:
-        findings.append("no stack-specific safety configuration applicable")
+            findings.append(f"{rel}: Stripe webhook handler verifies signature")
+    if not webhook_files:
+        findings.append("Stripe detected; no webhook handler found to check")
     return ("FAIL" if failed else "PASS"), findings
+
+
+def check_convex_auth_config(ctx: Ctx) -> tuple[str, list[str]]:
+    has_auth_config = any(
+        Path(f).parts[:1] == ("convex",) and Path(f).stem == "auth.config"
+        for f in ctx.files
+    )
+    if not has_auth_config:
+        return "FAIL", ["Convex functions present without convex/auth.config.*"]
+    return "PASS", ["convex/auth.config.* present"]
+
+
+def check_oversized_static_assets(ctx: Ctx) -> tuple[str, list[str]]:
+    hits = []
+    for rel in ctx.files_with_ext(STATIC_ASSET_EXTS):
+        n = ctx.size(rel)
+        if n is not None and n > MAX_ASSET_BYTES:
+            hits.append(f"{rel}: {n} bytes exceeds the {MAX_ASSET_BYTES} byte threshold")
+    if hits:
+        return "FAIL", hits
+    return "PASS", [f"no committed static asset exceeds the {MAX_ASSET_BYTES} byte threshold"]
+
+
+def check_dependency_lockfile_present(ctx: Ctx) -> tuple[str, list[str]]:
+    if "package.json" in ctx.files:
+        found = NPM_LOCKFILE_NAMES & set(ctx.files)
+        if found:
+            return "PASS", [f"lockfile present: {sorted(found)[0]}"]
+        return "FAIL", [
+            "package.json present without a committed "
+            "package-lock.json/yarn.lock/pnpm-lock.yaml"
+        ]
+    if "poetry.lock" in ctx.files:
+        return "PASS", ["poetry.lock present"]
+    return "FAIL", ["pyproject.toml declares [tool.poetry] without a committed poetry.lock"]
+
+
+def check_missing_404_page(ctx: Ctx) -> tuple[str, list[str]]:
+    found = (NEXT_APP_NOT_FOUND_PATHS | NEXT_PAGES_404_PATHS | STATIC_404_PATHS) & set(ctx.files)
+    if found:
+        return "PASS", [f"custom 404/not-found page present: {sorted(found)[0]}"]
+    return "FAIL", [
+        "routed web app detected without a recognized custom 404/not-found page "
+        "(app/not-found.*, pages/404.*, or public/404.html|404.html)"
+    ]
 
 
 @dataclass
@@ -432,14 +542,54 @@ CATALOG: list[CheckSpec] = [
         run=check_build_test_evidence,
     ),
     CheckSpec(
-        id="stack-specific-safety-configuration",
+        id="stripe-webhook-signature-verification",
         category="security",
         severity="BLOCKER",
         check_type="DETERMINISTIC",
         evidence_required=True,
         auto_fixable=False,
-        applicable_when=lambda ctx: stripe_detected(ctx) or convex_detected(ctx),
-        run=check_stack_specific_safety,
+        applicable_when=stripe_detected,
+        run=check_stripe_webhook_verification,
+    ),
+    CheckSpec(
+        id="convex-auth-config-present",
+        category="security",
+        severity="BLOCKER",
+        check_type="DETERMINISTIC",
+        evidence_required=True,
+        auto_fixable=False,
+        applicable_when=convex_detected,
+        run=check_convex_auth_config,
+    ),
+    CheckSpec(
+        id="oversized-static-assets",
+        category="quality",
+        severity="WARNING",
+        check_type="DETERMINISTIC",
+        evidence_required=True,
+        auto_fixable=False,
+        applicable_when=has_static_binary_assets,
+        run=check_oversized_static_assets,
+    ),
+    CheckSpec(
+        id="dependency-lockfile-present",
+        category="process",
+        severity="WARNING",
+        check_type="DETERMINISTIC",
+        evidence_required=True,
+        auto_fixable=False,
+        applicable_when=has_dependency_manifest,
+        run=check_dependency_lockfile_present,
+    ),
+    CheckSpec(
+        id="missing-404-page-evidence",
+        category="findability",
+        severity="WARNING",
+        check_type="DETERMINISTIC",
+        evidence_required=True,
+        auto_fixable=False,
+        applicable_when=is_routed_web_app,
+        run=check_missing_404_page,
     ),
 ]
 

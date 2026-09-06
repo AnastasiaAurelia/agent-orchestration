@@ -1,0 +1,5 @@
+{
+  "files": {
+    "pyproject.toml": "[tool.poetry]\nname = \"demo\"\nversion = \"0.1.0\"\n"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "files": {
+    "convex/schema.ts": "export default {};\n",
+    "convex/auth.config.ts": "export default { providers: [] };\n"
+  }
+}

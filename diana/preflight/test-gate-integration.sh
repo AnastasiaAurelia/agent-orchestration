@@ -95,4 +95,24 @@ gate_input="$(build_gate_input "$reduced" SAFE '["app/main.py"]')"
 assert_decision "backend-only-safe-risk" "$gate_input" PASS
 rm -rf "$tmp_backend"
 
+# Integration case 4 (Phase 8): a WARNING-severity preflight FAIL (the
+# frontend-clean fixture has package.json but no committed lockfile, so
+# dependency-lockfile-present applies and FAILs) must NOT block Diana Gate,
+# unlike a BLOCKER FAIL (case 2 above) - proving the gate's existing generic
+# severity handling extends correctly to real WARNING checks now that the
+# catalog has some, with no gate code change required.
+tmp_warning="$(mktemp -d)"
+materialize "$FIXTURES/frontend-clean.json" "$tmp_warning"
+preflight_out="$(python3 "$PREFLIGHT" "$tmp_warning")"
+python3 -c "
+import json, sys
+result = json.loads(sys.argv[1])
+check = next(c for c in result['checks'] if c['id'] == 'dependency-lockfile-present')
+assert check['applicable'] is True and check['severity'] == 'WARNING' and check['result'] == 'FAIL', check
+" "$preflight_out"
+reduced="$(echo "$preflight_out" | python3 "$REDUCE")"
+gate_input="$(build_gate_input "$reduced" SAFE '["src/config.ts"]')"
+assert_decision "warning-fail-does-not-block" "$gate_input" PASS
+rm -rf "$tmp_warning"
+
 echo "All Diana Preflight <-> Diana Gate integration tests passed."
