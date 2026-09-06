@@ -1,19 +1,27 @@
 ---
-description: Ship one small, real, SAFE-risk feature end-to-end through a single certified AO Claude worker plus an independent read-only reviewer — from goal to an open, unmerged PR.
+description: Ship one small, real, SAFE-risk feature end-to-end through one or two certified AO Claude actor workers plus an independent read-only reviewer — from goal to an open, unmerged PR.
 argument-hint: "<feature description>"
 ---
 
-# Diana ship (single-worker MVP + independent reviewer, Phases 9-10)
+# Diana ship (single-worker MVP + independent reviewer + bounded multi-worker, Phases 9-11)
 
 This is a different, larger thing than `/ship` (which only produces a
 handoff report for work already done in the current session). `/diana-ship`
-drives an entire pipeline through one attended AO Claude actor **and** one
-independent, read-only AO Claude reviewer: goal → DoD → risk classification
-→ actor → actor tests → basic diff scope check → independent reviewer →
-reviewer PASS → independent verification → Preflight → Diana Gate → PR.
-**It never merges.** The human stays the final approval floor — both for
-the actor's real mutations (one-time approval each) and for the resulting
-PR. The reviewer never gets write approval at all (see step 8).
+drives an entire pipeline through one or two attended AO Claude actors
+**and** one independent, read-only AO Claude reviewer: goal → DoD → risk
+classification → actor(s) → actor tests → basic diff scope check →
+[integration, if two actors] → independent reviewer → reviewer PASS →
+independent verification → Preflight → Diana Gate → PR. **It never
+merges.** The human stays the final approval floor — both for the
+actors' real mutations (one-time approval each) and for the resulting PR.
+The reviewer never gets write approval at all (see step 8).
+
+Steps 0-5 and 9-12 below are identical whether there is one actor or two.
+Steps 6-8 describe the single-actor path first, then §6a-8a describe the
+Phase 11 two-actor variant — use it only when the task genuinely splits
+into two disjoint responsibilities (e.g. implementation + its test
+coverage); don't force a split that doesn't make engineering sense just to
+exercise two workers.
 
 The glue at each deterministic stage below is `diana/ship/ship.py`
 (`diana/ship/README.md`) — call its subcommands rather than reimplementing
@@ -197,6 +205,88 @@ return to the top of this step with a **fresh, new** reviewer session
 commit. If this second review also fails, stop and report to the human
 rather than attempting a second correction cycle automatically.
 
+## 6a-8a. Two-actor variant (Phase 11) — use instead of 6-8 only when the task splits cleanly
+
+### 6a. Define the multi-worker plan and validate it before spawning anything
+
+Decide the two actors' roles (typically `implementation` + `tests`, but
+name them for what they actually are) and their `allowed_files` — these
+**must** be disjoint; don't force a split the repository structure doesn't
+support. Build the plan and validate it first:
+
+```
+python3 diana/ship/ship.py plan-validate --plan '{
+  "goal": "...", "risk": "SAFE",
+  "dod": {"present": true, "evidence": ["..."]},
+  "workers": [
+    {"id": "...", "role": "actor", "allowed_files": ["..."]},
+    {"id": "...", "role": "actor", "allowed_files": ["..."]}
+  ]
+}'
+```
+
+If this fails (`overlapping_scopes`, `invalid_worker_count`,
+`forbidden_scope_declared`, ...), fix the plan — do not spawn anything
+with an unvalidated plan.
+
+### 7a. Spawn both actors before waiting for either — real concurrency, not sequential
+
+Spawn Worker A, then immediately spawn Worker B (both through
+`diana/adapters/ao.py spawn`, both from the same base commit, both given
+the overall goal/DoD/risk plus only their own role/`allowed_files`/
+prohibited scope) — **before** polling either for completion, so their
+AO session lifetimes genuinely overlap. Record each session's id,
+worktree path, and branch; confirm they differ from each other
+(`diana/adapters/ao.py status` on each). Attend to each one's approvals
+the same way as step 7 (poll for `needs_input`/`waiting_input`, surface
+to the human, Allow Once via AO's UI) — interleave attending to whichever
+needs it, don't let one worker's approval wait block noticing the
+other's. If either worker fails, stalls, or never produces a commit, stop
+— do not integrate with only one side present.
+
+Once both have committed, verify each independently against its own
+declared scope (never trust either worker's own claim):
+
+```
+python3 diana/ship/ship.py verify-diff --repo <repo> --base <start-sha> \
+  --worker-ref <worker-A-branch> --allowed-files '[...worker A's...]'
+python3 diana/ship/ship.py verify-diff --repo <repo> --base <start-sha> \
+  --worker-ref <worker-B-branch> --allowed-files '[...worker B's...]'
+```
+
+Then prove their *actual* changed files don't collide with each other —
+a clean per-worker scope check alone does not prove this:
+
+```
+python3 diana/ship/ship.py cross-worker-check \
+  --files-a '[...from worker A's verify-diff...]' \
+  --files-b '[...from worker B's verify-diff...]'
+```
+
+### 8a. Integrate, then run the same independent reviewer as step 8
+
+```
+python3 diana/ship/ship.py integrate --repo <repo> --base <start-sha> \
+  --branch-a <worker-A-branch> --branch-b <worker-B-branch> \
+  --integration-branch diana/phase-11-integration-<slug> \
+  --worktree-path <fresh path>
+```
+
+On `integration_conflict`, stop and report to the human — do not attempt
+to resolve the conflict yourself; that is exactly the kind of "hidden
+overlap resolution" this pipeline must never do silently. On success,
+spawn the fresh independent reviewer exactly as step 8 describes, pointed
+at the **integrated** commit rather than a single actor's commit — same
+prompt template, same strict read-only rules, same "deny/stop, never
+resolve" rule for any reviewer mutation request, same
+`review-verdict`/`reviewer-readonly-check` validation. The reviewer's DoD
+should describe the *combined* outcome both workers were jointly
+responsible for, not each worker's task in isolation. If the reviewer
+FAILs here, stop and report which worker's scope (or the integration
+itself) is implicated — do not automatically spawn correction workers for
+multi-worker tasks; that is out of scope for this phase (Phase 10 already
+proved one bounded correction cycle for the single-actor case).
+
 ## 9. Independent verification — do not trust the actor's own claim
 
 Run whatever tests are actually relevant to this specific feature yourself
@@ -206,8 +296,8 @@ record the results as the `verification` evidence for the next step.
 ## 10. Preflight, Playwright, and Diana Gate
 
 ```
-python3 diana/ship/ship.py gate --repo <repo-at-actor-ref> \
-  --files '[...from verify-diff...]' \
+python3 diana/ship/ship.py gate --repo <repo-at-actor-ref-or-integration-worktree> \
+  --files '[...from verify-diff, or both workers'"'"' files combined...]' \
   --dod '<DoD from step 3>' --verification '<evidence from step 9>' \
   --risk SAFE [--browser-evidence '["..."]']
 ```
@@ -227,10 +317,11 @@ anything else), stop — do not create a PR, and do not reinterpret
 
 ```
 python3 diana/ship/ship.py open-pr --gate-evidence '<from step 10>' \
-  --head-branch <actor-branch> --title "..." --body-preamble "..."
+  --head-branch <actor-branch-or-integration-branch> --title "..." --body-preamble "..."
 ```
 
-Push the actor branch first if needed (`gh`/`git push`, never AO). Then
+Push the actor (or integration) branch first if needed (`gh`/`git push`,
+never AO). Then
 inspect required CI with `gh pr checks` / `gh pr view` — it must be the
 same required "Diana Gate" check every other Diana PR goes through, and it
 must succeed on its own terms; never bypass or weaken it.

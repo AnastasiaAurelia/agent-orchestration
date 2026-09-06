@@ -1,4 +1,4 @@
-# Diana ship (Phase 9 single-worker MVP + Phase 10 independent reviewer)
+# Diana ship (Phase 9 single-worker MVP + Phase 10 reviewer + Phase 11 multi-worker)
 
 `ship.py` is thin, deterministic glue composing existing Diana components
 into one pipeline — it reimplements none of them:
@@ -32,9 +32,14 @@ live Claude Code session calls at each pipeline stage.
   are supplied as input — exactly like `diana-gate.py` never invents a
   diff's risk tier itself. The calling session (human + Claude judgment)
   produces these; `ship.py` only validates and composes them.
-- **It never merges anything.** There is no merge code path in this file
-  (`test-ship.sh`'s final case greps the source for a literal `"merge"`
-  argv token and fails the suite if one is ever added).
+- **It never merges a PR, and never touches protected main.** `cmd_open_pr`
+  — the only function that ever calls `gh` — has no merge code path
+  (`test-ship.sh` extracts that one function's source and asserts it
+  never references a merge subcommand). Phase 11's `integrate` does call
+  plain `git merge`, but only between two disposable worker branches on a
+  fresh, throwaway integration branch/worktree it creates itself — never
+  `main`, never through `gh`, and never as a substitute for human PR
+  review.
 
 ## Subcommands
 
@@ -167,22 +172,81 @@ and stop, no merge/deploy). This is the smallest safe return-to-actor
 mechanism Phase 10 needed — not a retry engine. `/diana-ship` bounds this
 to at most one correction cycle; nothing in `ship.py` itself loops.
 
+## Phase 11: bounded two-actor-worker execution
+
+Still no scheduler, DAG engine, or worker-fleet abstraction — exactly two
+concurrent "actor" workers (implementation + tests, or an equivalent
+disjoint split) plus the *existing* Phase 10 reviewer flow reused
+unchanged for the post-integration review. See MEMORY.md's Phase 11 entry
+for why the scope is deliberately capped at two workers and one reviewer.
+
+### `plan-validate --plan '<json>'`
+
+Validates a multi-worker plan's shape *before anything is spawned*:
+
+```json
+{
+  "goal": "...",
+  "risk": "SAFE",
+  "dod": {"present": true, "evidence": ["..."]},
+  "workers": [
+    {"id": "implementation", "role": "actor", "allowed_files": ["..."]},
+    {"id": "tests", "role": "actor", "allowed_files": ["..."]}
+  ]
+}
+```
+
+Fails closed on: malformed shape, `risk != "SAFE"` (`risk_not_eligible` —
+this pipeline's certified profile is SAFE-only, exactly like `precheck`),
+missing/invalid `dod`, anything other than exactly two workers
+(`invalid_worker_count` — deliberately not generalized past what's proven
+needed), a duplicate worker id, an unsupported `role` (only `"actor"` is
+recognized), a worker declaring a forbidden-prefix path
+(`forbidden_scope_declared`, reusing the same `FORBIDDEN_PREFIXES` list
+`verify-diff` already enforces), or **overlapping `allowed_files` between
+the two workers** (`overlapping_scopes`) — the core Phase 11 safety
+property this subcommand exists to prove ahead of time.
+
+### `cross-worker-check --files-a '[...]' --files-b '[...]'`
+
+After both workers have committed and each has independently passed its
+own `verify-diff` scope check, this proves the two workers' *actual*
+changed-file lists don't intersect each other
+(`overlapping_changed_files` if they do). A clean per-worker scope check
+does not by itself prove this — a worker can still coincidentally touch a
+file *inside* its own declared scope that the other worker also touched;
+this is a second, independent proof, not a redundant one.
+
+### `integrate --repo --base --branch-a --branch-b --integration-branch --worktree-path`
+
+Creates a fresh git worktree at `--worktree-path` on a new
+`--integration-branch` starting from `--base` (`git worktree add -b`),
+then merges `--branch-a` and `--branch-b` into it with plain
+`git merge --no-ff --no-edit` — no custom merge engine, per MEMORY.md
+§17's "reuse before build." On any conflict, aborts the merge
+(`git merge --abort`) and fails closed as `integration_conflict` with the
+implicated branch and git's own conflict message — conflicts are
+surfaced, never auto-resolved. This never touches `main`; the new branch
+is disposable, freshly created by this call.
+
 ## Tests
 
 `test-ship.sh` covers all 10 required Phase 9 cases (plus one bonus: a
-forbidden path rejected even when declared "allowed") and all 10 required
-Phase 10 reviewer-orchestration cases, using fakes for AO (reusing
-`diana/adapters/fixtures/fake-ao-*` from Phase 7 directly — no duplicated
-fixtures) and `gh` (`fixtures/fake-gh-create-*`), and the real
+forbidden path rejected even when declared "allowed"), all 10 required
+Phase 10 reviewer-orchestration cases, the foundation-repair regression
+guard, and all 13 required Phase 11 multi-worker cases, using fakes for AO
+(reusing `diana/adapters/fixtures/fake-ao-*` from Phase 7 directly — no
+duplicated fixtures) and `gh` (`fixtures/fake-gh-create-*`), and the real
 `preflight.py`/`reduce_for_gate.py`/`diana-gate.py`/`browser_applicable.py`
 against small throwaway git repos (those four are already deterministic,
 fast, and independently tested — faking them too would just duplicate
 their own test suites without adding confidence). No live AO daemon or
 real `gh` call is ever required to run this suite — deterministic proof
-that a reviewer *can* be caught crashing/lying/mutating is separate from
-the real, once-only proof (recorded in the Phase 10 PR evidence, not
-repeated here as an automated test) that a genuine live AO reviewer
-session actually catches a genuine planted defect.
+that a reviewer *can* be caught crashing/lying/mutating, or that two
+workers *can* be caught colliding, is separate from the real, once-only
+proofs (recorded in the Phase 10 and Phase 11 PR evidence, not repeated
+here as automated tests) that genuine live AO sessions actually behave
+this way.
 
 ## Known limitations
 
@@ -226,3 +290,12 @@ session actually catches a genuine planted defect.
   therefore always spawns a **new** actor session that checks out the
   original actor's branch itself, rather than continuing the original
   session's conversation.
+- `plan-validate` hardcodes exactly two workers, both role `"actor"` — by
+  design (MEMORY.md's Phase 11 entry: no more workers/roles without
+  repository evidence one is needed), not a schema limitation to be
+  "generalized" later without such evidence.
+- `integrate` does not attempt to auto-resolve a conflict, retry with a
+  different merge order, or clean up its own worktree/branch on success —
+  the caller is expected to inspect the integrated state and remove the
+  worktree (`git worktree remove`) once done with it, the same way a
+  human is expected to delete a merged feature branch.
