@@ -248,11 +248,24 @@ set -e
 assert_field "$out" "ok" "false"
 assert_field "$out" "error" "\"pr_creation_failed\""
 
-merge_hits="$(grep -cF '"merge"' "$SHIP" || true)"
-if [ "$merge_hits" -ne 0 ]; then
-  echo "FAIL: ship.py contains a quoted \"merge\" argv literal - it must never call a merge subcommand" >&2
-  exit 1
-fi
+# Precise, not blanket: the real invariant is "never call gh pr merge / never
+# merge a PR into protected main." Phase 11's cmd_integrate legitimately uses
+# plain `git merge` between two disposable worker branches on an isolated
+# integration branch - a local, non-protected-branch operation this task
+# itself requires ("use normal Git semantics" for integration). So this
+# checks only the one function that ever touches `gh` (cmd_open_pr), not the
+# whole file.
+python3 -c "
+import re, sys
+src = open(sys.argv[1]).read()
+match = re.search(r'def cmd_open_pr\(.*?\n(?=def |\Z)', src, re.DOTALL)
+assert match, 'cmd_open_pr function not found'
+body = match.group(0)
+assert '\"merge\"' not in body, (
+    'cmd_open_pr (the only gh-facing function) must never reference a '
+    'merge subcommand - it must never merge a PR into protected main'
+)
+" "$SHIP"
 echo "PASS case-10-pr-created-no-merge-code-path"
 
 echo "=== Phase 10: independent reviewer orchestration ==="
@@ -452,5 +465,254 @@ if ! grep -qF "must not be read as" "$REPO_ROOT/diana/adapters/README.md"; then
   exit 1
 fi
 echo "PASS production-surfaces-do-not-require-private-ao-approval-api"
+
+echo "=== Phase 11: bounded multi-worker orchestration ==="
+
+valid_plan='{
+  "goal": "add os-cruft preflight check",
+  "risk": "SAFE",
+  "dod": {"present": true, "evidence": ["add os-cruft-files-committed check"]},
+  "workers": [
+    {"id": "implementation", "role": "actor", "allowed_files": ["diana/preflight/preflight.py"]},
+    {"id": "tests", "role": "actor", "allowed_files": ["diana/preflight/test-preflight.sh", "diana/preflight/fixtures/os-cruft-present.json"]}
+  ]
+}'
+
+echo "--- CASE 1: two valid disjoint worker scopes -> plan PASS ---"
+out="$(python3 "$SHIP" plan-validate --plan "$valid_plan")"
+assert_field "$out" "ok" "true"
+echo "PASS phase11-case-1-valid-plan"
+
+echo "--- CASE 2: overlapping allowed-file scopes -> FAIL before workers ---"
+overlapping_plan='{
+  "goal": "x", "risk": "SAFE",
+  "dod": {"present": true, "evidence": ["x"]},
+  "workers": [
+    {"id": "a", "role": "actor", "allowed_files": ["diana/preflight/preflight.py"]},
+    {"id": "b", "role": "actor", "allowed_files": ["diana/preflight/preflight.py"]}
+  ]
+}'
+set +e
+out="$(python3 "$SHIP" plan-validate --plan "$overlapping_plan")"
+status=$?
+set -e
+[ "$status" -eq 1 ] || { echo "FAIL phase11-case-2: expected exit 1, got $status" >&2; exit 1; }
+assert_field "$out" "ok" "false"
+assert_field "$out" "error" "\"overlapping_scopes\""
+echo "PASS phase11-case-2-overlapping-scopes-fail-before-spawn"
+
+echo "--- CASE 3: Worker A edits outside its scope -> FAIL ---"
+repo11a="$(mktemp -d)"; make_repo "$repo11a"
+base11a="$(git -C "$repo11a" rev-parse HEAD)"
+git -C "$repo11a" switch -q -c worker-a
+echo "unexpected" > "$repo11a/out-of-scope.txt"
+git -C "$repo11a" add -A && git -C "$repo11a" commit -q -m "worker a oops"
+workerA11a="$(git -C "$repo11a" rev-parse HEAD)"
+set +e
+out="$(python3 "$SHIP" verify-diff --repo "$repo11a" --base "$base11a" --worker-ref "$workerA11a" --allowed-files '["app/main.py"]')"
+status=$?
+set -e
+[ "$status" -eq 1 ] || { echo "FAIL phase11-case-3: expected exit 1, got $status" >&2; exit 1; }
+assert_field "$out" "ok" "false"
+assert_field "$out" "error" "\"out_of_scope_diff\""
+rm -rf "$repo11a"
+echo "PASS phase11-case-3-worker-a-out-of-scope"
+
+echo "--- CASE 4: Worker B edits outside its scope -> FAIL ---"
+repo11b="$(mktemp -d)"; make_repo "$repo11b"
+base11b="$(git -C "$repo11b" rev-parse HEAD)"
+git -C "$repo11b" switch -q -c worker-b
+echo "unexpected" > "$repo11b/out-of-scope-b.txt"
+git -C "$repo11b" add -A && git -C "$repo11b" commit -q -m "worker b oops"
+workerB11b="$(git -C "$repo11b" rev-parse HEAD)"
+set +e
+out="$(python3 "$SHIP" verify-diff --repo "$repo11b" --base "$base11b" --worker-ref "$workerB11b" --allowed-files '["app/test_main.sh"]')"
+status=$?
+set -e
+[ "$status" -eq 1 ] || { echo "FAIL phase11-case-4: expected exit 1, got $status" >&2; exit 1; }
+assert_field "$out" "ok" "false"
+assert_field "$out" "error" "\"out_of_scope_diff\""
+rm -rf "$repo11b"
+echo "PASS phase11-case-4-worker-b-out-of-scope"
+
+echo "--- CASE 5: actual changed-file intersection non-empty -> FAIL ---"
+set +e
+out="$(python3 "$SHIP" cross-worker-check --files-a '["diana/preflight/preflight.py","shared.txt"]' --files-b '["shared.txt","diana/preflight/test-preflight.sh"]')"
+status=$?
+set -e
+[ "$status" -eq 1 ] || { echo "FAIL phase11-case-5: expected exit 1, got $status" >&2; exit 1; }
+assert_field "$out" "ok" "false"
+assert_field "$out" "error" "\"overlapping_changed_files\""
+echo "PASS phase11-case-5-changed-file-intersection-nonempty"
+
+echo "--- CASE 6: one worker fails (produces no commit) -> no integration/no PR ---"
+repo11f="$(mktemp -d)"; make_repo "$repo11f"
+base11f="$(git -C "$repo11f" rev-parse HEAD)"
+set +e
+out="$(python3 "$SHIP" verify-diff --repo "$repo11f" --base "$base11f" --worker-ref "$base11f" --allowed-files '["app/main.py"]')"
+status=$?
+set -e
+[ "$status" -eq 1 ] || { echo "FAIL phase11-case-6: expected exit 1, got $status" >&2; exit 1; }
+assert_field "$out" "ok" "false"
+assert_field "$out" "error" "\"empty_diff\""
+rm -rf "$repo11f"
+echo "PASS phase11-case-6-one-worker-fails-no-integration"
+
+echo "--- CASE 7: integration conflict -> FAIL CLOSED ---"
+repo11g="$(mktemp -d)"
+git init -q "$repo11g"
+git -C "$repo11g" config user.email test@test.com; git -C "$repo11g" config user.name test
+echo "base" > "$repo11g/shared.txt"
+git -C "$repo11g" add -A && git -C "$repo11g" commit -q -m base
+base11g="$(git -C "$repo11g" rev-parse HEAD)"
+git -C "$repo11g" switch -q -c worker-a-conflict
+echo "a-version" > "$repo11g/shared.txt"
+git -C "$repo11g" commit -q -am a
+git -C "$repo11g" switch -q -c worker-b-conflict "$base11g"
+echo "b-version" > "$repo11g/shared.txt"
+git -C "$repo11g" commit -q -am b
+integration_wt11g="$(mktemp -u)"
+set +e
+out="$(python3 "$SHIP" integrate --repo "$repo11g" --base "$base11g" \
+  --branch-a worker-a-conflict --branch-b worker-b-conflict \
+  --integration-branch diana/phase11-test-integration-conflict --worktree-path "$integration_wt11g")"
+status=$?
+set -e
+[ "$status" -eq 1 ] || { echo "FAIL phase11-case-7: expected exit 1, got $status" >&2; exit 1; }
+assert_field "$out" "ok" "false"
+assert_field "$out" "error" "\"integration_conflict\""
+git -C "$repo11g" worktree remove "$integration_wt11g" --force 2>/dev/null || true
+rm -rf "$repo11g" "$integration_wt11g"
+echo "PASS phase11-case-7-integration-conflict-fails-closed"
+
+echo "--- CASE 8: A+B integrate cleanly -> combined verification permitted ---"
+repo11h="$(mktemp -d)"; make_repo "$repo11h"
+base11h="$(git -C "$repo11h" rev-parse HEAD)"
+git -C "$repo11h" switch -q -c worker-a-clean
+echo "def sub(a, b): return a - b" >> "$repo11h/app/main.py"
+git -C "$repo11h" commit -q -am "worker a: implementation"
+git -C "$repo11h" switch -q -c worker-b-clean "$base11h"
+echo "echo more tests" >> "$repo11h/app/test_main.sh"
+git -C "$repo11h" commit -q -am "worker b: tests"
+integration_wt11h="$(mktemp -u)"
+out="$(python3 "$SHIP" integrate --repo "$repo11h" --base "$base11h" \
+  --branch-a worker-a-clean --branch-b worker-b-clean \
+  --integration-branch diana/phase11-test-integration-clean --worktree-path "$integration_wt11h")"
+assert_field "$out" "ok" "true"
+integrated_commit11h="$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['commit'])" "$out")"
+grep -q "def sub" "$integration_wt11h/app/main.py"
+grep -q "more tests" "$integration_wt11h/app/test_main.sh"
+git -C "$repo11h" worktree remove "$integration_wt11h" --force 2>/dev/null || true
+rm -rf "$repo11h" "$integration_wt11h"
+echo "PASS phase11-case-8-clean-integration-contains-both-outputs"
+
+echo "--- CASE 9: Reviewer C FAIL -> no Gate/PR ---"
+set +e
+out="$(python3 "$SHIP" review-verdict --verdict '{"decision":"FAIL","summary":"integration does not satisfy the DoD","findings":[{"severity":"BLOCKER","description":"tests do not cover the new check","evidence":"test-preflight.sh unchanged"}],"dod_checks":[{"criterion":"add os-cruft-files-committed check","result":"FAIL","evidence":"no test coverage"}]}')"
+status=$?
+set -e
+[ "$status" -eq 1 ] || { echo "FAIL phase11-case-9: expected exit 1, got $status" >&2; exit 1; }
+assert_field "$out" "ok" "false"
+assert_field "$out" "error" "\"review_failed\""
+echo "PASS phase11-case-9-reviewer-fail-blocks-gate"
+
+echo "--- CASE 10: reviewer mutation detected -> FAIL ---"
+repo11i="$(mktemp -d)"; make_repo "$repo11i"
+head11i="$(git -C "$repo11i" rev-parse HEAD)"
+echo "reviewer c should never write this" > "$repo11i/reviewer-c-tampered.txt"
+set +e
+out="$(python3 "$SHIP" reviewer-readonly-check --repo "$repo11i" --expected-head "$head11i")"
+status=$?
+set -e
+[ "$status" -eq 1 ] || { echo "FAIL phase11-case-10: expected exit 1, got $status" >&2; exit 1; }
+assert_field "$out" "ok" "false"
+assert_field "$out" "error" "\"reviewer_mutation_detected\""
+rm -rf "$repo11i"
+echo "PASS phase11-case-10-reviewer-c-mutation-detected"
+
+echo "--- CASE 11: reviewer PASS but Preflight BLOCKER/FAIL -> no PR ---"
+repo11j="$(mktemp -d)"
+echo "STRIPE_SECRET_KEY=whatever" > "$repo11j/.env"
+set +e
+out="$(python3 "$SHIP" gate --repo "$repo11j" --files '["app.py"]' \
+  --dod '{"present":true,"evidence":["x"]}' \
+  --verification '{"present":true,"evidence":["y"]}' \
+  --risk SAFE)"
+status=$?
+set -e
+[ "$status" -eq 1 ] || { echo "FAIL phase11-case-11: expected exit 1, got $status" >&2; exit 1; }
+assert_field "$out" "ok" "false"
+assert_field "$out" "error" "\"gate_not_pass\""
+rm -rf "$repo11j"
+echo "PASS phase11-case-11-reviewer-pass-preflight-blocker-still-blocks"
+
+echo "--- CASE 12: reviewer PASS but Diana Gate FAIL (non-preflight reason) -> no PR ---"
+repo11k="$(mktemp -d)"; make_repo "$repo11k"
+set +e
+out="$(python3 "$SHIP" gate --repo "$repo11k" --files '["app/main.py"]' \
+  --dod '{"present":true,"evidence":["x"]}' \
+  --verification '{"present":false,"evidence":[]}' \
+  --risk SAFE)"
+status=$?
+set -e
+[ "$status" -eq 1 ] || { echo "FAIL phase11-case-12: expected exit 1, got $status" >&2; exit 1; }
+assert_field "$out" "ok" "false"
+assert_field "$out" "error" "\"gate_not_pass\""
+rm -rf "$repo11k"
+echo "PASS phase11-case-12-reviewer-pass-gate-fail-still-blocks"
+
+echo "--- CASE 13: clean A/B + clean integration + reviewer PASS + verification PASS + Gate PASS -> ready/open PR, STOP before merge ---"
+repo11l="$(mktemp -d)"; make_repo "$repo11l"
+base11l="$(git -C "$repo11l" rev-parse HEAD)"
+git -C "$repo11l" switch -q -c worker-a-final
+echo "def sub(a, b): return a - b" >> "$repo11l/app/main.py"
+git -C "$repo11l" commit -q -am "worker a: implementation"
+workerA11l="$(git -C "$repo11l" rev-parse HEAD)"
+git -C "$repo11l" switch -q -c worker-b-final "$base11l"
+echo "echo more tests" >> "$repo11l/app/test_main.sh"
+git -C "$repo11l" commit -q -am "worker b: tests"
+workerB11l="$(git -C "$repo11l" rev-parse HEAD)"
+
+out="$(python3 "$SHIP" verify-diff --repo "$repo11l" --base "$base11l" --worker-ref "$workerA11l" --allowed-files '["app/main.py"]')"
+assert_field "$out" "ok" "true"
+filesA11l="$(python3 -c "import json,sys; print(json.dumps(json.loads(sys.argv[1])['files']))" "$out")"
+
+out="$(python3 "$SHIP" verify-diff --repo "$repo11l" --base "$base11l" --worker-ref "$workerB11l" --allowed-files '["app/test_main.sh"]')"
+assert_field "$out" "ok" "true"
+filesB11l="$(python3 -c "import json,sys; print(json.dumps(json.loads(sys.argv[1])['files']))" "$out")"
+
+out="$(python3 "$SHIP" cross-worker-check --files-a "$filesA11l" --files-b "$filesB11l")"
+assert_field "$out" "ok" "true"
+
+integration_wt11l="$(mktemp -u)"
+out="$(python3 "$SHIP" integrate --repo "$repo11l" --base "$base11l" \
+  --branch-a worker-a-final --branch-b worker-b-final \
+  --integration-branch diana/phase11-test-integration-final --worktree-path "$integration_wt11l")"
+assert_field "$out" "ok" "true"
+
+out="$(python3 "$SHIP" review-verdict --verdict '{"decision":"PASS","summary":"integration satisfies the DoD","findings":[],"dod_checks":[{"criterion":"add subtract helper with test coverage","result":"PASS","evidence":"both changes present and consistent"}]}')"
+assert_field "$out" "ok" "true"
+
+out="$(python3 "$SHIP" gate --repo "$integration_wt11l" --files "$(python3 -c "import json; print(json.dumps(json.loads('$filesA11l') + json.loads('$filesB11l')))")" \
+  --dod '{"present":true,"evidence":["add subtract helper with test coverage"]}' \
+  --verification '{"present":true,"evidence":["ran integrated app/test_main.sh"]}' \
+  --risk SAFE)"
+assert_field "$out" "ok" "true"
+assert_field "$out" "gate_decision" "\"PASS\""
+gate_evidence11l="$(python3 -c "import json,sys; print(json.dumps(json.loads(sys.argv[1])['evidence']))" "$out")"
+
+argv_file11l="$(mktemp)"
+export FAKE_GH_ARGV_FILE="$argv_file11l"
+out="$(python3 "$SHIP" open-pr --gate-evidence "$gate_evidence11l" \
+  --head-branch diana/phase11-test-integration-final --title "add subtract helper + tests" \
+  --body-preamble "multi-worker feature: add subtract helper with test coverage" \
+  --gh-bin "$SHIP_FIXTURES/fake-gh-create-ok")"
+unset FAKE_GH_ARGV_FILE
+assert_field "$out" "ok" "true"
+assert_field "$out" "merged" "false"
+rm -f "$argv_file11l"
+git -C "$repo11l" worktree remove "$integration_wt11l" --force 2>/dev/null || true
+rm -rf "$repo11l" "$integration_wt11l"
+echo "PASS phase11-case-13-ready-pr-path-stop-before-merge"
 
 echo "All Diana ship workflow tests passed."
