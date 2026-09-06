@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Fake `gh`: pr create always fails, modeling a real failure (e.g. branch
+# not pushed, no permission, network error).
+set -euo pipefail
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  echo "pull request create failed: reference does not exist" >&2
+  exit 1
+fi
+echo "fake-gh-create-fail: unhandled command: $*" >&2
+exit 1
