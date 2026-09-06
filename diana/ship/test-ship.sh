@@ -414,4 +414,43 @@ rm -f "$argv_file10f"
 rm -rf "$repo10f"
 echo "PASS phase10-case-10-reviewer-pass-verification-pass-gate-pass-ready-pr"
 
+echo "=== Foundation repair: production surfaces must not require AO's private approval API ==="
+# Scoped to the actual production workflow instructions/code a session
+# follows to run /diana-ship - NOT this test file itself (whose forbidden-
+# pattern list below would otherwise self-match), NOT
+# diana/adapters/README.md (which legitimately documents, as clearly-
+# labeled history, that a private endpoint was used during past attended
+# experiments), and NOT diana/memory/*.md (canonical project history). A
+# private approval dependency belongs in none of the files below; if one
+# appears, that is exactly the class of drift this guard exists to catch.
+PRODUCTION_SURFACES=(
+  "$REPO_ROOT/diana/commands/diana-ship.md"
+  "$SHIP"
+  "$SHIP_DIR/README.md"
+)
+FORBIDDEN_PATTERNS=(
+  "/api/v1/"
+  "decisionId"
+  "allow_always"
+  "127.0.0.1:3001"
+  "localhost:3001"
+)
+for surface in "${PRODUCTION_SURFACES[@]}"; do
+  for pattern in "${FORBIDDEN_PATTERNS[@]}"; do
+    hits="$(grep -cF "$pattern" "$surface" || true)"
+    if [ "$hits" -ne 0 ]; then
+      echo "FAIL: $surface contains forbidden pattern '$pattern' (production workflow must not depend on AO's private approval API)" >&2
+      exit 1
+    fi
+  done
+done
+# Positive check: the adapter's own README must still carry the
+# repair's disclaimer distinguishing historical evidence from production
+# instruction, rather than silently losing it in a future edit.
+if ! grep -qF "must not be read as" "$REPO_ROOT/diana/adapters/README.md"; then
+  echo "FAIL: diana/adapters/README.md is missing the historical-vs-production approval disclaimer" >&2
+  exit 1
+fi
+echo "PASS production-surfaces-do-not-require-private-ao-approval-api"
+
 echo "All Diana ship workflow tests passed."

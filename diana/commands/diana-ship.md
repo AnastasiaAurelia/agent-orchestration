@@ -82,13 +82,27 @@ unrelated refactor, commit to the actor's own branch, then STOP.
 
 ## 7. Observe and attend to the actor
 
-Poll `diana/adapters/ao.py status --session <id>`. When AO surfaces a
-pending tool-call approval for a real mutation, resolve it **one at a
-time**, **one-time** (`decisionId: "allow"`, never `allow_always`) via
-AO's own approval API — the same attended loop Phase 6 used
-(`diana/adapters/README.md` documents the exact endpoint). Do not
-pre-approve or batch-approve. If the actor fails, stalls, or never
-produces a commit, stop here — do not proceed with nothing to review.
+Poll `diana/adapters/ao.py status --session <id>` (wraps the public `ao
+session get --json`; never AO's private daemon HTTP API or SQLite — see
+`diana/adapters/README.md`'s "Attended mutation approvals" section for why
+no supported CLI exists to resolve one, and what the alternative is). Its
+returned `session.status`/`session.activity.state` (e.g. `"needs_input"` /
+`"waiting_input"`) is the signal that AO is waiting on the session for
+something — which may or may not be a real mutation.
+
+When that happens, **surface it to the human plainly** in this
+conversation — e.g. "AO session `<id>` needs your attention; please open
+it and resolve whatever it's asking for" — and tell them how to look, if
+they don't already have AO's UI open: connect a VNC client to the
+temporary, loopback-only bridge to AO's private worker display (`:50`),
+per `diana/adapters/README.md`. The human looks at AO's own UI, sees the
+actual pending item, and — for a genuine mutation approval — chooses
+**Allow Once**, never "Always Allow" and never pre-approved or batched.
+Then continue polling status until it moves past `needs_input`/
+`waiting_input` again. Do not resolve anything programmatically yourself;
+this step's only job is to detect the need and hand it to a human. If the
+actor fails, stalls, or never produces a commit, stop here — do not
+proceed with nothing to review.
 
 Then do the same basic scope check Phase 9 always did, before spending a
 reviewer session on anything:
@@ -134,11 +148,17 @@ yourself, no production mutation, no external publication. If you believe
 a fix is needed, describe it as a finding - do not apply it.
 ```
 
-This session must never be granted a mutation approval. If AO ever
-surfaces a pending tool-call approval during this session (a file edit, a
-write-shaped shell command), that is itself a reviewer-safety defect:
-**deny it**, stop the reviewer session, and treat the run as failed —
-never approve a reviewer write, even a "helpful" one.
+This session must never be granted a mutation approval — not even through
+a human clicking Allow Once. Poll its status the same way as step 7. If it
+ever shows `needs_input`/`waiting_input` at all, that alone is a
+reviewer-safety defect regardless of what the pending item turns out to
+be: **immediately stop the reviewer session**
+(`diana/adapters/ao.py stop --session <id>`) without resolving anything
+first, through AO's UI or otherwise, and treat the run as failed. A
+genuinely read-only reviewer prompt should never produce this in the first
+place; do not investigate what it wanted, do not grant it "just this
+once," and do not open a VNC bridge to look — stopping the session is the
+whole response.
 
 After the reviewer stops, validate its verdict deterministically and
 independently confirm it wrote nothing:
