@@ -1,17 +1,19 @@
 ---
-description: Ship one small, real, SAFE-risk feature end-to-end through a single certified AO Claude worker — from goal to an open, unmerged PR.
+description: Ship one small, real, SAFE-risk feature end-to-end through a single certified AO Claude worker plus an independent read-only reviewer — from goal to an open, unmerged PR.
 argument-hint: "<feature description>"
 ---
 
-# Diana ship (single-worker MVP, Phase 9)
+# Diana ship (single-worker MVP + independent reviewer, Phases 9-10)
 
 This is a different, larger thing than `/ship` (which only produces a
 handoff report for work already done in the current session). `/diana-ship`
-drives an entire pipeline through one attended AO Claude worker: goal → DoD
-→ risk classification → worker → independent verification → Preflight →
-Diana Gate → PR. **It never merges.** The human stays the final approval
-floor — both for the worker's real mutations (one-time approval each) and
-for the resulting PR.
+drives an entire pipeline through one attended AO Claude actor **and** one
+independent, read-only AO Claude reviewer: goal → DoD → risk classification
+→ actor → actor tests → basic diff scope check → independent reviewer →
+reviewer PASS → independent verification → Preflight → Diana Gate → PR.
+**It never merges.** The human stays the final approval floor — both for
+the actor's real mutations (one-time approval each) and for the resulting
+PR. The reviewer never gets write approval at all (see step 8).
 
 The glue at each deterministic stage below is `diana/ship/ship.py`
 (`diana/ship/README.md`) — call its subcommands rather than reimplementing
@@ -69,70 +71,155 @@ python3 diana/ship/ship.py precheck --repo <repo> --risk SAFE \
 If this fails, stop and report exactly why (`repo_dirty`,
 `requires_human_review`, `ao_unavailable`) — do not route around it.
 
-## 6. Spawn exactly one Claude worker
+## 6. Spawn exactly one Claude actor
 
 Through `diana/adapters/ao.py spawn` only (never a raw `ao spawn`
 elsewhere) — harness is always `claude-code`, hardcoded by the adapter
 itself. The prompt must include: the exact feature goal, the DoD, the
 `SAFE` classification, expected file scope, explicitly prohibited scope,
 required tests, and explicit instructions: no merge, no deploy, no
-unrelated refactor, commit to the worker's own branch, then STOP.
+unrelated refactor, commit to the actor's own branch, then STOP.
 
-## 7. Observe and attend to the worker
+## 7. Observe and attend to the actor
 
 Poll `diana/adapters/ao.py status --session <id>`. When AO surfaces a
 pending tool-call approval for a real mutation, resolve it **one at a
 time**, **one-time** (`decisionId: "allow"`, never `allow_always`) via
 AO's own approval API — the same attended loop Phase 6 used
 (`diana/adapters/README.md` documents the exact endpoint). Do not
-pre-approve or batch-approve. If the worker fails, stalls, or never
-produces a commit, stop here — do not proceed to verification with
-nothing to verify.
+pre-approve or batch-approve. If the actor fails, stalls, or never
+produces a commit, stop here — do not proceed with nothing to review.
 
-## 8. Independent verification — do not trust the worker's own claim
+Then do the same basic scope check Phase 9 always did, before spending a
+reviewer session on anything:
 
 ```
 python3 diana/ship/ship.py verify-diff --repo <repo> --base <start-sha> \
-  --worker-ref <worker-branch> --allowed-files '[...]'
+  --worker-ref <actor-branch> --allowed-files '[...]'
 ```
 
-Then run whatever tests are actually relevant to this specific feature
-yourself (this is feature-specific judgment `ship.py` deliberately does not
-hardcode) and record the results as the `verification` evidence for the
-next step.
+## 8. Independent reviewer — separate session, read-only, no shared history
 
-## 9. Preflight, Playwright, and Diana Gate
+Spawn a **second, separate** AO Claude session through
+`diana/adapters/ao.py spawn` (same adapter, same certified profile — never
+a raw `ao spawn`). This must be a genuinely fresh session: do not continue
+the actor's conversation, do not hand it the actor's chat history or
+self-review, and do not tell it "the implementation is correct" or
+otherwise bias it. It receives only:
 
 ```
-python3 diana/ship/ship.py gate --repo <repo-at-worker-ref> \
+ROLE: Independent read-only verifier. You have NO write responsibility.
+ORIGINAL GOAL: <the goal from step 2>
+DEFINITION OF DONE: <the DoD from step 3>
+RISK: SAFE
+BASE SHA: <start-sha>
+ACTOR COMMIT: <actor-branch/commit>
+ALLOWED SCOPE: <the same --allowed-files as step 7>
+PROHIBITED SCOPE: everything else
+
+REVIEW TASK:
+- Inspect the diff between BASE SHA and ACTOR COMMIT independently.
+- Compare it against the Definition of Done, criterion by criterion.
+- Identify correctness gaps, unrelated changes, and whether the actor's
+  own tests actually exercise the DoD (not just re-assert something
+  trivial).
+- Return exactly one JSON object on your final line, matching this shape:
+  {"decision": "PASS" or "FAIL", "summary": "...",
+   "findings": [{"severity": "...", "description": "...", "evidence": "..."}],
+   "dod_checks": [{"criterion": "...", "result": "PASS" or "FAIL", "evidence": "..."}]}
+
+STRICT RULES: do not edit any file, do not run a command that writes
+anything, do not commit, do not push, do not merge, do not fix anything
+yourself, no production mutation, no external publication. If you believe
+a fix is needed, describe it as a finding - do not apply it.
+```
+
+This session must never be granted a mutation approval. If AO ever
+surfaces a pending tool-call approval during this session (a file edit, a
+write-shaped shell command), that is itself a reviewer-safety defect:
+**deny it**, stop the reviewer session, and treat the run as failed —
+never approve a reviewer write, even a "helpful" one.
+
+After the reviewer stops, validate its verdict deterministically and
+independently confirm it wrote nothing:
+
+```
+python3 diana/ship/ship.py review-verdict --verdict '<reviewer's final JSON>'
+python3 diana/ship/ship.py reviewer-readonly-check --repo <reviewer worktree> \
+  --expected-head <actor-commit-sha>
+```
+
+Both must report `ok: true` before continuing. `review-verdict` fails
+closed on a `FAIL` decision, malformed/missing output (crashed or stalled
+reviewer), or a self-contradictory verdict (`PASS` alongside a failing
+`dod_checks` entry). `reviewer-readonly-check` fails closed if the
+reviewer's worktree HEAD moved or has any uncommitted changes at all.
+
+**If the reviewer FAILs** (at most one correction cycle — do not loop):
+
+```
+python3 diana/ship/ship.py correction-prompt --goal "..." --dod '<DoD>' \
+  --risk SAFE --verdict '<reviewer's FAIL JSON>'
+```
+
+Spawn one **new** actor session through `diana/adapters/ao.py spawn` (the
+adapter has no "send a follow-up message" capability, and adding one is
+out of scope for Phase 10 — a fresh spawn keeps actor and reviewer spawns
+uniform). Its prompt is the correction prompt above; its very first
+instructions must tell it to `git checkout <the original actor branch>` in
+its own isolated worktree before making any change (the branch is already
+a ref in the shared repository, reachable from any worktree — the same way
+Phase 6 observed all local branches visible everywhere), so the correction
+lands as a new commit on top of the original actor commit, not a
+disconnected one. Attend to its approvals the same way as step 7, then
+return to the top of this step with a **fresh, new** reviewer session
+(never the same reviewer session or conversation) reviewing the corrected
+commit. If this second review also fails, stop and report to the human
+rather than attempting a second correction cycle automatically.
+
+## 9. Independent verification — do not trust the actor's own claim
+
+Run whatever tests are actually relevant to this specific feature yourself
+(feature-specific judgment `ship.py` deliberately does not hardcode) and
+record the results as the `verification` evidence for the next step.
+
+## 10. Preflight, Playwright, and Diana Gate
+
+```
+python3 diana/ship/ship.py gate --repo <repo-at-actor-ref> \
   --files '[...from verify-diff...]' \
-  --dod '<DoD from step 3>' --verification '<evidence from step 8>' \
+  --dod '<DoD from step 3>' --verification '<evidence from step 9>' \
   --risk SAFE [--browser-evidence '["..."]']
 ```
 
-If the diff is browser-facing, `ship.py` will refuse without
-`--browser-evidence` — actually perform Playwright MCP verification first
-(never the AO Electron browser; see `diana/playwright/README.md`) and pass
-its evidence. If this stage fails for any reason (`gate_not_pass`,
-`browser_verification_missing`, or anything else), stop — do not create a
-PR, and do not reinterpret `REQUIRE_HUMAN` as a pass.
+A reviewer `PASS` is a precondition for reaching this step, not a
+replacement for it — `ship.py gate` still independently runs real
+Preflight and Diana Gate regardless of the reviewer's verdict. If the diff
+is browser-facing, `ship.py` will refuse without `--browser-evidence` —
+actually perform Playwright MCP verification first (never the AO Electron
+browser; see `diana/playwright/README.md`) and pass its evidence. A
+reviewer `PASS` cannot waive missing browser evidence. If this stage fails
+for any reason (`gate_not_pass`, `browser_verification_missing`, or
+anything else), stop — do not create a PR, and do not reinterpret
+`REQUIRE_HUMAN` as a pass.
 
-## 10. Open the PR
+## 11. Open the PR
 
 ```
-python3 diana/ship/ship.py open-pr --gate-evidence '<from step 9>' \
-  --head-branch <worker-branch> --title "..." --body-preamble "..."
+python3 diana/ship/ship.py open-pr --gate-evidence '<from step 10>' \
+  --head-branch <actor-branch> --title "..." --body-preamble "..."
 ```
 
-Push the worker branch first if needed (`gh`/`git push`, never AO). Then
+Push the actor branch first if needed (`gh`/`git push`, never AO). Then
 inspect required CI with `gh pr checks` / `gh pr view` — it must be the
 same required "Diana Gate" check every other Diana PR goes through, and it
 must succeed on its own terms; never bypass or weaken it.
 
-## 11. Report and stop
+## 12. Report and stop
 
-One concise completion report: feature, DoD, risk, worker session/branch/
-commit, verification result, Playwright result (or explicit skip),
+One concise completion report: feature, DoD, risk, actor session/branch/
+commit, reviewer session(s) and verdict(s) (including any correction
+cycle), verification result, Playwright result (or explicit skip),
 Preflight summary, Diana Gate decision, PR URL and CI state, and exactly
 how many times you needed the human (approvals + final review — nothing
 else). Then stop. Merging is the human's decision, made outside this

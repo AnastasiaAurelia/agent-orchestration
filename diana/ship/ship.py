@@ -26,11 +26,27 @@ What this script does NOT do, by design:
 
 Subcommands (each prints one JSON object to stdout, exits 0 ok / 1 not ok):
 
-    precheck    - repo-dirty check, risk/human-only gate, AO compatibility
-    verify-diff - base..worker-ref scope check (in-scope vs forbidden paths)
-    gate        - browser applicability + preflight + Diana Gate decision
-    open-pr     - gh pr create with a build-gate-input.py-compatible
-                  DIANA:EVIDENCE block, only once the gate stage says PASS
+    precheck        - repo-dirty check, risk/human-only gate, AO compatibility
+    verify-diff     - base..worker-ref scope check (in-scope vs forbidden paths)
+    review-verdict  - validate an independent reviewer's JSON verdict and
+                       decide whether the pipeline may proceed past it
+    reviewer-readonly-check - prove a reviewer session made zero changes
+    correction-prompt - format a reviewer FAIL verdict into an actor
+                       correction task (Phase 10; no LLM call, pure string
+                       templating)
+    gate            - browser applicability + preflight + Diana Gate decision
+    open-pr         - gh pr create with a build-gate-input.py-compatible
+                      DIANA:EVIDENCE block, only once the gate stage says PASS
+
+Phase 10 (independent reviewer) note: `ship.py` never judges an
+implementation against its DoD itself - that is inherently the kind of
+semantic judgment only a live, independent Claude Code reviewer session can
+make (spawned via diana/adapters/ao.py spawn, exactly like the actor, but
+never approved for any mutation). `review-verdict` only validates the
+*shape* of that judgment deterministically and enforces internal
+consistency (e.g. a `PASS` decision cannot coexist with a failing
+`dod_checks` entry) - the same "detect/validate, don't itself decide
+semantics" split every other Diana component already follows.
 """
 
 from __future__ import annotations
@@ -172,6 +188,151 @@ def cmd_verify_diff(args: argparse.Namespace) -> dict:
         )
 
     return ok("verify-diff", files=files)
+
+
+def _validate_finding(item: Any) -> None:
+    if not isinstance(item, dict) or set(item) != {"severity", "description", "evidence"}:
+        raise ValueError("each finding must have exactly severity/description/evidence")
+    for key in ("severity", "description", "evidence"):
+        if not isinstance(item[key], str) or not item[key].strip():
+            raise ValueError(f"finding.{key} must be a non-empty string")
+
+
+def _validate_dod_check(item: Any) -> None:
+    if not isinstance(item, dict) or set(item) != {"criterion", "result", "evidence"}:
+        raise ValueError("each dod_check must have exactly criterion/result/evidence")
+    if not isinstance(item["criterion"], str) or not item["criterion"].strip():
+        raise ValueError("dod_check.criterion must be a non-empty string")
+    if item["result"] not in {"PASS", "FAIL"}:
+        raise ValueError("dod_check.result must be PASS or FAIL")
+    if not isinstance(item["evidence"], str) or not item["evidence"].strip():
+        raise ValueError("dod_check.evidence must be a non-empty string")
+
+
+def cmd_review_verdict(args: argparse.Namespace) -> dict:
+    """Validate an independent reviewer's JSON verdict and fail closed on
+    anything that isn't an internally-consistent PASS. A reviewer session
+    producing no parseable output (crash, timeout, refusal) must look
+    identical here to one that explicitly failed - both block progression.
+    """
+    raw = args.verdict
+    if raw is None or not raw.strip():
+        return fail(
+            "review-verdict", "no_verdict_produced",
+            "reviewer produced no output (missing/empty --verdict; treat a "
+            "crashed or stalled reviewer session the same way)",
+        )
+
+    try:
+        verdict = json.loads(raw)
+        if not isinstance(verdict, dict) or set(verdict) != {
+            "decision", "summary", "findings", "dod_checks",
+        }:
+            raise ValueError(
+                "verdict must be an object with exactly decision/summary/findings/dod_checks"
+            )
+        if verdict["decision"] not in {"PASS", "FAIL"}:
+            raise ValueError("decision must be PASS or FAIL")
+        if not isinstance(verdict["summary"], str) or not verdict["summary"].strip():
+            raise ValueError("summary must be a non-empty string")
+        if not isinstance(verdict["findings"], list):
+            raise ValueError("findings must be a list")
+        for item in verdict["findings"]:
+            _validate_finding(item)
+        if not isinstance(verdict["dod_checks"], list) or not verdict["dod_checks"]:
+            raise ValueError("dod_checks must be a non-empty list")
+        for item in verdict["dod_checks"]:
+            _validate_dod_check(item)
+    except (json.JSONDecodeError, ValueError) as exc:
+        return fail("review-verdict", "malformed_verdict", str(exc))
+
+    dod_fails = [c for c in verdict["dod_checks"] if c["result"] == "FAIL"]
+    if verdict["decision"] == "PASS" and dod_fails:
+        return fail(
+            "review-verdict", "malformed_verdict",
+            "decision is PASS but at least one dod_check is FAIL - "
+            "self-contradictory reviewer output is treated as malformed, not trusted",
+        )
+    if verdict["decision"] == "FAIL":
+        if not verdict["findings"] and not dod_fails:
+            return fail(
+                "review-verdict", "malformed_verdict",
+                "decision is FAIL but no findings and no failing dod_checks were given",
+            )
+        return fail(
+            "review-verdict", "review_failed", verdict["summary"],
+            findings=verdict["findings"], dod_checks=verdict["dod_checks"],
+        )
+
+    return ok(
+        "review-verdict",
+        summary=verdict["summary"], findings=verdict["findings"], dod_checks=verdict["dod_checks"],
+    )
+
+
+def cmd_reviewer_readonly_check(args: argparse.Namespace) -> dict:
+    """Prove a reviewer session touched nothing: its worktree's HEAD must
+    still equal the commit it was handed, and its working tree must be
+    clean. This is the read-only guarantee, checked directly rather than
+    taken on the reviewer's word."""
+    repo = args.repo
+    head = run(["git", "-C", repo, "rev-parse", "HEAD"])
+    if head.returncode != 0:
+        return fail("reviewer-readonly-check", "repo_unreadable", head.stderr.strip())
+    actual_head = head.stdout.strip()
+    if actual_head != args.expected_head:
+        return fail(
+            "reviewer-readonly-check", "reviewer_mutation_detected",
+            f"reviewer worktree HEAD is {actual_head}, expected unchanged {args.expected_head}",
+        )
+
+    status = run(["git", "-C", repo, "status", "--porcelain"])
+    if status.returncode != 0:
+        return fail("reviewer-readonly-check", "repo_unreadable", status.stderr.strip())
+    if status.stdout.strip():
+        return fail(
+            "reviewer-readonly-check", "reviewer_mutation_detected",
+            "reviewer worktree has uncommitted changes",
+            dirty=status.stdout.strip().splitlines(),
+        )
+
+    return ok("reviewer-readonly-check")
+
+
+def cmd_correction_prompt(args: argparse.Namespace) -> dict:
+    """Format a FAIL reviewer verdict into an actor correction task. Pure
+    string templating - no LLM call, no judgment of its own. This is the
+    smallest safe return-to-actor mechanism: one explicitly-scoped
+    correction task, not an automatic actor<->reviewer loop."""
+    try:
+        verdict = json.loads(args.verdict)
+    except json.JSONDecodeError as exc:
+        return fail("correction-prompt", "malformed_verdict", str(exc))
+
+    findings_text = "\n".join(
+        f"- [{f['severity']}] {f['description']} (evidence: {f['evidence']})"
+        for f in verdict.get("findings", [])
+    ) or "(none listed)"
+    dod_text = "\n".join(
+        f"- {c['criterion']}: {c['result']} (evidence: {c['evidence']})"
+        for c in verdict.get("dod_checks", [])
+    ) or "(none listed)"
+
+    prompt = (
+        "DIANA ACTOR CORRECTION TASK.\n\n"
+        f"ORIGINAL GOAL: {args.goal}\n\n"
+        f"DEFINITION OF DONE: {args.dod}\n\n"
+        f"RISK: {args.risk}\n\n"
+        "An independent reviewer found your previous submission does NOT "
+        "satisfy the Definition of Done.\n\n"
+        f"REVIEWER SUMMARY: {verdict.get('summary', '')}\n\n"
+        f"REVIEWER FINDINGS:\n{findings_text}\n\n"
+        f"DOD CHECK RESULTS:\n{dod_text}\n\n"
+        "Fix ONLY the issues above. Do not perform any unrelated refactor. "
+        "Stay within the previously declared scope. Commit the correction on "
+        "the same worker branch, then STOP. Do not merge, push to main, or deploy."
+    )
+    return ok("correction-prompt", prompt=prompt)
 
 
 def cmd_gate(args: argparse.Namespace) -> dict:
@@ -326,6 +487,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--worker-ref", required=True)
     p.add_argument("--allowed-files", required=True)
     p.set_defaults(func=cmd_verify_diff)
+
+    p = sub.add_parser("review-verdict")
+    p.add_argument("--verdict")
+    p.set_defaults(func=cmd_review_verdict)
+
+    p = sub.add_parser("reviewer-readonly-check")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--expected-head", required=True)
+    p.set_defaults(func=cmd_reviewer_readonly_check)
+
+    p = sub.add_parser("correction-prompt")
+    p.add_argument("--goal", required=True)
+    p.add_argument("--dod", required=True)
+    p.add_argument("--risk", required=True)
+    p.add_argument("--verdict", required=True)
+    p.set_defaults(func=cmd_correction_prompt)
 
     p = sub.add_parser("gate")
     p.add_argument("--repo", required=True)
