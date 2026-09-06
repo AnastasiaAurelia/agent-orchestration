@@ -1,0 +1,6 @@
+{
+  "files": {
+    "package.json": "{\"name\":\"demo-lockfile\",\"dependencies\":{\"react\":\"^18.0.0\"}}",
+    "package-lock.json": "{\"name\":\"demo-lockfile\",\"lockfileVersion\":3}\n"
+  }
+}
