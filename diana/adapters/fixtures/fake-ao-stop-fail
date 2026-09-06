@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Fake `ao`: session kill always fails. Unlike spawn/status, the real AO
+# 0.12.10 CLI does NOT fail clearly for an unknown session id passed to
+# `session kill` (it prints "session <id> killed (workspace preserved)"
+# and exits 0 regardless) - see diana/adapters/README.md's known
+# limitation. This fixture instead models a genuine daemon-level failure
+# (e.g. daemon unreachable), which is the failure mode the adapter can
+# actually detect and must propagate correctly.
+set -euo pipefail
+case "$1" in
+  session)
+    if [ "$2" = "kill" ]; then
+      echo "dial tcp 127.0.0.1:3001: connect: connection refused" >&2
+      exit 1
+    fi
+    echo "fake-ao-stop-fail: unhandled session subcommand: $*" >&2
+    exit 1
+    ;;
+  *)
+    echo "fake-ao-stop-fail: unhandled command: $*" >&2
+    exit 1
+    ;;
+esac

@@ -49,6 +49,14 @@
 !diana/gate/*.sh
 !diana/gate/fixtures/
 !diana/gate/fixtures/*.json
+
+!diana/adapters/
+!diana/adapters/*.py
+!diana/adapters/*.md
+!diana/adapters/*.sh
+!diana/adapters/fixtures/
+!diana/adapters/fixtures/*.json
+!diana/adapters/fixtures/fake-ao-*
 !diana/ci/
 !diana/ci/*.py
 !diana/ci/*.sh

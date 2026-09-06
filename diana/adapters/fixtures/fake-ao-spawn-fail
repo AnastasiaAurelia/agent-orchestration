@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Fake `ao`: spawn always fails, as AO's real CLI does for an unknown
+# project (verified against the real 0.12.10 daemon: `Unknown project
+# (PROJECT_NOT_FOUND)`, exit 1).
+set -euo pipefail
+case "$1" in
+  spawn)
+    echo "Unknown project (PROJECT_NOT_FOUND) [request fake/000000]" >&2
+    exit 1
+    ;;
+  *)
+    echo "fake-ao-spawn-fail: unhandled command: $*" >&2
+    exit 1
+    ;;
+esac

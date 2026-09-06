@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Fake `ao`: models the real, currently-installed AO build, whose `ao
+# version` prints the placeholder "dev" string. Pair with
+# fixtures/app-state-compatible.json via --ao-home to exercise the
+# app-state.json fallback path in ao.py's detect_version().
+set -euo pipefail
+case "$1" in
+  version)
+    echo "dev"
+    ;;
+  doctor)
+    echo '{"ok":true,"checks":[{"level":"PASS","section":"Core","name":"daemon","message":"ready"}]}'
+    ;;
+  *)
+    echo "fake-ao-dev-fallback: unhandled command: $*" >&2
+    exit 1
+    ;;
+esac
