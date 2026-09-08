@@ -50,16 +50,34 @@ mechanically difficult to submit:
   Reviewer pattern already established) must uphold. This module only
   refuses to accept an artifact that doesn't even *claim* those
   properties.
-- **"Looks fine" is not evidence.** A self-declared `PASS` or `FAIL`
-  must be substantiated: non-trivial reasoning text, at least one cited
-  file that was actually declared as inspected, and reasoning that isn't
-  composed solely of generic reassurance phrases (`VAGUE_PHRASES`).
-  `UNPROVEN`/`NOT_APPLICABLE`/`ERROR` carry no such bar -- a reviewer
-  saying "I couldn't establish this" needs less proof than one claiming
-  to have established something.
-- **No fabricated citations.** Every `evidence_references[].file` must be
-  a member of `files_inspected` -- a reviewer cannot cite a file it never
-  declared having looked at.
+- **"Looks fine" is not evidence.** A self-declared `PASS`, `FAIL`, or
+  `NOT_APPLICABLE` must be substantiated: non-trivial reasoning text, at
+  least one cited file that was actually declared as inspected, and
+  reasoning that isn't composed solely of generic reassurance phrases
+  (`VAGUE_PHRASES`). `NOT_APPLICABLE` carries the same structural bar as
+  `PASS`/`FAIL` -- see "NOT_APPLICABLE must be proven" below. Only
+  `UNPROVEN`/`ERROR` carry no such bar -- a reviewer saying "I couldn't
+  establish this" legitimately needs less proof than one claiming to have
+  established (or ruled out) something.
+- **Citation self-consistency, not citation authenticity.** Every
+  `evidence_references[].file` must be a member of `files_inspected` --
+  a reviewer cannot cite a file it never declared having looked at. This
+  is a self-consistency check on the artifact's own declarations, **not**
+  independent proof that the cited file exists in the reviewed repository
+  at that commit, or that the reviewer actually opened it. Verifying that
+  independently would require attesting against the real Git object store
+  (out of scope for Phase 4 -- see "Trust boundary" below).
+- **NOT_APPLICABLE must be proven, not assumed.** `NOT_APPLICABLE` means
+  explicit evidence establishes the control's irrelevance to this target
+  -- not "the reviewer chose not to investigate," not "probably not
+  applicable," not evidence unavailable, and not mere uncertainty (all of
+  those are `UNPROVEN`). See "NOT_APPLICABLE must be proven" below.
+- **`PASS` cannot coexist with an unresolved security assumption.** If
+  `unresolved_assumptions` is non-empty, the requirement has not actually
+  been established -- `reviewer_normalizer.py` downgrades such a `PASS`
+  (or `NOT_APPLICABLE`) to `UNPROVEN`. A concrete `FAIL` is never
+  downgraded this way: a positive, cited flaw stays visible as `FAIL`
+  even if unrelated assumptions remain open.
 - **Requirement text is tied to the real catalog contract**, exactly as
   every prior phase does: `requirement` must equal one of the target
   control's actual `catalog.json` `required_evidence` strings.
@@ -75,8 +93,37 @@ mechanically difficult to submit:
 ## AI/LLM controls (SEC-074, SEC-075) keep the same constitution
 
 A `PASS` for either control must not rest on "the model refused" or "the
-prompt tells it not to." See `reviewer_normalizer.py`'s
-`AI_CONSTITUTION_CONTROLS` handling for the explicit structural guard.
+prompt tells it not to." `ai_authorization_context` is an explicitly
+schema-defined, OPTIONAL top-level envelope field (`OPTIONAL_ENVELOPE_
+FIELDS`), structurally validated when present, and -- critically --
+covered by `artifact_binding` like every other allowed field, so it
+cannot be added or edited after the hash was computed. See
+`reviewer_normalizer.py`'s `AI_CONSTITUTION_CONTROLS` handling for the
+requirement that it be present and `enforced_outside_model=true` before a
+SEC-074/SEC-075 `PASS` is accepted.
+
+## Artifact integrity: what `artifact_binding` proves, and what it doesn't
+
+`artifact_binding.sha256` is a SHA-256 over the canonical JSON of *every*
+allowed top-level artifact field except `artifact_binding` itself (see
+`canonical_artifact_hash()`) -- not a fixed, hand-maintained field list.
+Any allowed field, required or optional, present or absent, is covered;
+an unknown top-level field is rejected outright rather than silently
+excluded from the hash. This means:
+
+- **Any post-hashing edit to any bound field is detected**, including
+  `ai_authorization_context`, `reviewer`/`execution` metadata, and
+  `evidence_references` -- not just the fields a fixed allowlist happened
+  to name.
+- **This proves internal artifact integrity only.** It does NOT
+  authenticate *who* produced the artifact (no signature, no PKI, no key
+  material -- deliberately out of scope for Phase 4) and does NOT prove
+  the reviewer session that produced it was genuinely fresh, independent,
+  or read-only (that remains an operational guarantee of whoever spawns
+  the real reviewer session, per "Independence and read-only-ness" in
+  `README.md`). A party that can produce an artifact from scratch can
+  always compute a matching hash for it; the binding's value is detecting
+  *tampering after the fact*, not proving *origin*.
 """
 
 from __future__ import annotations
@@ -123,6 +170,30 @@ VAGUE_PHRASES = {
 
 MIN_REASONING_LENGTH = 80  # characters; a pragmatic, documented minimum bar for a PASS/FAIL claim
 
+# Hedge/uncertainty phrases that disqualify a NOT_APPLICABLE claim
+# specifically. VAGUE_PHRASES (above) targets empty reassurance for
+# PASS/FAIL ("looks fine"); NOT_APPLICABLE has a distinct failure mode --
+# a reviewer that is honestly *uncertain* whether a control applies, which
+# is UNPROVEN, not NOT_APPLICABLE. Matched case-insensitively as
+# substrings against the same combined reasoning text.
+UNCERTAINTY_PHRASES = {
+    "probably not applicable",
+    "probably isn't used",
+    "probably is not used",
+    "probably not used",
+    "might not apply",
+    "may not apply",
+    "not sure if",
+    "not sure this",
+    "not sure whether",
+    "unclear whether",
+    "unclear if",
+    "doesn't seem to be used",
+    "does not seem to be used",
+    "likely not applicable",
+    "likely not used",
+}
+
 REQUIRED_ENVELOPE_FIELDS = {
     "reviewer",
     "execution",
@@ -139,25 +210,39 @@ REQUIRED_ENVELOPE_FIELDS = {
     "result_reasoning",
     "artifact_binding",
 }
-BOUND_FIELDS = (
-    "reviewer",
-    "execution",
-    "target",
-    "verifier_type",
-    "control_id",
-    "requirement",
-    "files_inspected",
-    "architecture_reasoning",
-    "call_chain",
-    "evidence_references",
-    "unresolved_assumptions",
-    "result",
-    "result_reasoning",
-)
+
+# Fields that MAY be present but are not required for every artifact.
+# ai_authorization_context is only meaningful (and only required) for a
+# PASS on an AI_CONSTITUTION_CONTROLS control (reviewer_normalizer.py);
+# for every other control it is irrelevant and may be omitted entirely.
+# It is still structurally validated when present (see below) and, like
+# every other allowed field, covered by artifact_binding.
+OPTIONAL_ENVELOPE_FIELDS = {
+    "ai_authorization_context",
+}
+
+# The complete top-level schema. Any field outside this set is rejected --
+# an artifact cannot smuggle in an extra field that influences a
+# downstream reader while staying outside the explicit schema (it would
+# still be covered by artifact_binding either way, since the hash is
+# computed over "every allowed field", but an *unknown* field is refused
+# entirely rather than silently accepted).
+ALLOWED_ENVELOPE_FIELDS = REQUIRED_ENVELOPE_FIELDS | OPTIONAL_ENVELOPE_FIELDS
 
 
 def canonical_artifact_hash(envelope: dict[str, Any]) -> str:
-    bound = {key: envelope[key] for key in BOUND_FIELDS}
+    """SHA-256 over the canonical JSON of every allowed field except
+    artifact_binding itself -- required fields AND any optional field that
+    happens to be present. Never a fixed, hand-maintained field list: a
+    new optional field only needs to be added to OPTIONAL_ENVELOPE_FIELDS
+    to be automatically covered here, and any field not in
+    ALLOWED_ENVELOPE_FIELDS is rejected before this is ever called (see
+    load_review_envelope's unknown-field check)."""
+    bound = {
+        key: value
+        for key, value in envelope.items()
+        if key != "artifact_binding" and key in ALLOWED_ENVELOPE_FIELDS
+    }
     canonical = json.dumps(bound, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -188,6 +273,13 @@ def load_review_envelope(raw: Any) -> dict[str, Any]:
     missing = REQUIRED_ENVELOPE_FIELDS - set(raw.keys())
     if missing:
         raise ArtifactError(f"artifact missing required field(s): {sorted(missing)}")
+
+    unknown = set(raw.keys()) - ALLOWED_ENVELOPE_FIELDS
+    if unknown:
+        raise ArtifactError(
+            f"artifact has unknown top-level field(s) not in the explicit schema: {sorted(unknown)} -- "
+            f"allowed fields are {sorted(ALLOWED_ENVELOPE_FIELDS)}"
+        )
 
     reviewer = raw["reviewer"]
     if (
@@ -223,6 +315,14 @@ def load_review_envelope(raw: Any) -> dict[str, Any]:
         or not target.get("commit", "").strip()
     ):
         raise ArtifactError("artifact.target must be an object with non-empty string repository and commit")
+
+    if "ai_authorization_context" in raw:
+        ai_context = raw["ai_authorization_context"]
+        if not isinstance(ai_context, dict) or not isinstance(ai_context.get("enforced_outside_model"), bool):
+            raise ArtifactError(
+                "artifact.ai_authorization_context, when present, must be an object with a boolean "
+                "enforced_outside_model field"
+            )
 
     verifier_type = raw["verifier_type"]
     if verifier_type not in ALLOWED_REVIEWER_VERIFIER_TYPES:
@@ -270,7 +370,10 @@ def load_review_envelope(raw: Any) -> dict[str, Any]:
         if ref["file"] not in files_set:
             raise ArtifactError(
                 f"evidence_references cites {ref['file']!r}, which is not in files_inspected -- "
-                f"no fabricated source citations"
+                f"citations must be self-consistent with the artifact's own declared inspection scope "
+                f"(this does not independently prove the file exists in the reviewed repository or was "
+                f"actually opened by the reviewer -- see 'Trust boundary' in reviewer_base.py's module "
+                f"docstring)"
             )
 
     unresolved_assumptions = raw["unresolved_assumptions"]
@@ -285,7 +388,15 @@ def load_review_envelope(raw: Any) -> dict[str, Any]:
     if not isinstance(result_reasoning, str) or not result_reasoning.strip():
         raise ArtifactError("artifact.result_reasoning must be a non-empty string")
 
-    if result in ("PASS", "FAIL"):
+    if result in ("PASS", "FAIL", "NOT_APPLICABLE"):
+        # NOT_APPLICABLE means explicit evidence establishes the control's
+        # irrelevance to this target -- not "didn't investigate," "probably
+        # not applicable," evidence unavailable, or uncertainty (those are
+        # UNPROVEN). It therefore clears the same structural substantiation
+        # bar as PASS/FAIL: non-trivial, non-vague reasoning, at least one
+        # cited evidence reference, and that reasoning must name an
+        # inspected file -- i.e. applicability must be *shown*, tied to the
+        # actual inspected scope, not merely asserted.
         combined = f"{architecture_reasoning} {result_reasoning}"
         if len(combined.strip()) < MIN_REASONING_LENGTH:
             raise ArtifactError(
@@ -303,6 +414,15 @@ def load_review_envelope(raw: Any) -> dict[str, Any]:
             raise ArtifactError(
                 f"a {result} verdict's reasoning must reference at least one of files_inspected by name"
             )
+        if result == "NOT_APPLICABLE":
+            lowered_combined = combined.lower()
+            hedge = next((phrase for phrase in UNCERTAINTY_PHRASES if phrase in lowered_combined), None)
+            if hedge is not None:
+                raise ArtifactError(
+                    f"a NOT_APPLICABLE verdict's reasoning expresses uncertainty ({hedge!r}) rather than "
+                    f"establishing applicability -- hedged/uncertain reasoning is UNPROVEN, not "
+                    f"NOT_APPLICABLE ('probably not applicable' is not proof of inapplicability)"
+                )
 
     artifact_binding = raw["artifact_binding"]
     if not isinstance(artifact_binding, dict) or not isinstance(artifact_binding.get("sha256"), str):

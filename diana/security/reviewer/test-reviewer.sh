@@ -60,6 +60,26 @@ print('MISSING')
 " "$1" "$2"
 }
 
+run_evidence_status() {
+  # run_evidence_status <normalizer-out.json> <control_id>
+  # Prints the semantic contribution's own evidence[0].status ("SATISFIED"
+  # / "VIOLATED"), "EMPTY" if the run carries no evidence (the
+  # UNPROVEN-shaped empty-evidence path), or "NONE" if no run at all was
+  # emitted for that control. Distinct from result_for(): this checks the
+  # normalizer's own single contribution, not the full evidence_model.py
+  # aggregate (which may need a companion run to reach PASS/FAIL).
+  python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+for r in d['runs']:
+    if r['control_id'] == sys.argv[2]:
+        ev = r.get('evidence') or []
+        print(ev[0]['status'] if ev else 'EMPTY')
+        sys.exit(0)
+print('NONE')
+" "$1" "$2"
+}
+
 check_aggregate() {
   # check_aggregate <name> <artifact> <expected> <expected_result> <control_id>
   local name="$1" artifact="$2" expected="$3" expected_result="$4" control_id="$5"
@@ -77,8 +97,24 @@ check_aggregate() {
   fi
 }
 
+check_evidence_status() {
+  # check_evidence_status <name> <artifact> <expected> <control_id> <expected_status>
+  # Checks the normalizer's own emitted evidence status directly (see
+  # run_evidence_status), independent of full multi-run aggregation.
+  local name="$1" artifact="$2" expected="$3" control_id="$4" expected_status="$5"
+  run_normalizer "$artifact" "$expected" "$control_id"
+  local s
+  s="$(run_evidence_status "$TMP_DIR/norm_out.json" "$control_id")"
+  if [ "$s" = "$expected_status" ]; then
+    pass "$name -> evidence status $expected_status"
+  else
+    fail "$name (expected evidence status $expected_status for $control_id, got $s)"
+    cat "$TMP_DIR/norm_out.json" >&2
+  fi
+}
+
 # check_aggregate_with_companion <name> <artifact> <expected> <control_id>
-#   <companion_requirement> <companion_verifier_type>
+#   <companion_requirement> <companion_verifier_type> [expected_result=PASS]
 #
 # Proves "semantic evidence can complement dynamic/static evidence
 # correctly": the reviewer's own contribution alone only ever covers ONE
@@ -86,9 +122,14 @@ check_aggregate() {
 # as Phase 2/3), so reaching full aggregate PASS needs a second,
 # complementary contribution -- exactly the same composition pattern
 # already proven in Phase 2 (Gitleaks+static-analyzer) and Phase 3
-# (dynamic scenario+semantic/static companion).
+# (dynamic scenario+semantic/static companion). An optional 7th argument
+# overrides the expected result away from PASS -- used to prove that a
+# downgraded (UNPROVEN) semantic contribution stays downgraded even when a
+# full companion contribution is added (U4/U5): a complete companion
+# cannot rescue a reviewer artifact that was itself never actually PASS.
 check_aggregate_with_companion() {
   local name="$1" artifact="$2" expected="$3" control_id="$4" companion_req="$5" companion_type="$6"
+  local expected_result="${7:-PASS}"
   run_normalizer "$artifact" "$expected" "$control_id"
   local runs
   runs="$(normalizer_runs "$TMP_DIR/norm_out.json")"
@@ -109,10 +150,10 @@ json.dump(reviewer_runs + [companion], open('$TMP_DIR/combined.json', 'w'))
   python3 "$EVIDENCE_MODEL" "$CATALOG" "$TMP_DIR/combined.json" > "$TMP_DIR/agg.out.json"
   local r
   r="$(result_for "$TMP_DIR/agg.out.json" "$control_id")"
-  if [ "$r" = "PASS" ]; then
-    pass "$name -> PASS (semantic contribution + companion)"
+  if [ "$r" = "$expected_result" ]; then
+    pass "$name -> $expected_result (semantic contribution + companion)"
   else
-    fail "$name (expected PASS for $control_id after adding companion, got $r)"
+    fail "$name (expected $expected_result for $control_id after adding companion, got $r)"
     cat "$TMP_DIR/norm_out.json" >&2
   fi
 }
@@ -153,7 +194,7 @@ SEC074_REQ2="negative test proving a tool call the model attempts outside the ca
 check_aggregate_with_companion "CASE 8b: AI PASS with explicit external-enforcement flag composes" \
   "$FIXTURES/case-08b-ai-external-enforcement-pass.json" "$EXPECTED" SEC-074 "$SEC074_REQ2" DYNAMIC_API
 
-check_aggregate "CASE 9: NOT_APPLICABLE result path" \
+check_aggregate "CASE 9 / N1: well-substantiated explicit NOT_APPLICABLE" \
   "$FIXTURES/case-09-not-applicable.json" "$EXPECTED" NOT_APPLICABLE SEC-001
 
 # ==================================================================
@@ -198,6 +239,82 @@ for control_id in SEC-040 SEC-062 SEC-067 SEC-070 SEC-071; do
     fail "CASE 14 ($control_id): expected empty runs (catalog modes don't permit SEMANTIC_REVIEW/HUMAN), got $runs"
   fi
 done
+
+# ==================================================================
+# Final semantic evidence integrity correction (human review):
+# artifact-field binding (A1-A5), NOT_APPLICABLE substantiation (N1-N5,
+# N1 covered above by CASE 9), and unresolved-assumption downgrade
+# (U1-U5).
+# ==================================================================
+
+# A1: a valid artifact with ai_authorization_context present is correctly
+#     integrity-bound (hash covers this optional field too) and accepted --
+#     evidence status reflects the reviewer's real verdict, not ERROR.
+check_evidence_status "TEST A1: valid SEC-074 PASS artifact w/ ai_authorization_context accepted" \
+  "$FIXTURES/case-08b-ai-external-enforcement-pass.json" "$EXPECTED" SEC-074 SATISFIED
+
+# A2: ai_authorization_context.enforced_outside_model flipped false->true
+#     after the binding was computed, without rebuilding it -- must be
+#     caught as a hash mismatch, never silently accepted.
+check_aggregate "TEST A2: tampered ai_authorization_context (unrebuilt binding) -> ERROR" \
+  "$FIXTURES/case-28-tamper-ai-context.json" "$EXPECTED" ERROR SEC-074
+
+# A3: reviewer/session metadata changed after the binding was computed.
+check_aggregate "TEST A3: tampered reviewer session metadata (unrebuilt binding) -> ERROR" \
+  "$FIXTURES/case-29-tamper-reviewer-metadata.json" "$EXPECTED" ERROR SEC-001
+
+# A4: an unknown top-level field is rejected by the explicit schema check.
+check_aggregate "TEST A4: unknown top-level field -> ERROR" \
+  "$FIXTURES/case-30-unknown-top-level-field.json" "$EXPECTED" ERROR SEC-001
+
+# A5: evidence_references content changed after the binding was computed.
+check_aggregate "TEST A5: tampered evidence_references (unrebuilt binding) -> ERROR" \
+  "$FIXTURES/case-31-tamper-evidence-references.json" "$EXPECTED" ERROR SEC-001
+
+# N2: hedged/uncertain NOT_APPLICABLE reasoning ("probably not applicable",
+#     "doesn't seem to be used") must never become NOT_APPLICABLE.
+check_aggregate "TEST N2: hedged/uncertain NOT_APPLICABLE reasoning -> never NOT_APPLICABLE (ERROR)" \
+  "$FIXTURES/case-20-notapplicable-uncertain-language.json" "$EXPECTED" ERROR SEC-001
+
+# N3: NOT_APPLICABLE with zero evidence_references -- not NOT_APPLICABLE.
+check_aggregate "TEST N3: NOT_APPLICABLE with zero evidence_references -> never NOT_APPLICABLE (ERROR)" \
+  "$FIXTURES/case-21-notapplicable-no-evidence.json" "$EXPECTED" ERROR SEC-001
+
+# N4: otherwise-substantiated NOT_APPLICABLE with an unresolved
+#     applicability assumption -- downgraded to UNPROVEN.
+check_aggregate "TEST N4: NOT_APPLICABLE with unresolved applicability assumption -> UNPROVEN" \
+  "$FIXTURES/case-22-notapplicable-unresolved-assumption.json" "$EXPECTED" UNPROVEN SEC-001
+
+# N5: NOT_APPLICABLE for the wrong target commit -- never attributed as
+#     NOT_APPLICABLE for the caller's expected target.
+check_aggregate "TEST N5: NOT_APPLICABLE with wrong target commit -> UNPROVEN (not attributed)" \
+  "$FIXTURES/case-23-notapplicable-wrong-commit.json" "$EXPECTED" UNPROVEN SEC-001
+
+# U1: PASS with empty unresolved_assumptions stays on the normal PASS
+#     track (evidence status SATISFIED, not downgraded).
+check_evidence_status "TEST U1: PASS + empty unresolved_assumptions -> normal PASS path" \
+  "$FIXTURES/case-01-sec001-pass-substantiated.json" "$EXPECTED" SEC-001 SATISFIED
+
+# U2: PASS + a non-empty unresolved_assumptions -- downgraded to UNPROVEN.
+check_evidence_status "TEST U2: PASS + unresolved assumption -> downgraded (empty evidence)" \
+  "$FIXTURES/case-24-pass-unresolved-assumption.json" "$EXPECTED" SEC-001 EMPTY
+check_aggregate "TEST U2: PASS + unresolved assumption -> UNPROVEN, never PASS" \
+  "$FIXTURES/case-24-pass-unresolved-assumption.json" "$EXPECTED" UNPROVEN SEC-001
+
+# U3: a concrete, cited FAIL with an unresolved assumption elsewhere stays
+#     visible as FAIL -- only PASS/NOT_APPLICABLE are downgraded.
+check_aggregate "TEST U3: concrete FAIL + unresolved assumption -> FAIL remains visible" \
+  "$FIXTURES/case-25-fail-unresolved-assumption.json" "$EXPECTED" FAIL SEC-001
+
+# U4: SEC-043 business-logic PASS with an unresolved workflow assumption --
+#     downgraded to UNPROVEN even with a full companion contribution.
+check_aggregate_with_companion "TEST U4: SEC-043 PASS + unresolved workflow assumption -> UNPROVEN despite companion" \
+  "$FIXTURES/case-26-sec043-pass-unresolved-assumption.json" "$EXPECTED" SEC-043 "$SEC043_REQ2" DYNAMIC_API UNPROVEN
+
+# U5: SEC-061 dependency-trust PASS with an unresolved provenance
+#     assumption -- downgraded to UNPROVEN even with a full companion.
+check_aggregate_with_companion "TEST U5: SEC-061 PASS + unresolved provenance assumption -> UNPROVEN despite companion" \
+  "$FIXTURES/case-27-sec061-pass-unresolved-assumption.json" "$EXPECTED" SEC-061 "$SEC061_REQ1" DEPENDENCY_SCANNER UNPROVEN
 
 echo ""
 echo "diana/security/reviewer/test-reviewer.sh: $pass_count passed, $fail_count failed"

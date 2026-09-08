@@ -1,0 +1,35 @@
+{
+  "reviewer": {
+    "session_id": "reviewer-session-001",
+    "independent_from_implementation": true,
+    "session_type": "fresh_read_only"
+  },
+  "execution": {
+    "completed": true,
+    "mutations_attempted": false
+  },
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "0000000000000000000000000000000000000000"
+  },
+  "verifier_type": "SEMANTIC_REVIEW",
+  "control_id": "SEC-001",
+  "requirement": "server-side object ownership/permission check exists on every read/write route",
+  "files_inspected": [
+    "app/dashboard/views.py"
+  ],
+  "architecture_reasoning": "Reviewed app/dashboard/views.py: the only view module in this deployment serves a shared, org-wide aggregate with no per-object URL parameter and no user-owned record lookup.",
+  "call_chain": "HTTP request -> auth middleware (session) -> OrdersView.get/post -> Order.objects.get(pk=order_id) -> ownership check -> response",
+  "evidence_references": [
+    {
+      "file": "app/dashboard/views.py",
+      "detail": "single route registered, org-wide aggregate query with no id parameter"
+    }
+  ],
+  "unresolved_assumptions": [],
+  "result": "NOT_APPLICABLE",
+  "result_reasoning": "SEC-001 does not apply to this deployment: no per-object resource is addressable by id.",
+  "artifact_binding": {
+    "sha256": "692aba7cac66b864f0db5e0d13925f76fb5829b3b9f4ede2d74efbfeca26df2e"
+  }
+}

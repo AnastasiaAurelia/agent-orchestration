@@ -1,0 +1,30 @@
+{
+  "reviewer": {
+    "session_id": "reviewer-session-001",
+    "independent_from_implementation": true,
+    "session_type": "fresh_read_only"
+  },
+  "execution": {
+    "completed": true,
+    "mutations_attempted": false
+  },
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "4dd125a5790f593a229b468d6875dba3c11b9b07"
+  },
+  "verifier_type": "SEMANTIC_REVIEW",
+  "control_id": "SEC-001",
+  "requirement": "server-side object ownership/permission check exists on every read/write route",
+  "files_inspected": [
+    "app/dashboard/views.py"
+  ],
+  "architecture_reasoning": "Reviewed the full route table in app/dashboard/views.py: every registered view serves a shared, org-wide aggregate with no per-object URL parameter and no user-owned record lookup anywhere in the request path.",
+  "call_chain": "HTTP request -> auth middleware (session) -> OrdersView.get/post -> Order.objects.get(pk=order_id) -> ownership check -> response",
+  "evidence_references": [],
+  "unresolved_assumptions": [],
+  "result": "NOT_APPLICABLE",
+  "result_reasoning": "SEC-001 does not apply: this deployment has no per-object resources addressable by id, so there is no object-level access boundary for an ownership check to apply to.",
+  "artifact_binding": {
+    "sha256": "9a31d9e69f2c496a46b38ae3647991c1ee5b26f34a2d757a7f0a127b8479f5b1"
+  }
+}

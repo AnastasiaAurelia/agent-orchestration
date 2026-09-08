@@ -173,6 +173,16 @@ def ingest(
 
     result = envelope["result"]
 
+    # PASS/NOT_APPLICABLE cannot coexist with an unresolved security
+    # assumption: if the reviewer itself flagged something it could not
+    # resolve, the requirement has not actually been established (or
+    # applicability has not actually been ruled in/out), regardless of how
+    # well-substantiated the rest of the artifact is. FAIL is deliberately
+    # NOT downgraded here -- a concrete, cited flaw must stay visible even
+    # if unrelated assumptions remain open elsewhere in the review.
+    if result in ("PASS", "NOT_APPLICABLE") and envelope["unresolved_assumptions"]:
+        result = "UNPROVEN"
+
     if result == "ERROR":
         return adapter_base.tool_error_runs([control_id], verifier_type, identity, envelope["result_reasoning"])
 

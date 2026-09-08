@@ -16,20 +16,20 @@
   "control_id": "SEC-001",
   "requirement": "server-side object ownership/permission check exists on every read/write route",
   "files_inspected": [
-    "app/orders/views.py"
+    "app/dashboard/views.py"
   ],
-  "architecture_reasoning": "Traced the request/response path in app/orders/views.py: the handler derives the authenticated user from the trusted session (request.user), loads the Order record by primary key from the URL, and compares order.owner_id == request.user.id before returning or mutating the record. No client-supplied field overrides this check.",
+  "architecture_reasoning": "Reviewed app/dashboard/views.py, the only view module in this deployment: it serves a single shared, read-only aggregate dashboard computed from org-wide totals with no per-object URL parameter, no user-owned record lookup, and no object identifier accepted anywhere in the request path. The applicability signal for SEC-001 ('app exposes per-object resources addressable by an id that a user could access cross-account') is absent: there is no per-object resource for an ownership check to apply to.",
   "call_chain": "HTTP request -> auth middleware (session) -> OrdersView.get/post -> Order.objects.get(pk=order_id) -> ownership check -> response",
   "evidence_references": [
     {
-      "file": "app/orders/views.py",
-      "detail": "ownership check at line 42: if order.owner_id != request.user.id: raise PermissionDenied"
+      "file": "app/dashboard/views.py",
+      "detail": "single route registered, org-wide aggregate query with no id parameter and no per-user record lookup"
     }
   ],
   "unresolved_assumptions": [],
   "result": "NOT_APPLICABLE",
-  "result_reasoning": "This deployment exposes no per-object resources at all (a single shared read-only dashboard with no user-owned records), so object-level authorization does not apply.",
+  "result_reasoning": "SEC-001 does not apply to this deployment: no route accepts an object id or loads a user-owned record, so there is no object-level access boundary to enforce or violate.",
   "artifact_binding": {
-    "sha256": "e9632f57537b77d432353499eed51999610af7666164996b13b9cce6d3e0f43b"
+    "sha256": "099f8a34ffdca366972154429039c535505dd5b7bb4c816995f135f884ca4f41"
   }
 }

@@ -62,7 +62,7 @@ afterward if it's honest about what happened.
 
 ## "Looks fine" is not evidence
 
-A self-declared `PASS` or `FAIL` must be substantiated
+A self-declared `PASS`, `FAIL`, or `NOT_APPLICABLE` must be substantiated
 (`reviewer_base.load_review_envelope()`):
 
 - At least `MIN_REASONING_LENGTH` (80) characters of combined
@@ -74,14 +74,73 @@ A self-declared `PASS` or `FAIL` must be substantiated
 - The reasoning text must reference at least one of `files_inspected` by
   its literal path.
 
-`UNPROVEN`/`NOT_APPLICABLE`/`ERROR` carry no such bar -- a reviewer saying
-"I couldn't establish this" legitimately needs less proof than one
-claiming to have established something.
+Only `UNPROVEN`/`ERROR` carry no such bar -- a reviewer saying "I
+couldn't establish this" legitimately needs less proof than one claiming
+to have established (or ruled out) something. `NOT_APPLICABLE` used to
+carry a much weaker bar than `PASS`/`FAIL`; it no longer does (see
+"NOT_APPLICABLE must be proven" below).
 
-## No fabricated citations
+## Citation self-consistency, not citation authenticity
 
 Every `evidence_references[].file` must be a member of `files_inspected`
 -- a reviewer cannot cite a file it never declared having looked at.
+**This is a self-consistency check on the artifact's own declarations,
+not independent proof.** It does not verify that the cited file actually
+exists in the reviewed repository at that commit, and it does not verify
+that the reviewer genuinely opened it -- both remain declarations from
+the artifact's producer. Independently attesting either would require
+checking against the real Git object store, which Phase 4 deliberately
+does not build (see "Trust boundary" below). Earlier documentation for
+this phase overclaimed this as "no fabricated citations"; that language
+has been corrected here and in `reviewer_base.py`'s error messages.
+
+## NOT_APPLICABLE must be proven
+
+`NOT_APPLICABLE` means explicit evidence establishes that the control is
+*irrelevant* to this target -- not:
+
+- "the reviewer chose not to investigate,"
+- "probably not applicable,"
+- evidence was unavailable, or
+- generic uncertainty.
+
+All four of those are `UNPROVEN`, not `NOT_APPLICABLE`. Concretely,
+`NOT_APPLICABLE` requires (`reviewer_base.load_review_envelope()`):
+
+- Target identity verified (the existing `target`/`expected_target`
+  check applies identically regardless of result).
+- The same structural substantiation bar as `PASS`/`FAIL`: substantive,
+  non-vague reasoning; at least one `evidence_references` entry; the
+  reasoning must name an inspected file -- i.e. applicability must be
+  *shown*, tied to the actual inspected scope, not merely asserted.
+- No unresolved applicability assumption: `reviewer_normalizer.py`
+  downgrades a `NOT_APPLICABLE` with a non-empty `unresolved_assumptions`
+  to `UNPROVEN` (see below) -- an open question that could make the
+  control applicable after all means applicability was never actually
+  established.
+
+This module does not programmatically cross-check the reviewer's stated
+reasoning against `catalog.json`'s `applicability.signals` for the
+control -- doing so would require semantically parsing free-text
+reasoning against a signal list, a materially larger and more speculative
+addition than Phase 4's scope. It relies on the structural substantiation
+bar plus the requirement that the reviewer's own prose name which
+applicability signal or feature class is absent or irrelevant, as with
+every other semantic verdict in this phase: substantiation, not
+correctness, is what this module verifies.
+
+## Unresolved assumptions block PASS (and NOT_APPLICABLE)
+
+`result=PASS` (or `NOT_APPLICABLE`) with a non-empty
+`unresolved_assumptions` is inconsistent with what those results are
+supposed to mean: the requirement (or its irrelevance) has not actually
+been established while something material remains unresolved.
+`reviewer_normalizer.ingest()` downgrades such an artifact to `UNPROVEN`
+before it reaches evidence-model aggregation. `FAIL` is deliberately
+**not** downgraded this way: a concrete, cited flaw must stay visible as
+`FAIL` even if unrelated assumptions remain open elsewhere in the
+review -- downgrading a real flaw to `UNPROVEN` merely because some
+other, unrelated assumption exists would hide a genuine problem.
 
 ## Requirement text is tied to the real catalog contract
 
@@ -130,6 +189,43 @@ well-reasoned the rest of the artifact is (`test-reviewer.sh` CASE 8a
 proves this; CASE 8b shows the same control passing once the flag is
 present and substantiated).
 
+`ai_authorization_context` is an explicitly schema-defined, optional
+top-level field (`reviewer_base.OPTIONAL_ENVELOPE_FIELDS`), structurally
+validated (must be an object with a boolean `enforced_outside_model`)
+whenever present, required/relevant only for a `PASS` on
+`AI_CONSTITUTION_CONTROLS`, and irrelevant/optional for every other
+control. Critically, it is covered by `artifact_binding` exactly like
+every other allowed field (see "Artifact integrity" below) -- it cannot
+be flipped from `false` to `true`, or added after the fact, without
+invalidating the hash.
+
+## Artifact integrity: `artifact_binding` covers every allowed field
+
+`artifact_binding.sha256` is computed over the canonical JSON of **every
+allowed top-level field except `artifact_binding` itself** --
+`reviewer_base.canonical_artifact_hash()` builds this set dynamically
+from `ALLOWED_ENVELOPE_FIELDS` rather than a fixed, hand-maintained field
+list, so any current or future optional field (including
+`ai_authorization_context`) is automatically covered without a code
+change to the hash function itself. An unknown top-level field is
+rejected outright (`ArtifactError`), not silently dropped from the hash.
+This closes the gap where a field like `ai_authorization_context` could
+previously be added or tampered with after the artifact was hashed
+without detection: `reviewer.session_type`/`independent_from_implementation`,
+`execution.mutations_attempted`, `evidence_references`, and
+`ai_authorization_context` are all now bound.
+
+**What this proves, and what it doesn't:** `artifact_binding` proves
+internal artifact integrity only -- that the artifact has not been
+edited since the hash was computed. It does **not** authenticate who
+produced the artifact (no signature, no PKI -- deliberately out of scope
+for Phase 4) and does not independently prove the reviewer session was
+genuinely fresh, independent, or read-only. Real reviewer orchestration
+must still enforce those properties operationally (spawn a genuinely
+fresh, read-only session; deny any mutation approval it requests) -- this
+module can only refuse an artifact that doesn't even claim them, or that
+was edited after being bound.
+
 ## Business logic (SEC-043)
 
 The kickoff spec asks the reviewer to explicitly map actors, trusted
@@ -163,13 +259,14 @@ the semantic correctness of the trust-boundary analysis itself.
 
 | Reviewer artifact state | Result |
 |---|---|
-| Substantiated `PASS`, target verified, capability authorized | `SATISFIED` -> contributes toward `PASS` |
-| Substantiated `FAIL`, target verified | `VIOLATED` -> contributes toward `FAIL` |
-| `NOT_APPLICABLE` | `NOT_APPLICABLE` (no penalty) |
+| Substantiated `PASS`, target verified, capability authorized, no unresolved assumptions | `SATISFIED` -> contributes toward `PASS` |
+| Substantiated `FAIL`, target verified | `VIOLATED` -> contributes toward `FAIL` (unaffected by unresolved assumptions) |
+| Substantiated `NOT_APPLICABLE`, target verified, no unresolved assumptions | `NOT_APPLICABLE` (no penalty) |
+| `PASS` or `NOT_APPLICABLE` with a non-empty `unresolved_assumptions` | downgraded to `UNPROVEN` |
 | `UNPROVEN` (reviewer couldn't establish the requirement) | `UNPROVEN` |
 | Target/commit doesn't match the caller's expectation | not attributed -> `UNPROVEN` |
 | `ERROR` (reviewer self-reports it could not complete reliably) | `ERROR` |
-| Malformed artifact, vague/unsubstantiated PASS/FAIL, fabricated citation, unauthorized capability, missing AI-constitution flag on a SEC-074/075 PASS, or `artifact_binding` mismatch | `ERROR` |
+| Malformed artifact, vague/unsubstantiated PASS/FAIL/NOT_APPLICABLE, citation inconsistent with `files_inspected`, unknown top-level field, unauthorized capability, missing AI-constitution flag on a SEC-074/075 PASS, or `artifact_binding` mismatch | `ERROR` |
 | No artifact available | explicit `UNPROVEN`, tagged with the requested control's own permitted capability |
 
 ## What this phase does not do
@@ -186,6 +283,27 @@ the semantic correctness of the trust-boundary analysis itself.
   adapters/`, or `diana/security/dynamic/`.
 - Does not change `diana/security/catalog.json`, `validate_catalog.py`,
   or `evidence_model.py`.
+- Does not independently verify that a cited file exists in the reviewed
+  repository at the reviewed commit, or that the reviewer actually opened
+  it -- only that the citation is self-consistent with the artifact's own
+  `files_inspected` declaration (see "Citation self-consistency" above).
+- Does not sign or cryptographically authenticate artifact provenance --
+  `artifact_binding` proves internal integrity (untampered-since-hashed),
+  not producer identity.
+
+## Forward-looking note for Security Phase 5 (Gate + CI Integration)
+
+The trust boundary documented above -- an artifact proves internal
+consistency but not reviewer identity, and does not independently prove a
+claimed inspected path was actually opened -- must carry into Phase 5's
+design rather than be silently assumed away. Real reviewer orchestration
+(spawning the fresh, read-only session that produces these artifacts, and
+wiring its output into CI) must enforce fresh/read-only access as an
+operational control outside this module; Phase 5 should not treat a
+structurally valid, hash-bound artifact as proof that the underlying
+review process itself was trustworthy, only as proof that the artifact
+it receives hasn't been altered since whatever process produced it
+finished.
 
 ## CLI
 
@@ -199,7 +317,7 @@ runs (Phase 2 adapters, Phase 3 dynamic scenarios) and feed to
 
 ## Tests
 
-`test-reviewer.sh` (20 assertions, offline, synthetic fixtures under
+`test-reviewer.sh` (35 assertions, offline, synthetic fixtures under
 `fixtures/*.json`) proves every required independence property: vague
 reviewer text cannot become `PASS`; missing evidence produces `UNPROVEN`;
 an explicit concrete flaw produces `FAIL`; malformed output produces
@@ -214,3 +332,23 @@ demonstrating that a `SEMANTIC_REVIEW` contribution alone satisfies the
 `human_judgment_required` gate for `SEC-043`/`SEC-061` established back in
 Phase 1, while the control's `dynamic_required` gate still needs its own
 separate dynamic contribution.
+
+The final semantic evidence integrity correction (human review) added:
+
+- **A1-A5**: a valid artifact with `ai_authorization_context` is accepted
+  and correctly bound (A1); tampering `ai_authorization_context`,
+  `reviewer` session metadata, or `evidence_references` after the binding
+  was computed is caught as a hash mismatch (A2, A3, A5); an unknown
+  top-level field is rejected outright (A4).
+- **N1-N5** (N1 = CASE 9): a well-substantiated explicit `NOT_APPLICABLE`
+  is accepted (N1); hedged/uncertain reasoning ("probably not
+  applicable") and zero evidence references are never accepted as
+  `NOT_APPLICABLE` (N2, N3); an otherwise-substantiated `NOT_APPLICABLE`
+  with an unresolved applicability assumption, or for the wrong target
+  commit, downgrades/fails-closed to `UNPROVEN` (N4, N5).
+- **U1-U5**: `PASS` with no unresolved assumptions stays `PASS` (U1); a
+  `PASS` or `NOT_APPLICABLE` with a non-empty `unresolved_assumptions` is
+  downgraded to `UNPROVEN`, including when a full companion contribution
+  would otherwise complete the control's evidence (U2, U4, U5); a
+  concrete, cited `FAIL` remains visible even with an unrelated unresolved
+  assumption present (U3).

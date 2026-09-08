@@ -83,12 +83,17 @@ multi-verifier aggregation" below for the exact rules.
   model or judges anything itself) and computes `evidence_model.py` runs
   for any catalog control whose `verification.modes` actually includes
   `SEMANTIC_REVIEW`/`HUMAN`. Unlike every earlier phase, this normalizer
-  trusts the reviewer's own PASS/FAIL verdict -- but only once it survives
-  strict structural substantiation gates (no vague reasoning, cited
-  files, no fabricated citations) and an explicit constitutional guard for
-  `SEC-074`/`SEC-075` (a PASS can never rest on model refusal alone). See
-  `reviewer/README.md` for the full design and the stated departure from
-  Phase 1-3's "never trust self-reported conclusions" principle.
+  trusts the reviewer's own PASS/FAIL/NOT_APPLICABLE verdict -- but only
+  once it survives strict structural substantiation gates (no vague
+  reasoning, cited files, citations self-consistent with the artifact's
+  own declared inspection scope), an integrity binding covering every
+  allowed artifact field (not a fixed subset), a rule that any unresolved
+  security assumption downgrades a PASS/NOT_APPLICABLE to UNPROVEN, and an
+  explicit constitutional guard for `SEC-074`/`SEC-075` (a PASS can never
+  rest on model refusal alone). See `reviewer/README.md` for the full
+  design, the stated departure from Phase 1-3's "never trust self-reported
+  conclusions" principle, and the explicit trust-boundary documentation
+  (artifact integrity is not producer authenticity).
 
 ## Source-derived vs. Diana-designed fields
 

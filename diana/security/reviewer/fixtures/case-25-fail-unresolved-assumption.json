@@ -13,26 +13,25 @@
     "commit": "4dd125a5790f593a229b468d6875dba3c11b9b07"
   },
   "verifier_type": "SEMANTIC_REVIEW",
-  "control_id": "SEC-074",
-  "requirement": "tool-call authorization is enforced by code outside the model, using the caller's real permissions, not the model's own output",
+  "control_id": "SEC-001",
+  "requirement": "server-side object ownership/permission check exists on every read/write route",
   "files_inspected": [
-    "ai/tool_orchestrator.py"
+    "app/orders/views.py"
   ],
   "architecture_reasoning": "Traced the request/response path in app/orders/views.py: the handler derives the authenticated user from the trusted session (request.user), loads the Order record by primary key from the URL, and compares order.owner_id == request.user.id before returning or mutating the record. No client-supplied field overrides this check.",
   "call_chain": "HTTP request -> auth middleware (session) -> OrdersView.get/post -> Order.objects.get(pk=order_id) -> ownership check -> response",
   "evidence_references": [
     {
-      "file": "ai/tool_orchestrator.py",
-      "detail": "dispatch_tool_call() checks caller.permissions before invocation, line 77"
+      "file": "app/orders/views.py",
+      "detail": "DELETE handler at line 58 has no ownership check before order.delete()"
     }
   ],
-  "unresolved_assumptions": [],
-  "result": "PASS",
-  "result_reasoning": "ai/tool_orchestrator.py's dispatch_tool_call() independently re-checks the caller's stored permission set against the tool's required scope before invocation, regardless of what the model requested; a request for a tool outside that scope raises PermissionDenied before the model's output is ever executed.",
-  "ai_authorization_context": {
-    "enforced_outside_model": true
-  },
+  "unresolved_assumptions": [
+    "whether the same missing-check pattern also affects a separate, unreviewed batch-import endpoint was not verified"
+  ],
+  "result": "FAIL",
+  "result_reasoning": "app/orders/views.py:58 (the DELETE handler) loads the Order by primary key and calls .delete() immediately with no ownership/permission check at all -- any authenticated user can delete any other user's order by guessing or incrementing the numeric id.",
   "artifact_binding": {
-    "sha256": "817def3db48d30d0aa7c94664796076e57c2b4121c363fc86a485c68be48e70b"
+    "sha256": "3878178b54a2563e308b2ab0d93f5829994bc26d7ceb87a4936d2d3c80bfa165"
   }
 }
