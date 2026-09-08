@@ -1,0 +1,40 @@
+{
+  "environment": "TEST",
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "6b855b85f5cdca683e1a332eddf40021c83781d5",
+    "base_url": "http://localhost:8080"
+  },
+  "scenario": {
+    "id": "concurrent-one-time-action-invariant",
+    "version": "1.0.0"
+  },
+  "verifier_mode": "DYNAMIC_CONCURRENCY",
+  "identities": [
+    "USER_A"
+  ],
+  "execution": {
+    "completed": true
+  },
+  "assertions": [
+    {
+      "id": "concurrent_invariant_held",
+      "outcome": "PASSED"
+    }
+  ],
+  "cleanup": {
+    "required": false,
+    "performed": false,
+    "success": true
+  },
+  "result": {
+    "control_id": "SEC-044",
+    "requirement": "concurrent-request test proving repeated simultaneous submissions cannot bypass a one-time/limited-use constraint"
+  },
+  "concurrency": {
+    "simultaneous_requests": 50
+  },
+  "artifact_binding": {
+    "sha256": "919200befdfe795f92f4f0ddeafea656352e00a418521dea24763643971b76ae"
+  }
+}

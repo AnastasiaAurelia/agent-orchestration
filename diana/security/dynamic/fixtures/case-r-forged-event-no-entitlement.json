@@ -1,0 +1,38 @@
+{
+  "environment": "TEST",
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "6b855b85f5cdca683e1a332eddf40021c83781d5",
+    "base_url": "http://localhost:8080"
+  },
+  "scenario": {
+    "id": "forged-payment-event-no-entitlement",
+    "version": "1.0.0"
+  },
+  "verifier_mode": "PROVIDER_SANDBOX",
+  "identities": [
+    "PROVIDER_TEST_ACCOUNT"
+  ],
+  "execution": {
+    "completed": true
+  },
+  "assertions": [
+    {
+      "id": "forged_event_no_entitlement",
+      "outcome": "PASSED"
+    }
+  ],
+  "cleanup": {
+    "required": false,
+    "performed": false,
+    "success": true
+  },
+  "result": {
+    "control_id": "SEC-071",
+    "requirement": "negative test in a payment provider sandbox proving a forged/failed-payment event does not grant entitlement"
+  },
+  "provider_mode": "sandbox",
+  "artifact_binding": {
+    "sha256": "c1287dc53ae5891dd31e601660c568965897760e75c16b3ec4c956bd750788b8"
+  }
+}

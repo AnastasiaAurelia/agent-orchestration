@@ -1,0 +1,41 @@
+{
+  "environment": "TEST",
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "6b855b85f5cdca683e1a332eddf40021c83781d5",
+    "base_url": "http://localhost:8080"
+  },
+  "scenario": {
+    "id": "bola-cross-account-denied",
+    "version": "1.0.0"
+  },
+  "verifier_mode": "DYNAMIC_API",
+  "identities": [
+    "USER_A"
+  ],
+  "execution": {
+    "completed": true
+  },
+  "assertions": [
+    {
+      "id": "cross_account_access_denied",
+      "outcome": "PASSED"
+    },
+    {
+      "id": "protected_state_unchanged",
+      "outcome": "PASSED"
+    }
+  ],
+  "cleanup": {
+    "required": false,
+    "performed": false,
+    "success": true
+  },
+  "result": {
+    "control_id": "SEC-001",
+    "requirement": "cross-account negative access test (user A cannot access user B's object by id)"
+  },
+  "artifact_binding": {
+    "sha256": "bef48acac4f2525c8f8f48a2d48acb38e3cd282bdb0013ab798460faba4bd215"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "environment": "TEST",
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "6b855b85f5cdca683e1a332eddf40021c83781d5",
+    "base_url": "http://localhost:8080"
+  },
+  "scenario": {
+    "id": "cross-tenant-access-denied",
+    "version": "1.0.0"
+  },
+  "verifier_mode": "DYNAMIC_API",
+  "identities": [
+    "TENANT_A",
+    "TENANT_B"
+  ],
+  "execution": {
+    "completed": true
+  },
+  "assertions": [
+    {
+      "id": "cross_tenant_access_denied",
+      "outcome": "PASSED"
+    }
+  ],
+  "cleanup": {
+    "required": false,
+    "performed": false,
+    "success": true
+  },
+  "result": {
+    "control_id": "SEC-067",
+    "requirement": "cross-tenant negative access test proving tenant A cannot read/write tenant B's data"
+  },
+  "artifact_binding": {
+    "sha256": "c7ee27883986e09005e58751097d2ebc44ac1b92d43160177d020a6c4c5ad977"
+  }
+}

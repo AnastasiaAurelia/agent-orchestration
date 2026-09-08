@@ -1,0 +1,38 @@
+{
+  "environment": "TEST",
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "6b855b85f5cdca683e1a332eddf40021c83781d5",
+    "base_url": "http://localhost:8080"
+  },
+  "scenario": {
+    "id": "tampered-price-rejected",
+    "version": "1.0.0"
+  },
+  "verifier_mode": "PROVIDER_SANDBOX",
+  "identities": [
+    "PROVIDER_TEST_ACCOUNT"
+  ],
+  "execution": {
+    "completed": true
+  },
+  "assertions": [
+    {
+      "id": "tampered_amount_rejected",
+      "outcome": "PASSED"
+    }
+  ],
+  "cleanup": {
+    "required": false,
+    "performed": false,
+    "success": true
+  },
+  "result": {
+    "control_id": "SEC-070",
+    "requirement": "negative test in a payment provider sandbox proving a tampered client-side amount does not change the amount actually charged"
+  },
+  "provider_mode": "sandbox",
+  "artifact_binding": {
+    "sha256": "8ed0e2c351d6d7c0244930e2a9a8b837135c584ab65bc448d09013251996bd84"
+  }
+}
