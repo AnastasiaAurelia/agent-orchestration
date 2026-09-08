@@ -1,0 +1,2267 @@
+{
+  "catalog_version": 1,
+  "source": {
+    "title": "75 Common Vibe-Coded Web App Vulnerabilities",
+    "control_count": 75,
+    "source_type": "handbook",
+    "security_claim": "catalog_reference_not_proof"
+  },
+  "verifier_types": [
+    "DETERMINISTIC_REPO",
+    "STATIC_ANALYZER",
+    "SECRET_SCANNER",
+    "DEPENDENCY_SCANNER",
+    "INFRA_CONFIG",
+    "DYNAMIC_API",
+    "DYNAMIC_BROWSER",
+    "DYNAMIC_DB",
+    "DYNAMIC_CONCURRENCY",
+    "PROVIDER_SANDBOX",
+    "SEMANTIC_REVIEW",
+    "HUMAN"
+  ],
+  "controls": [
+    {
+      "id": "SEC-001",
+      "source_number": 1,
+      "slug": "broken-object-level-authorization",
+      "title": "Broken Object Level Authorization (IDOR/BOLA)",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "The app lets a logged-in user access another user's records by changing an ID or reference.",
+        "usual_cause": "Authorization is checked only in the UI, or the server verifies login but not ownership/permission for the requested object.",
+        "potential_impact": "Attackers may read, change, or delete other users' private data.",
+        "prevention": "Enforce object-level authorization on every server-side request. Derive the user from the trusted session, check ownership/role before every read/write, use deny-by-default policies, and test cross-account access."
+      },
+      "applicability": {
+        "signals": [
+          "authenticated endpoints operate on user-owned records referenced by an id"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "SEMANTIC_REVIEW",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "server-side object ownership/permission check exists on every read/write route",
+        "cross-account negative access test (user A cannot access user B's object by id)"
+      ]
+    },
+    {
+      "id": "SEC-002",
+      "source_number": 2,
+      "slug": "broken-function-level-authorization",
+      "title": "Broken Function Level Authorization",
+      "severity": "CRITICAL",
+      "source_summary": {
+        "what_it_is": "Users can call admin or privileged functions that their role should not be allowed to use.",
+        "usual_cause": "The frontend hides privileged buttons, but backend routes or server actions do not independently enforce roles/permissions.",
+        "potential_impact": "A normal account may perform administrative actions, change settings, manage users, or access restricted functions.",
+        "prevention": "Require server-side authorization for every privileged route/action. Centralize role/permission checks and default to deny."
+      },
+      "applicability": {
+        "signals": [
+          "app has role-differentiated or privileged (admin/staff) routes or actions"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "SEMANTIC_REVIEW",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "server-side role/permission check exists on every privileged route, independent of UI",
+        "negative test proving a lower-privilege account is rejected from a privileged action"
+      ]
+    },
+    {
+      "id": "SEC-003",
+      "source_number": 3,
+      "slug": "missing-authentication-on-sensitive-endpoints",
+      "title": "Missing Authentication on Sensitive Endpoints",
+      "severity": "CRITICAL",
+      "source_summary": {
+        "what_it_is": "Sensitive endpoints work without proving who the caller is.",
+        "usual_cause": "Developers expose internal routes, APIs, server actions, or functions without authentication middleware.",
+        "potential_impact": "Unauthenticated attackers may access data or perform protected actions.",
+        "prevention": "Require authentication on all non-public endpoints and explicitly document the small set of routes intended to be public."
+      },
+      "applicability": {
+        "signals": [
+          "endpoints exist that return or mutate non-public data"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "SEMANTIC_REVIEW",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "every sensitive endpoint requires a valid authenticated session/token",
+        "unauthenticated request to a sensitive endpoint is rejected"
+      ]
+    },
+    {
+      "id": "SEC-004",
+      "source_number": 4,
+      "slug": "privilege-escalation",
+      "title": "Privilege Escalation",
+      "severity": "CRITICAL",
+      "source_summary": {
+        "what_it_is": "A lower-privileged user can gain permissions intended for admins or other trusted roles.",
+        "usual_cause": "Roles or permission fields can be changed by the client, mass-assigned, or insufficiently validated.",
+        "potential_impact": "An attacker may become an administrator or gain powerful account capabilities.",
+        "prevention": "Keep authorization data server-controlled. Restrict role changes to explicitly authorized admin workflows and validate transitions."
+      },
+      "applicability": {
+        "signals": [
+          "app has more than one privilege/role level (user, admin, tenant-owner, etc.)"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "SEMANTIC_REVIEW",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "role/privilege assignment cannot be set or changed by the caller's own request",
+        "negative test proving a low-privilege account cannot elevate its own role"
+      ]
+    },
+    {
+      "id": "SEC-005",
+      "source_number": 5,
+      "slug": "insecure-direct-database-access-from-client",
+      "title": "Insecure Direct Database Access from Client",
+      "severity": "CRITICAL",
+      "source_summary": {
+        "what_it_is": "The browser talks directly to database operations that are broader than the user's actual permissions.",
+        "usual_cause": "Database policies such as RLS are missing, incomplete, or bypassed while public client credentials can reach sensitive tables.",
+        "potential_impact": "Users may query or modify data outside their intended scope.",
+        "prevention": "Use strict database authorization policies, least-privilege client access, server-side operations for sensitive actions, and test policies with multiple identities."
+      },
+      "applicability": {
+        "signals": [
+          "a frontend/browser/mobile client holds direct database connection credentials or an unrestricted client-side DB SDK key"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "SEMANTIC_REVIEW"
+        ],
+        "dynamic_required": false,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "no direct database connection string or unrestricted client DB key is shipped to a client build",
+        "data access from the client is mediated by a server-side API or a scoped, policy-enforced client SDK"
+      ]
+    },
+    {
+      "id": "SEC-006",
+      "source_number": 6,
+      "slug": "exposed-api-keys-or-secrets-in-frontend",
+      "title": "Exposed API Keys or Secrets in Frontend",
+      "severity": "CRITICAL",
+      "source_summary": {
+        "what_it_is": "Private credentials are shipped in browser JavaScript, HTML, source maps, or public configuration.",
+        "usual_cause": "Secrets are placed in client environment variables or hard-coded into frontend code.",
+        "potential_impact": "Anyone can extract and abuse the credential, potentially causing data access, charges, or account compromise.",
+        "prevention": "Keep secrets server-side only, rotate exposed keys, use restricted credentials, and proxy privileged third-party calls through trusted backend code."
+      },
+      "applicability": {
+        "signals": [
+          "a built frontend bundle exists"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "SECRET_SCANNER"
+        ],
+        "dynamic_required": false,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "no third-party or backend secret key is present in shipped frontend/client bundle source",
+        "frontend build only contains publishable/public keys"
+      ]
+    },
+    {
+      "id": "SEC-007",
+      "source_number": 7,
+      "slug": "hard-coded-secrets-in-source-code",
+      "title": "Hard-Coded Secrets in Source Code",
+      "severity": "CRITICAL",
+      "source_summary": {
+        "what_it_is": "Passwords, tokens, signing keys, or credentials are embedded directly in application code or committed files.",
+        "usual_cause": "Developers hard-code secrets for convenience or commit local environment files.",
+        "potential_impact": "Repository access, logs, builds, or leaks can expose credentials.",
+        "prevention": "Store secrets in a proper secret manager or protected environment variables, remove them from history where necessary, and rotate compromised values."
+      },
+      "applicability": {
+        "signals": [
+          "source repository exists"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "SECRET_SCANNER",
+          "STATIC_ANALYZER"
+        ],
+        "dynamic_required": false,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "no credential/token/private-key literal is committed in source",
+        "secrets are loaded from environment/secret-manager configuration, not source"
+      ]
+    },
+    {
+      "id": "SEC-008",
+      "source_number": 8,
+      "slug": "sql-injection",
+      "title": "SQL Injection",
+      "severity": "CRITICAL",
+      "source_summary": {
+        "what_it_is": "Untrusted input changes the meaning of a SQL query.",
+        "usual_cause": "Queries are built by concatenating user input instead of using parameterized statements or a safe ORM.",
+        "potential_impact": "Attackers may read, alter, or delete database data and sometimes bypass authentication.",
+        "prevention": "Use parameterized queries/prepared statements, safe ORM APIs, strict input handling, and least-privilege database accounts."
+      },
+      "applicability": {
+        "signals": [
+          "app builds or executes SQL against a relational database"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "all SQL statements built from request-influenced input use parameterized queries/prepared statements or a query builder that never concatenates raw input",
+        "negative test proving an injection payload does not alter query behavior"
+      ]
+    },
+    {
+      "id": "SEC-009",
+      "source_number": 9,
+      "slug": "nosql-injection",
+      "title": "NoSQL Injection",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "User input changes the structure or operators of a NoSQL query.",
+        "usual_cause": "Raw request objects or attacker-controlled operators are passed directly into database filters.",
+        "potential_impact": "Attackers may bypass filters, authentication, or access unintended records.",
+        "prevention": "Build queries from explicitly allowed fields, validate types, reject unexpected operators/objects, and use safe driver APIs."
+      },
+      "applicability": {
+        "signals": [
+          "app queries a NoSQL/document database (e.g. MongoDB) with request-influenced input"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "request-influenced input cannot be interpreted as query operators",
+        "negative test proving an operator-injection payload does not alter query behavior"
+      ]
+    },
+    {
+      "id": "SEC-010",
+      "source_number": 10,
+      "slug": "os-command-injection",
+      "title": "OS Command Injection",
+      "severity": "CRITICAL",
+      "source_summary": {
+        "what_it_is": "User input becomes part of an operating-system command.",
+        "usual_cause": "The app uses shell commands with concatenated filenames, URLs, options, or other user-controlled values.",
+        "potential_impact": "Attackers may execute commands on the server.",
+        "prevention": "Avoid shell execution when possible. Use safe library APIs; otherwise use argument arrays, strict allowlists, and a low-privilege runtime."
+      },
+      "applicability": {
+        "signals": [
+          "app invokes a shell/OS command and includes any request-influenced input"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "no shell command is built via string concatenation/interpolation of request-influenced input",
+        "negative test proving a shell metacharacter payload does not execute unintended commands"
+      ]
+    },
+    {
+      "id": "SEC-011",
+      "source_number": 11,
+      "slug": "server-side-template-injection",
+      "title": "Server-Side Template Injection",
+      "severity": "CRITICAL",
+      "source_summary": {
+        "what_it_is": "Attacker-controlled text is interpreted as template code on the server.",
+        "usual_cause": "User input is inserted into a server-side template in an executable/template-expression context.",
+        "potential_impact": "Depending on the engine, attackers may access server data or execute dangerous operations.",
+        "prevention": "Never evaluate user content as template source. Use fixed templates and pass untrusted values only as escaped data."
+      },
+      "applicability": {
+        "signals": [
+          "app renders a server-side template engine with request-influenced input"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "request-influenced input is never rendered as template syntax (only as template data)",
+        "negative test proving a template-expression payload is not evaluated"
+      ]
+    },
+    {
+      "id": "SEC-012",
+      "source_number": 12,
+      "slug": "cross-site-scripting-stored-xss",
+      "title": "Cross-Site Scripting (Stored XSS)",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "Malicious script-like content is saved by the app and later rendered to other users.",
+        "usual_cause": "Stored user content is inserted into HTML without context-appropriate escaping or safe sanitization.",
+        "potential_impact": "Visitors may have actions performed in their browser context or sensitive information exposed.",
+        "prevention": "Prefer output encoding. Sanitize only where rich HTML is intentionally supported, use a proven sanitizer, and enforce a strong CSP as defense in depth."
+      },
+      "applicability": {
+        "signals": [
+          "app stores user-supplied content and later renders it to other users"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_BROWSER"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "stored user content is output-encoded or sanitized at render time",
+        "negative test proving a stored script payload does not execute in another user's session"
+      ]
+    },
+    {
+      "id": "SEC-013",
+      "source_number": 13,
+      "slug": "cross-site-scripting-reflected-xss",
+      "title": "Cross-Site Scripting (Reflected XSS)",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "Malicious input from a request is immediately reflected into a page in an executable context.",
+        "usual_cause": "Query parameters, errors, search terms, or other request data are rendered without safe encoding.",
+        "potential_impact": "A crafted link can cause script execution in a victim's browser.",
+        "prevention": "Use context-aware output encoding, safe framework rendering, and avoid unsafe HTML sinks."
+      },
+      "applicability": {
+        "signals": [
+          "app reflects request input (query params, form fields) back into an HTML response"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_BROWSER"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "reflected request input is output-encoded at render time",
+        "negative test proving a reflected script payload does not execute"
+      ]
+    },
+    {
+      "id": "SEC-014",
+      "source_number": 14,
+      "slug": "dom-based-xss",
+      "title": "DOM-Based XSS",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "Client-side JavaScript takes attacker-controlled data and writes it into a dangerous DOM sink.",
+        "usual_cause": "Values from URLs, storage, messages, or APIs flow into innerHTML or similar unsafe browser APIs.",
+        "potential_impact": "Malicious links or data may trigger script execution in the browser.",
+        "prevention": "Use textContent/safe DOM APIs, sanitize intentionally allowed HTML, and validate message origins."
+      },
+      "applicability": {
+        "signals": [
+          "client-side JavaScript writes request-influenced or URL-derived data into the DOM"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_BROWSER"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "no request-influenced/URL-derived value is written via an unsafe DOM sink (innerHTML, document.write, eval, etc.) without sanitization",
+        "negative test proving a crafted URL/fragment does not execute script in the browser"
+      ]
+    },
+    {
+      "id": "SEC-015",
+      "source_number": 15,
+      "slug": "cross-site-request-forgery-csrf",
+      "title": "Cross-Site Request Forgery (CSRF)",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "A user's browser can be tricked into sending an authenticated state-changing request from another site.",
+        "usual_cause": "Cookie-authenticated state changes lack CSRF defenses and accept cross-site requests.",
+        "potential_impact": "Victims may unknowingly change account data or perform sensitive actions.",
+        "prevention": "Use SameSite cookies, CSRF tokens where needed, Origin/Referer validation, and never use GET for state changes."
+      },
+      "applicability": {
+        "signals": [
+          "app performs state-changing requests using cookie-based session authentication"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "state-changing requests require a CSRF token or an equivalent same-site/origin check",
+        "negative test proving a cross-origin forged request is rejected"
+      ]
+    },
+    {
+      "id": "SEC-016",
+      "source_number": 16,
+      "slug": "weak-password-storage",
+      "title": "Weak Password Storage",
+      "severity": "CRITICAL",
+      "source_summary": {
+        "what_it_is": "Passwords are stored in a form that is too easy to recover if the database leaks.",
+        "usual_cause": "Plaintext, reversible encryption, fast hashes, or weak password-hashing parameters are used.",
+        "potential_impact": "A database breach can expose users' passwords and reused credentials.",
+        "prevention": "Use a modern password hashing function such as Argon2id or a well-configured bcrypt/scrypt implementation with unique salts."
+      },
+      "applicability": {
+        "signals": [
+          "app stores user passwords/credentials"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "SEMANTIC_REVIEW"
+        ],
+        "dynamic_required": false,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "passwords are hashed with a modern adaptive algorithm (bcrypt/argon2/scrypt) with per-user salt",
+        "no reversible encryption or fast general-purpose hash (md5/sha1/plain sha256) is used for password storage"
+      ]
+    },
+    {
+      "id": "SEC-017",
+      "source_number": 17,
+      "slug": "weak-password-policy-credential-abuse-exposure",
+      "title": "Weak Password Policy / Credential Abuse Exposure",
+      "severity": "MEDIUM",
+      "source_summary": {
+        "what_it_is": "The app makes account takeover easier by allowing very weak credentials or failing to defend against common credential abuse.",
+        "usual_cause": "Poor password controls, no breached-password screening, and weak login protections.",
+        "potential_impact": "Attackers have an easier time taking over accounts with guessed or reused credentials.",
+        "prevention": "Allow long passphrases, block known compromised passwords where practical, support password managers, and combine with rate limiting/MFA."
+      },
+      "applicability": {
+        "signals": [
+          "app has a self-service password-based signup/login flow"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "SEMANTIC_REVIEW",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "a minimum password strength requirement is enforced server-side",
+        "negative/abuse test proving repeated credential-stuffing attempts are throttled or blocked"
+      ]
+    },
+    {
+      "id": "SEC-018",
+      "source_number": 18,
+      "slug": "missing-mfa-for-sensitive-accounts",
+      "title": "Missing Multi-Factor Authentication for Sensitive Accounts",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "High-impact accounts rely on a single authentication factor.",
+        "usual_cause": "Admin, financial, developer, or other sensitive accounts have no MFA option or requirement.",
+        "potential_impact": "A stolen password alone may be enough for account takeover.",
+        "prevention": "Support phishing-resistant MFA where possible and require MFA for privileged accounts."
+      },
+      "applicability": {
+        "signals": [
+          "app has privileged (admin/staff) or otherwise sensitive accounts"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "SEMANTIC_REVIEW",
+          "STATIC_ANALYZER"
+        ],
+        "dynamic_required": false,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "multi-factor authentication is available and enforceable for sensitive/privileged accounts",
+        "documented decision on which account tiers require MFA"
+      ]
+    },
+    {
+      "id": "SEC-019",
+      "source_number": 19,
+      "slug": "session-fixation",
+      "title": "Session Fixation",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "An attacker can cause a victim to authenticate using a session identifier the attacker already knows.",
+        "usual_cause": "The session ID is not regenerated after login or privilege changes.",
+        "potential_impact": "The attacker may reuse the known session to access the authenticated account.",
+        "prevention": "Rotate session identifiers after authentication and privilege changes; invalidate pre-authentication sessions."
+      },
+      "applicability": {
+        "signals": [
+          "app uses a server-issued session identifier after login"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "SEMANTIC_REVIEW",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "a new session identifier is issued on privilege change (login, elevation)",
+        "negative test proving a pre-login session id is not reused as an authenticated session after login"
+      ]
+    },
+    {
+      "id": "SEC-020",
+      "source_number": 20,
+      "slug": "session-hijacking-exposure",
+      "title": "Session Hijacking Exposure",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "Session tokens are easier to steal or reuse than they should be.",
+        "usual_cause": "Tokens are exposed to JavaScript unnecessarily, sent insecurely, logged, leaked in URLs, or have excessive lifetime.",
+        "potential_impact": "A stolen token may allow account takeover.",
+        "prevention": "Use Secure, HttpOnly, SameSite cookies where appropriate, TLS, short reasonable lifetimes, rotation, revocation, and no tokens in URLs/logs."
+      },
+      "applicability": {
+        "signals": [
+          "app uses session tokens/cookies to maintain authenticated state"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "SEMANTIC_REVIEW",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "session tokens are transmitted only over TLS and use Secure/HttpOnly cookie attributes",
+        "session invalidation on logout/timeout is enforced server-side"
+      ]
+    },
+    {
+      "id": "SEC-021",
+      "source_number": 21,
+      "slug": "jwt-signature-verification-errors",
+      "title": "JWT Signature Verification Errors",
+      "severity": "CRITICAL",
+      "source_summary": {
+        "what_it_is": "The application accepts a JWT without correctly verifying that it was signed by a trusted issuer.",
+        "usual_cause": "Signature verification is disabled, algorithms are misconfigured, or untrusted keys/claims are accepted.",
+        "potential_impact": "Attackers may forge identities or privileges.",
+        "prevention": "Use a maintained JWT library, pin expected algorithms, verify signature, issuer, audience, expiry, and required claims."
+      },
+      "applicability": {
+        "signals": [
+          "app issues or accepts JWTs for authentication/authorization"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "JWT verification enforces a fixed, expected signing algorithm (no algorithm confusion, no 'none' algorithm accepted)",
+        "negative test proving a token with a forged/none-algorithm signature is rejected"
+      ]
+    },
+    {
+      "id": "SEC-022",
+      "source_number": 22,
+      "slug": "jwt-claims-trusted-without-authorization",
+      "title": "JWT Claims Trusted Without Authorization",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "The server treats token claims as sufficient permission without applying current application authorization rules.",
+        "usual_cause": "Roles, tenant IDs, or permissions in tokens are stale, overly trusted, or accepted from untrusted sources.",
+        "potential_impact": "Users may retain or gain access they should not have.",
+        "prevention": "Verify trusted claims and still apply server-side authorization for the requested resource/action; keep sensitive authorization state current."
+      },
+      "applicability": {
+        "signals": [
+          "app derives authorization decisions from JWT claims"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "SEMANTIC_REVIEW",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "authorization decisions are re-checked server-side against current state, not solely trusted from client-supplied claims",
+        "negative test proving a tampered/self-asserted claim does not grant unauthorized access"
+      ]
+    },
+    {
+      "id": "SEC-023",
+      "source_number": 23,
+      "slug": "oauth-redirect-uri-weakness",
+      "title": "OAuth Redirect URI Weakness",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "An OAuth flow can redirect authorization results to an attacker-controlled or unintended destination.",
+        "usual_cause": "Redirect URIs are matched loosely, dynamically accepted, or built from user input.",
+        "potential_impact": "Authorization codes or tokens may be exposed to an attacker-controlled endpoint.",
+        "prevention": "Use exact registered redirect URIs and strict provider configuration; never accept arbitrary redirect destinations."
+      },
+      "applicability": {
+        "signals": [
+          "app implements an OAuth/OIDC authorization flow"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "SEMANTIC_REVIEW",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "redirect_uri is validated against an exact allow-list server-side",
+        "negative test proving an unregistered or wildcard-manipulated redirect_uri is rejected"
+      ]
+    },
+    {
+      "id": "SEC-024",
+      "source_number": 24,
+      "slug": "oauth-state-pkce-validation-missing",
+      "title": "OAuth State/PKCE Validation Missing",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "OAuth login lacks protections that bind the authorization response to the initiating browser/client.",
+        "usual_cause": "The app omits or incorrectly validates state and, for applicable public clients, PKCE.",
+        "potential_impact": "Login CSRF, authorization response mix-ups, or code interception risks increase.",
+        "prevention": "Generate unpredictable state, validate it once, use PKCE with S256 where applicable, and follow the provider/library's secure flow."
+      },
+      "applicability": {
+        "signals": [
+          "app implements an OAuth/OIDC authorization code flow"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "SEMANTIC_REVIEW",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "state parameter and, for public clients, PKCE are generated, transmitted, and validated on callback",
+        "negative test proving a callback with a missing/mismatched state or PKCE verifier is rejected"
+      ]
+    },
+    {
+      "id": "SEC-025",
+      "source_number": 25,
+      "slug": "account-enumeration",
+      "title": "Account Enumeration",
+      "severity": "MEDIUM",
+      "source_summary": {
+        "what_it_is": "The app reveals whether a username, email, or account exists.",
+        "usual_cause": "Login, registration, password reset, or invitation responses differ in text, status, or timing.",
+        "potential_impact": "Attackers can build lists of valid accounts for targeted attacks.",
+        "prevention": "Use consistent public responses and reasonable timing while still logging detailed internal outcomes."
+      },
+      "applicability": {
+        "signals": [
+          "app exposes a login, signup, or password-reset flow"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "DYNAMIC_API",
+          "SEMANTIC_REVIEW"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "authentication-adjacent responses (login, signup, reset) do not differ in a way that reveals account existence",
+        "negative test comparing responses for existing vs non-existing accounts"
+      ]
+    },
+    {
+      "id": "SEC-026",
+      "source_number": 26,
+      "slug": "brute-force-login-protection-missing",
+      "title": "Brute-Force Login Protection Missing",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "Attackers can make large numbers of authentication attempts without meaningful resistance.",
+        "usual_cause": "No rate limiting, progressive delays, anomaly controls, or MFA protection exists.",
+        "potential_impact": "Passwords are easier to guess or test at scale.",
+        "prevention": "Rate-limit by multiple signals, add progressive delays/risk controls, protect against distributed abuse, and avoid permanent lockouts that enable denial of service."
+      },
+      "applicability": {
+        "signals": [
+          "app has a password-based login endpoint"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "DYNAMIC_API",
+          "SEMANTIC_REVIEW"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "failed login attempts are rate-limited or lockout/backoff is applied per account/IP",
+        "test proving repeated failed login attempts are throttled or blocked"
+      ]
+    },
+    {
+      "id": "SEC-027",
+      "source_number": 27,
+      "slug": "password-reset-token-weakness",
+      "title": "Password Reset Token Weakness",
+      "severity": "CRITICAL",
+      "source_summary": {
+        "what_it_is": "Password reset tokens can be guessed, reused, leaked, or remain valid too long.",
+        "usual_cause": "Tokens have low entropy, are stored insecurely, are not single-use, or are not invalidated after reset.",
+        "potential_impact": "Attackers may reset another user's password.",
+        "prevention": "Use cryptographically random, short-lived, single-use tokens, store only safe representations, and invalidate sessions as appropriate after reset."
+      },
+      "applicability": {
+        "signals": [
+          "app has a self-service password reset flow"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "SEMANTIC_REVIEW",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "reset tokens are high-entropy, single-use, and time-limited, validated server-side",
+        "negative test proving an expired, reused, or guessed reset token is rejected"
+      ]
+    },
+    {
+      "id": "SEC-028",
+      "source_number": 28,
+      "slug": "email-verification-bypass",
+      "title": "Email Verification Bypass",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "A user can obtain verified-account privileges without actually proving control of the email address.",
+        "usual_cause": "Verification state can be client-controlled, tokens are weak/reusable, or protected features do not check verified status.",
+        "potential_impact": "Attackers may create trusted-looking or privileged accounts using addresses they do not control.",
+        "prevention": "Keep verification state server-controlled and use secure, expiring, single-use verification tokens."
+      },
+      "applicability": {
+        "signals": [
+          "app requires email verification before granting account access/trust"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "SEMANTIC_REVIEW",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "verification status is enforced server-side before granting the gated capability",
+        "negative test proving an unverified account cannot access the gated capability by manipulating client state"
+      ]
+    },
+    {
+      "id": "SEC-029",
+      "source_number": 29,
+      "slug": "insecure-remember-me-tokens",
+      "title": "Insecure 'Remember Me' Tokens",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "Long-lived login tokens can be stolen, predicted, or reused indefinitely.",
+        "usual_cause": "Persistent tokens are weak, stored plaintext server-side, never rotated, or not revocable.",
+        "potential_impact": "A stolen persistent token may provide long-term account access.",
+        "prevention": "Use high-entropy tokens, store hashed token values, rotate on use, expire them, support revocation, and bind carefully to account/session state."
+      },
+      "applicability": {
+        "signals": [
+          "app offers a persistent/'remember me' login option"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "SEMANTIC_REVIEW"
+        ],
+        "dynamic_required": false,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "remember-me tokens are high-entropy, stored hashed, single-use or rotated, and independently revocable"
+      ]
+    },
+    {
+      "id": "SEC-030",
+      "source_number": 30,
+      "slug": "insecure-cookie-attributes",
+      "title": "Insecure Cookie Attributes",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "Authentication or sensitive cookies lack browser protections.",
+        "usual_cause": "Secure, HttpOnly, or appropriate SameSite attributes are missing or cookie scope is unnecessarily broad.",
+        "potential_impact": "Cookies are more exposed to interception, scripts, or cross-site requests.",
+        "prevention": "Set Secure and HttpOnly for session cookies, choose appropriate SameSite, minimize Domain/Path scope, and use HTTPS."
+      },
+      "applicability": {
+        "signals": [
+          "app sets authentication or session cookies"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "session/auth cookies are set with Secure, HttpOnly, and an appropriate SameSite attribute",
+        "response inspection confirms the attributes are actually delivered at runtime"
+      ]
+    },
+    {
+      "id": "SEC-031",
+      "source_number": 31,
+      "slug": "cors-misconfiguration",
+      "title": "CORS Misconfiguration",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "The server allows untrusted websites to make browser requests that should be restricted.",
+        "usual_cause": "Origins are reflected blindly, wildcards are used with sensitive data, or credentials are allowed too broadly.",
+        "potential_impact": "A malicious site may interact with authenticated APIs or read data when browser credentials are included.",
+        "prevention": "Use a strict allowlist of trusted origins, never reflect arbitrary origins, and enable credentials only where required."
+      },
+      "applicability": {
+        "signals": [
+          "app serves a cross-origin-callable API"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "Access-Control-Allow-Origin is not a reflected wildcard combined with credentials",
+        "negative test proving an untrusted origin cannot read credentialed cross-origin responses"
+      ]
+    },
+    {
+      "id": "SEC-032",
+      "source_number": 32,
+      "slug": "missing-or-weak-content-security-policy",
+      "title": "Missing or Weak Content Security Policy",
+      "severity": "MEDIUM",
+      "source_summary": {
+        "what_it_is": "The browser has little defense in depth against injected scripts or unsafe content sources.",
+        "usual_cause": "CSP is absent or uses overly broad sources such as unsafe-inline/unsafe-eval without necessity.",
+        "potential_impact": "XSS and third-party script compromise can have greater impact.",
+        "prevention": "Deploy a restrictive CSP tailored to the app, preferably using nonces/hashes for scripts, and test in report-only mode before enforcement."
+      },
+      "applicability": {
+        "signals": [
+          "app serves HTML responses to a browser"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "a Content-Security-Policy header is present and restricts script sources",
+        "response inspection confirms the header is actually delivered at runtime"
+      ]
+    },
+    {
+      "id": "SEC-033",
+      "source_number": 33,
+      "slug": "clickjacking",
+      "title": "Clickjacking",
+      "severity": "MEDIUM",
+      "source_summary": {
+        "what_it_is": "An attacker can embed the app in a frame and trick a user into clicking hidden or disguised controls.",
+        "usual_cause": "The application does not restrict framing.",
+        "potential_impact": "Users may unknowingly trigger sensitive actions.",
+        "prevention": "Use CSP frame-ancestors and, for legacy support where needed, X-Frame-Options."
+      },
+      "applicability": {
+        "signals": [
+          "app serves HTML pages that perform sensitive actions"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "X-Frame-Options or CSP frame-ancestors prevents the sensitive page from being framed",
+        "response inspection confirms the protection is actually delivered at runtime"
+      ]
+    },
+    {
+      "id": "SEC-034",
+      "source_number": 34,
+      "slug": "open-redirect",
+      "title": "Open Redirect",
+      "severity": "MEDIUM",
+      "source_summary": {
+        "what_it_is": "The application redirects users to attacker-chosen external URLs.",
+        "usual_cause": "Redirect destinations are taken directly from query parameters or user input.",
+        "potential_impact": "Attackers can abuse trusted links for phishing or authorization-flow problems.",
+        "prevention": "Use relative internal destinations or a strict allowlist; never redirect directly to arbitrary user-supplied URLs."
+      },
+      "applicability": {
+        "signals": [
+          "app redirects based on a request-supplied URL/parameter"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "redirect targets are validated against an allow-list or restricted to relative paths",
+        "negative test proving an attacker-supplied external redirect target is rejected"
+      ]
+    },
+    {
+      "id": "SEC-035",
+      "source_number": 35,
+      "slug": "server-side-request-forgery-ssrf",
+      "title": "Server-Side Request Forgery (SSRF)",
+      "severity": "CRITICAL",
+      "source_summary": {
+        "what_it_is": "The server fetches a URL chosen by a user, allowing access to destinations the user could not reach directly.",
+        "usual_cause": "URL fetchers, webhooks, image importers, previews, or integrations accept arbitrary destinations without network restrictions.",
+        "potential_impact": "Attackers may reach internal services, cloud metadata, or sensitive network resources.",
+        "prevention": "Allowlist destinations where possible, block private/link-local/loopback ranges after DNS resolution, restrict protocols, control redirects, and isolate outbound networking."
+      },
+      "applicability": {
+        "signals": [
+          "server makes outbound HTTP/network requests to a URL influenced by request input"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "outbound request targets are validated/allow-listed and internal/metadata address ranges are blocked",
+        "negative test proving a request targeting an internal address is rejected"
+      ]
+    },
+    {
+      "id": "SEC-036",
+      "source_number": 36,
+      "slug": "path-traversal",
+      "title": "Path Traversal",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "User input manipulates a file path to access files outside the intended directory.",
+        "usual_cause": "Filenames or paths are concatenated without canonicalization and containment checks.",
+        "potential_impact": "Attackers may read or overwrite sensitive files.",
+        "prevention": "Use generated identifiers, safe storage APIs, canonicalize paths, and verify the final path remains inside the allowed base directory."
+      },
+      "applicability": {
+        "signals": [
+          "server reads/writes a filesystem path influenced by request input"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "file paths built from request input are normalized/validated against a restricted base directory",
+        "negative test proving a traversal payload (e.g. ../) cannot escape the intended directory"
+      ]
+    },
+    {
+      "id": "SEC-037",
+      "source_number": 37,
+      "slug": "local-file-inclusion-unsafe-file-loading",
+      "title": "Local File Inclusion / Unsafe File Loading",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "The app loads local files or modules based on user-controlled values.",
+        "usual_cause": "Dynamic include/template/file-loading functions receive untrusted paths.",
+        "potential_impact": "Sensitive files may be disclosed or unsafe content executed depending on the runtime.",
+        "prevention": "Use fixed mappings/allowlists instead of user-controlled paths and remove dynamic include behavior."
+      },
+      "applicability": {
+        "signals": [
+          "server loads/includes a file or module whose path is influenced by request input"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "file/module inclusion is restricted to a fixed allow-list, never a raw request-supplied path",
+        "negative test proving an attacker-supplied path cannot cause inclusion of an arbitrary file"
+      ]
+    },
+    {
+      "id": "SEC-038",
+      "source_number": 38,
+      "slug": "unrestricted-file-upload",
+      "title": "Unrestricted File Upload",
+      "severity": "CRITICAL",
+      "source_summary": {
+        "what_it_is": "Users can upload files that the application treats as executable or otherwise dangerous.",
+        "usual_cause": "The server trusts extensions/MIME types, stores uploads in executable locations, or lacks content and size restrictions.",
+        "potential_impact": "Uploads may lead to malware hosting, code execution, XSS, storage abuse, or data exposure.",
+        "prevention": "Allow only necessary file types, validate content, rename files, store outside executable web roots, limit size, and serve with safe headers."
+      },
+      "applicability": {
+        "signals": [
+          "app accepts user file uploads"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "uploaded files are validated (type/size/content) and stored outside the web/execution root or with execution disabled",
+        "negative test proving an executable/script file upload is rejected or rendered inert"
+      ]
+    },
+    {
+      "id": "SEC-039",
+      "source_number": 39,
+      "slug": "file-upload-content-type-confusion",
+      "title": "File Upload Content-Type Confusion",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "A file is validated or served as one type but interpreted by the browser or downstream system as another.",
+        "usual_cause": "The app trusts MIME headers/extensions or allows browser content sniffing.",
+        "potential_impact": "Uploaded content may execute in a browser or bypass validation.",
+        "prevention": "Validate actual file format, set explicit response Content-Type, use nosniff, and force download when active content is not intended."
+      },
+      "applicability": {
+        "signals": [
+          "app accepts user file uploads and trusts a file type for handling"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "file type is verified by content inspection, not solely by client-supplied Content-Type or extension",
+        "negative test proving a mislabeled file (wrong extension/Content-Type) is rejected or handled safely"
+      ]
+    },
+    {
+      "id": "SEC-040",
+      "source_number": 40,
+      "slug": "insecure-file-permissions-public-storage",
+      "title": "Insecure File Permissions / Public Storage",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "Sensitive files are accessible to users or the public because storage permissions are too broad.",
+        "usual_cause": "Cloud buckets, object storage, directories, or generated links default to public or have weak policies.",
+        "potential_impact": "Private documents, videos, backups, or user uploads may leak.",
+        "prevention": "Make storage private by default, authorize every access, use short-lived signed URLs where appropriate, and audit bucket policies."
+      },
+      "applicability": {
+        "signals": [
+          "app stores uploaded or generated files in cloud storage or on a filesystem"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "INFRA_CONFIG",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "storage bucket/object permissions default to private with explicit, scoped grants for anything public",
+        "negative test proving a private object cannot be fetched without authorization"
+      ]
+    },
+    {
+      "id": "SEC-041",
+      "source_number": 41,
+      "slug": "mass-assignment",
+      "title": "Mass Assignment",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "Attackers can set fields that the UI never intended them to control.",
+        "usual_cause": "The backend binds entire request objects directly to database models or update operations.",
+        "potential_impact": "Users may change roles, ownership, prices, status flags, balances, or other protected fields.",
+        "prevention": "Explicitly allowlist writable fields for each operation and keep sensitive fields server-controlled."
+      },
+      "applicability": {
+        "signals": [
+          "app accepts a JSON/form body and binds it to a model/record"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "request bodies are bound through an explicit allow-list of mutable fields, never bulk-assigned to the full model",
+        "negative test proving a privileged/protected field cannot be set via unexpected request body fields"
+      ]
+    },
+    {
+      "id": "SEC-042",
+      "source_number": 42,
+      "slug": "parameter-tampering",
+      "title": "Parameter Tampering",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "The server trusts values from the browser that should be calculated or controlled server-side.",
+        "usual_cause": "Prices, discounts, user IDs, plan names, permissions, quantities, or workflow states are accepted directly from client requests.",
+        "potential_impact": "Attackers may manipulate transactions or application state.",
+        "prevention": "Treat client values as untrusted; derive security- and money-sensitive values from server-side records and validated rules."
+      },
+      "applicability": {
+        "signals": [
+          "app trusts a client-supplied parameter (price, quantity, role, id) for a server-side decision"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "SEMANTIC_REVIEW",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "security- or business-relevant values are re-derived/validated server-side, not trusted from client parameters",
+        "negative test proving a tampered parameter does not change the server-side outcome"
+      ]
+    },
+    {
+      "id": "SEC-043",
+      "source_number": 43,
+      "slug": "business-logic-abuse",
+      "title": "Business Logic Abuse",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "A user follows technically valid requests in an unintended sequence to gain an unfair or unauthorized result.",
+        "usual_cause": "Security is implemented per endpoint but not across the full business workflow.",
+        "potential_impact": "Attackers may bypass limits, duplicate benefits, skip required steps, or manipulate transactions.",
+        "prevention": "Model allowed workflow states and invariants server-side, validate transitions, and test abuse cases rather than only malformed input."
+      },
+      "applicability": {
+        "signals": [
+          "app has multi-step workflows or state transitions with business rules (e.g. coupons, quotas, order flow)"
+        ],
+        "notes": "Abuse-case enumeration is workflow-specific and generally requires human judgment to define before it can be tested."
+      },
+      "verification": {
+        "modes": [
+          "SEMANTIC_REVIEW",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": true
+      },
+      "required_evidence": [
+        "documented abuse-case analysis for the workflow's state transitions",
+        "test proving an out-of-order or repeated abuse of the workflow does not bypass its business rule"
+      ]
+    },
+    {
+      "id": "SEC-044",
+      "source_number": 44,
+      "slug": "race-condition-double-submission",
+      "title": "Race Condition / Double Submission",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "Two or more concurrent requests cause an operation to happen more than once or violate an invariant.",
+        "usual_cause": "Critical operations lack transactions, locking, idempotency, or unique constraints.",
+        "potential_impact": "Users may receive duplicate credits, orders, bookings, withdrawals, or other unintended results.",
+        "prevention": "Use database transactions/constraints, atomic operations, idempotency keys, and concurrency-safe state changes."
+      },
+      "applicability": {
+        "signals": [
+          "app has an endpoint whose repeated/concurrent invocation could double-spend, double-redeem, or double-create a resource"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "DYNAMIC_CONCURRENCY"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "concurrent-request test proving repeated simultaneous submissions cannot bypass a one-time/limited-use constraint"
+      ]
+    },
+    {
+      "id": "SEC-045",
+      "source_number": 45,
+      "slug": "missing-rate-limiting-on-sensitive-apis",
+      "title": "Missing Rate Limiting on Sensitive APIs",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "An endpoint can be called excessively without controls.",
+        "usual_cause": "No server-side quotas exist for expensive, sensitive, or abuse-prone operations.",
+        "potential_impact": "Attackers may brute force, scrape, spam, cause excessive costs, or degrade service.",
+        "prevention": "Apply endpoint-specific rate limits and quotas using appropriate identity/network signals and return safe retry behavior."
+      },
+      "applicability": {
+        "signals": [
+          "app exposes a sensitive or expensive API endpoint (auth, payments, search, AI calls)"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "SEMANTIC_REVIEW",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "sensitive endpoints enforce a rate limit or quota",
+        "test proving repeated rapid requests are throttled or rejected"
+      ]
+    },
+    {
+      "id": "SEC-046",
+      "source_number": 46,
+      "slug": "resource-exhaustion-unbounded-requests",
+      "title": "Resource Exhaustion / Unbounded Requests",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "A user can force the app to consume excessive CPU, memory, bandwidth, storage, or third-party spend.",
+        "usual_cause": "Requests lack limits on payload size, pagination, query complexity, processing time, uploads, or generated output.",
+        "potential_impact": "The service may become slow, unavailable, or unexpectedly expensive.",
+        "prevention": "Set strict practical limits, timeouts, pagination caps, concurrency controls, and budgets for expensive operations."
+      },
+      "applicability": {
+        "signals": [
+          "app accepts requests whose size/complexity/duration is not bounded"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "SEMANTIC_REVIEW",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "request size, pagination, and processing time are bounded server-side",
+        "test proving an oversized/unbounded request is rejected rather than exhausting resources"
+      ]
+    },
+    {
+      "id": "SEC-047",
+      "source_number": 47,
+      "slug": "graphql-excessive-query-complexity",
+      "title": "GraphQL Excessive Query Complexity",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "Clients can submit GraphQL queries that consume excessive resources or expose more data than intended.",
+        "usual_cause": "Depth, complexity, batching, introspection, field authorization, or pagination are poorly controlled.",
+        "potential_impact": "Attackers may cause denial of service or retrieve excessive data.",
+        "prevention": "Enforce field-level authorization, depth/complexity limits, pagination, batching controls, and production-appropriate introspection settings."
+      },
+      "applicability": {
+        "signals": [
+          "app exposes a GraphQL server"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "SEMANTIC_REVIEW",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "query depth/complexity/cost limiting is enforced server-side",
+        "test proving a deeply nested or high-cost query is rejected rather than executed"
+      ]
+    },
+    {
+      "id": "SEC-048",
+      "source_number": 48,
+      "slug": "excessive-data-exposure",
+      "title": "Excessive Data Exposure",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "APIs return more fields than the client actually needs.",
+        "usual_cause": "Entire database records or sensitive internal fields are serialized by default.",
+        "potential_impact": "Private data, internal identifiers, secrets, or metadata may leak.",
+        "prevention": "Use explicit response schemas/DTOs and return only the fields required for the feature."
+      },
+      "applicability": {
+        "signals": [
+          "an API response is built by serializing an internal model/object"
+        ],
+        "notes": "What counts as 'excessive' for a given field is contextual to the product/business, so a full determination needs human review beyond schema inspection."
+      },
+      "verification": {
+        "modes": [
+          "SEMANTIC_REVIEW",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": true
+      },
+      "required_evidence": [
+        "API responses are built from an explicit response schema/DTO, not a raw serialized internal model",
+        "review confirming no field beyond what the specific consumer needs is present in the response"
+      ]
+    },
+    {
+      "id": "SEC-049",
+      "source_number": 49,
+      "slug": "sensitive-data-in-urls",
+      "title": "Sensitive Data in URLs",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "Secrets or private data appear in URL paths or query strings.",
+        "usual_cause": "Tokens, emails, personal data, or credentials are passed through GET parameters.",
+        "potential_impact": "URLs may be stored in browser history, logs, analytics, referrers, screenshots, and proxies.",
+        "prevention": "Keep sensitive values out of URLs; use request bodies or secure cookies/headers as appropriate and redact logging."
+      },
+      "applicability": {
+        "signals": [
+          "app includes any identifier or credential-like value in a URL/query string"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "SEMANTIC_REVIEW"
+        ],
+        "dynamic_required": false,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "no session token, password, or other sensitive value is passed via URL/query string"
+      ]
+    },
+    {
+      "id": "SEC-050",
+      "source_number": 50,
+      "slug": "sensitive-data-in-logs",
+      "title": "Sensitive Data in Logs",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "Logs contain secrets or personal information that should not be recorded.",
+        "usual_cause": "The app logs full request bodies, headers, tokens, passwords, payment data, or sensitive user records.",
+        "potential_impact": "Anyone with log access may gain credentials or private data.",
+        "prevention": "Use structured logging with explicit redaction/allowlists and minimize sensitive data retention."
+      },
+      "applicability": {
+        "signals": [
+          "app writes application/request logs"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "SEMANTIC_REVIEW"
+        ],
+        "dynamic_required": false,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "logging code does not record passwords, tokens, full payment card numbers, or other sensitive fields"
+      ]
+    },
+    {
+      "id": "SEC-051",
+      "source_number": 51,
+      "slug": "verbose-error-messages",
+      "title": "Verbose Error Messages",
+      "severity": "MEDIUM",
+      "source_summary": {
+        "what_it_is": "Production errors reveal internal details useful to attackers.",
+        "usual_cause": "Stack traces, SQL errors, file paths, environment details, or framework debug pages are returned to users.",
+        "potential_impact": "Attackers gain information about the application's internals.",
+        "prevention": "Return generic public errors with correlation IDs while recording detailed diagnostics only in protected logs."
+      },
+      "applicability": {
+        "signals": [
+          "app returns error responses to clients"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "SEMANTIC_REVIEW"
+        ],
+        "dynamic_required": false,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "production error responses do not include stack traces, internal paths, or raw exception detail"
+      ]
+    },
+    {
+      "id": "SEC-052",
+      "source_number": 52,
+      "slug": "debug-mode-enabled-in-production",
+      "title": "Debug Mode Enabled in Production",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "Development features expose internals or unsafe controls in the live application.",
+        "usual_cause": "Debug flags, developer consoles, test routes, profilers, or verbose framework modes remain enabled.",
+        "potential_impact": "Sensitive information or powerful debugging capabilities may be exposed.",
+        "prevention": "Use environment-specific configuration and fail production builds/deployments if debug features are enabled."
+      },
+      "applicability": {
+        "signals": [
+          "app has a framework debug/development mode flag"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "INFRA_CONFIG"
+        ],
+        "dynamic_required": false,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "production deployment configuration disables framework debug/development mode"
+      ]
+    },
+    {
+      "id": "SEC-053",
+      "source_number": 53,
+      "slug": "security-misconfigured-http-headers",
+      "title": "Security Misconfigured HTTP Headers",
+      "severity": "MEDIUM",
+      "source_summary": {
+        "what_it_is": "Important browser security controls are missing or incorrectly configured.",
+        "usual_cause": "Headers such as HSTS, CSP, nosniff, frame protections, and referrer policy are absent or overly permissive.",
+        "potential_impact": "Browser-based attacks or information leakage may be easier.",
+        "prevention": "Set appropriate security headers centrally and test them in production-like environments."
+      },
+      "applicability": {
+        "signals": [
+          "app serves HTTP responses to a browser client"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "baseline security headers (e.g. X-Content-Type-Options, Referrer-Policy) are set",
+        "response inspection confirms the headers are actually delivered at runtime"
+      ]
+    },
+    {
+      "id": "SEC-054",
+      "source_number": 54,
+      "slug": "tls-https-misconfiguration",
+      "title": "TLS / HTTPS Misconfiguration",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "Sensitive traffic is not consistently protected in transit.",
+        "usual_cause": "HTTP remains available for authenticated traffic, certificates/configuration are weak, or secure redirects/HSTS are missing.",
+        "potential_impact": "Credentials and private data may be exposed or modified in transit.",
+        "prevention": "Require HTTPS, use modern TLS configuration, redirect HTTP safely, and enable HSTS after confirming HTTPS coverage."
+      },
+      "applicability": {
+        "signals": [
+          "app is served over a network to end users"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "INFRA_CONFIG",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "all endpoints are served over TLS with HTTP redirected/upgraded to HTTPS",
+        "live TLS handshake/cert-chain inspection confirms a valid, current configuration"
+      ]
+    },
+    {
+      "id": "SEC-055",
+      "source_number": 55,
+      "slug": "weak-cryptography-custom-crypto",
+      "title": "Weak Cryptography / Custom Crypto",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "Sensitive data is protected with obsolete algorithms, weak modes, predictable randomness, or home-grown cryptography.",
+        "usual_cause": "Developers implement encryption/signing themselves or use outdated primitives/configuration.",
+        "potential_impact": "Protected data may be recoverable or signatures/tokens forgeable.",
+        "prevention": "Use maintained cryptographic libraries and modern authenticated encryption/signature primitives with secure key management."
+      },
+      "applicability": {
+        "signals": [
+          "app performs encryption/signing/hashing of sensitive data itself"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "SEMANTIC_REVIEW"
+        ],
+        "dynamic_required": false,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "cryptographic operations use vetted standard-library/well-known algorithms and libraries, not a custom-designed cipher/scheme"
+      ]
+    },
+    {
+      "id": "SEC-056",
+      "source_number": 56,
+      "slug": "insecure-randomness",
+      "title": "Insecure Randomness",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "Security-sensitive values are predictable.",
+        "usual_cause": "Normal pseudo-random functions are used for tokens, codes, session IDs, or reset links.",
+        "potential_impact": "Attackers may guess security tokens.",
+        "prevention": "Use the platform's cryptographically secure random generator with sufficient entropy."
+      },
+      "applicability": {
+        "signals": [
+          "app generates a token, id, or secret value used for a security-relevant purpose"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "SEMANTIC_REVIEW"
+        ],
+        "dynamic_required": false,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "security-relevant random values are generated with a cryptographically secure random source, not a general-purpose PRNG"
+      ]
+    },
+    {
+      "id": "SEC-057",
+      "source_number": 57,
+      "slug": "improper-certificate-validation",
+      "title": "Improper Certificate Validation",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "The application accepts an untrusted TLS certificate when connecting to another service.",
+        "usual_cause": "Certificate or hostname verification is disabled to make development/integration easier.",
+        "potential_impact": "A network attacker may impersonate the remote service.",
+        "prevention": "Keep certificate and hostname validation enabled; install proper CA certificates instead of disabling verification."
+      },
+      "applicability": {
+        "signals": [
+          "app makes outbound TLS connections (to APIs, databases, or other services)"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "outbound TLS clients do not disable certificate/hostname validation",
+        "negative test proving a connection to an endpoint with an invalid certificate is rejected"
+      ]
+    },
+    {
+      "id": "SEC-058",
+      "source_number": 58,
+      "slug": "insecure-deserialization",
+      "title": "Insecure Deserialization",
+      "severity": "CRITICAL",
+      "source_summary": {
+        "what_it_is": "Untrusted serialized data is converted into application objects in a way that can trigger unsafe behavior.",
+        "usual_cause": "Dangerous native serialization formats or polymorphic object creation are used on attacker-controlled data.",
+        "potential_impact": "Depending on the technology, attackers may alter application state or trigger code execution.",
+        "prevention": "Prefer simple data formats such as JSON with strict schemas; never deserialize untrusted native objects; allowlist types if unavoidable."
+      },
+      "applicability": {
+        "signals": [
+          "app deserializes data from an untrusted source (request body, message queue, uploaded file)"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "deserialization of untrusted input uses a safe/restricted format or schema, not an unrestricted native object deserializer",
+        "negative test proving a crafted serialized payload does not achieve code execution or object injection"
+      ]
+    },
+    {
+      "id": "SEC-059",
+      "source_number": 59,
+      "slug": "prototype-pollution",
+      "title": "Prototype Pollution",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "Attacker-controlled object keys modify JavaScript object prototypes or inherited properties.",
+        "usual_cause": "Unsafe deep merge, object assignment, query parsing, or vulnerable libraries accept keys such as __proto__ or constructor.prototype.",
+        "potential_impact": "Application logic may be corrupted and, in some contexts, security controls bypassed.",
+        "prevention": "Update vulnerable libraries, reject dangerous keys, use safe merge utilities, and avoid merging untrusted objects into security-sensitive configuration."
+      },
+      "applicability": {
+        "signals": [
+          "app merges/assigns request-influenced keys into a JavaScript object"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "object merge/assignment code guards against __proto__/constructor/prototype keys",
+        "negative test proving a polluting payload does not alter the object prototype"
+      ]
+    },
+    {
+      "id": "SEC-060",
+      "source_number": 60,
+      "slug": "dependency-with-known-vulnerabilities",
+      "title": "Dependency With Known Vulnerabilities",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "The application uses a third-party package with a publicly known security flaw.",
+        "usual_cause": "Dependencies are outdated, unmaintained, pinned carelessly, or never scanned.",
+        "potential_impact": "Attackers may exploit the vulnerable component through the application.",
+        "prevention": "Maintain lockfiles, scan dependencies, patch promptly based on reachability/severity, and remove abandoned packages."
+      },
+      "applicability": {
+        "signals": [
+          "project declares third-party dependencies via a package manifest"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "DEPENDENCY_SCANNER"
+        ],
+        "dynamic_required": false,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "dependency manifest/lockfile is scanned against a known-vulnerability database with no unresolved critical/high finding"
+      ]
+    },
+    {
+      "id": "SEC-061",
+      "source_number": 61,
+      "slug": "malicious-or-compromised-dependency",
+      "title": "Malicious or Compromised Dependency",
+      "severity": "CRITICAL",
+      "source_summary": {
+        "what_it_is": "A package or update contains intentionally harmful code or has been compromised upstream.",
+        "usual_cause": "Developers install unverified packages, typosquatted names, or automatically accept risky updates.",
+        "potential_impact": "Build systems, secrets, production data, or users may be compromised.",
+        "prevention": "Minimize dependencies, verify package identity/provenance, lock versions, review major changes, restrict install scripts, and protect CI secrets."
+      },
+      "applicability": {
+        "signals": [
+          "project declares third-party dependencies via a package manifest"
+        ],
+        "notes": "Confirming malicious intent (vs. a benign vulnerability) generally exceeds what an automated scanner can conclude alone."
+      },
+      "verification": {
+        "modes": [
+          "DEPENDENCY_SCANNER",
+          "SEMANTIC_REVIEW"
+        ],
+        "dynamic_required": false,
+        "human_judgment_required": true
+      },
+      "required_evidence": [
+        "dependency provenance/integrity is checked (lockfile hash pinning, publisher reputation)",
+        "review of newly-added or recently-changed dependencies for signs of compromise"
+      ]
+    },
+    {
+      "id": "SEC-062",
+      "source_number": 62,
+      "slug": "dependency-confusion",
+      "title": "Dependency Confusion",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "A build installs an attacker-controlled public package instead of the intended private package.",
+        "usual_cause": "Private package names overlap with public registries and registry precedence/scoping is misconfigured.",
+        "potential_impact": "Malicious code may run during build or deployment.",
+        "prevention": "Use scoped private packages, explicit registry configuration, lockfiles, and controlled package publishing."
+      },
+      "applicability": {
+        "signals": [
+          "project resolves internal/private package names from a public package registry"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "DEPENDENCY_SCANNER",
+          "INFRA_CONFIG"
+        ],
+        "dynamic_required": false,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "internal/private package names are published to a private/scoped registry or otherwise reserved so a public package of the same name cannot be resolved instead"
+      ]
+    },
+    {
+      "id": "SEC-063",
+      "source_number": 63,
+      "slug": "exposed-source-maps-build-artifacts",
+      "title": "Exposed Source Maps / Build Artifacts",
+      "severity": "MEDIUM",
+      "source_summary": {
+        "what_it_is": "Production publishes development artifacts that reveal source code, paths, or internal structure.",
+        "usual_cause": "Source maps, debug bundles, backup files, or build metadata are deployed publicly.",
+        "potential_impact": "Attackers gain easier insight into application internals and sometimes secrets accidentally embedded in builds.",
+        "prevention": "Do not publish unnecessary source maps/artifacts publicly; if source maps are needed for monitoring, keep them private with the monitoring provider."
+      },
+      "applicability": {
+        "signals": [
+          "project builds a frontend bundle with a build tool that can emit source maps"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "production build does not publish source maps or other build artifacts (README fragments, .git) alongside the deployed bundle",
+        "negative test proving a source-map/build-artifact URL is not publicly fetchable in production"
+      ]
+    },
+    {
+      "id": "SEC-064",
+      "source_number": 64,
+      "slug": "exposed-env-git-backup-or-config-files",
+      "title": "Exposed .env, Git, Backup, or Config Files",
+      "severity": "CRITICAL",
+      "source_summary": {
+        "what_it_is": "Sensitive project files are reachable from the public web server.",
+        "usual_cause": "Deployment copies hidden files, backups, repositories, or configuration into the served directory.",
+        "potential_impact": "Secrets, source code, or configuration may leak.",
+        "prevention": "Keep sensitive files outside the web root, block dotfiles/backups, and configure deployment allowlists."
+      },
+      "applicability": {
+        "signals": [
+          "app is deployed behind a public web server"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "DETERMINISTIC_REPO",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "deployment excludes .env, .git, backup, and config files from the public web root",
+        "negative test proving common sensitive file paths (.env, .git/config, backup archives) are not publicly fetchable"
+      ]
+    },
+    {
+      "id": "SEC-065",
+      "source_number": 65,
+      "slug": "cloud-database-service-role-key-exposure",
+      "title": "Cloud / Database Service Role Key Exposure",
+      "severity": "CRITICAL",
+      "source_summary": {
+        "what_it_is": "A highly privileged cloud or backend key is exposed to untrusted clients.",
+        "usual_cause": "Service-role/admin credentials are placed in frontend code, mobile/browser configuration, logs, or public repositories.",
+        "potential_impact": "Attackers may bypass normal access controls and gain broad backend access.",
+        "prevention": "Keep service/admin keys server-only, rotate exposed keys, and use public/anon keys only with strong backend policies."
+      },
+      "applicability": {
+        "signals": [
+          "app uses a cloud provider or database service that issues an elevated/service-role key"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "SECRET_SCANNER",
+          "INFRA_CONFIG"
+        ],
+        "dynamic_required": false,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "service-role/elevated keys are never shipped to a client build or committed to source, only used server-side"
+      ]
+    },
+    {
+      "id": "SEC-066",
+      "source_number": 66,
+      "slug": "database-row-level-security-misconfiguration",
+      "title": "Database Row-Level Security Misconfiguration",
+      "severity": "CRITICAL",
+      "source_summary": {
+        "what_it_is": "Database-level access policies allow users to read or modify rows they should not access.",
+        "usual_cause": "RLS is disabled, policies use overly broad conditions, or write checks are missing.",
+        "potential_impact": "Cross-user or cross-tenant data exposure and modification may occur.",
+        "prevention": "Enable RLS where applicable, define explicit SELECT/INSERT/UPDATE/DELETE policies, use correct USING/WITH CHECK semantics, and test with multiple users."
+      },
+      "applicability": {
+        "signals": [
+          "app uses a database with row-level security policies (e.g. Postgres RLS/Supabase)"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "DYNAMIC_DB",
+          "SEMANTIC_REVIEW"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "row-level security is enabled on tables containing user-scoped data, with policies enforced at the database layer",
+        "runtime test with multiple identities proving one user's database session cannot read/write another user's rows"
+      ]
+    },
+    {
+      "id": "SEC-067",
+      "source_number": 67,
+      "slug": "multi-tenant-data-isolation-failure",
+      "title": "Multi-Tenant Data Isolation Failure",
+      "severity": "CRITICAL",
+      "source_summary": {
+        "what_it_is": "One organization's users can access another organization's data.",
+        "usual_cause": "Tenant identifiers are trusted from the client or not included consistently in authorization/database policies.",
+        "potential_impact": "A single customer may expose or modify another customer's data.",
+        "prevention": "Derive tenant membership from trusted server/session data and enforce tenant isolation at every data-access layer."
+      },
+      "applicability": {
+        "signals": [
+          "organizations/workspaces/tenants share an application data plane"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "DYNAMIC_DB",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "every data access path filters by the caller's tenant, enforced server-side or at the database layer",
+        "cross-tenant negative access test proving tenant A cannot read/write tenant B's data"
+      ]
+    },
+    {
+      "id": "SEC-068",
+      "source_number": 68,
+      "slug": "webhook-signature-verification-missing",
+      "title": "Webhook Signature Verification Missing",
+      "severity": "CRITICAL",
+      "source_summary": {
+        "what_it_is": "The app accepts webhook requests without proving they came from the real provider.",
+        "usual_cause": "Webhook signatures/secrets are ignored or verified incorrectly.",
+        "potential_impact": "Attackers may forge events such as payments, subscriptions, or account changes.",
+        "prevention": "Use the provider's official signature-verification method on the raw request body, reject invalid/timestamp-stale events, and protect against replay."
+      },
+      "applicability": {
+        "signals": [
+          "app receives inbound webhooks from a third-party provider"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "DYNAMIC_API",
+          "SEMANTIC_REVIEW"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "inbound webhook handler verifies the provider's signature before processing the payload",
+        "negative test proving a request with a missing/invalid signature is rejected"
+      ]
+    },
+    {
+      "id": "SEC-069",
+      "source_number": 69,
+      "slug": "webhook-replay-duplicate-processing",
+      "title": "Webhook Replay / Duplicate Processing",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "A valid webhook can be resent and processed multiple times.",
+        "usual_cause": "Events are not deduplicated or state changes are not idempotent.",
+        "potential_impact": "Payments, credits, emails, or other actions may happen repeatedly.",
+        "prevention": "Store provider event IDs, process idempotently, use unique constraints/transactions, and safely acknowledge duplicates."
+      },
+      "applicability": {
+        "signals": [
+          "app receives inbound webhooks from a third-party provider"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "DYNAMIC_API",
+          "SEMANTIC_REVIEW"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "webhook processing is idempotent, keyed on a unique event id",
+        "replay test proving the same webhook event delivered twice does not double-apply its effect"
+      ]
+    },
+    {
+      "id": "SEC-070",
+      "source_number": 70,
+      "slug": "payment-amount-price-tampering",
+      "title": "Payment Amount / Price Tampering",
+      "severity": "CRITICAL",
+      "source_summary": {
+        "what_it_is": "The backend trusts a price or total supplied by the browser.",
+        "usual_cause": "Checkout requests accept client-calculated amounts, discounts, currency, or product prices.",
+        "potential_impact": "Attackers may pay less than intended or obtain incorrect entitlements.",
+        "prevention": "Look up product/price data server-side and create payment sessions from trusted records; verify completed events before granting access."
+      },
+      "applicability": {
+        "signals": [
+          "app has a checkout/payment flow where a client influences an amount or price"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "PROVIDER_SANDBOX",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "the charged amount/price is computed and verified server-side from trusted data, never trusted from a client-supplied value",
+        "negative test in a payment provider sandbox proving a tampered client-side amount does not change the amount actually charged"
+      ]
+    },
+    {
+      "id": "SEC-071",
+      "source_number": 71,
+      "slug": "payment-webhook-entitlement-logic-failure",
+      "title": "Payment Webhook / Entitlement Logic Failure",
+      "severity": "CRITICAL",
+      "source_summary": {
+        "what_it_is": "The app grants paid access based on an untrusted browser response or incomplete payment state.",
+        "usual_cause": "Success pages, client callbacks, or loosely validated webhook fields directly activate subscriptions/products.",
+        "potential_impact": "Users may obtain paid features without a valid completed payment.",
+        "prevention": "Use verified server-side provider events as the source of truth and map them to known orders/customers."
+      },
+      "applicability": {
+        "signals": [
+          "app grants entitlements/access based on a payment provider webhook event"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "PROVIDER_SANDBOX",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "entitlement is granted only after the provider webhook signature and event state are verified server-side",
+        "negative test in a payment provider sandbox proving a forged/failed-payment event does not grant entitlement"
+      ]
+    },
+    {
+      "id": "SEC-072",
+      "source_number": 72,
+      "slug": "insecure-api-key-authentication",
+      "title": "Insecure API Key Authentication",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "An API key is treated as a permanent password without sufficient protection or scope.",
+        "usual_cause": "Keys are long-lived, broadly privileged, stored plaintext, sent in URLs, or cannot be revoked.",
+        "potential_impact": "A leaked key may provide broad persistent access.",
+        "prevention": "Generate high-entropy keys, show once, store hashed values, scope permissions, support rotation/revocation, and transmit only over HTTPS headers."
+      },
+      "applicability": {
+        "signals": [
+          "app authenticates API clients using a static API key"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "STATIC_ANALYZER",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "API keys are transmitted over TLS only, stored hashed server-side, and independently revocable",
+        "negative test proving a revoked/invalid API key is rejected"
+      ]
+    },
+    {
+      "id": "SEC-073",
+      "source_number": 73,
+      "slug": "missing-api-authorization-scope-checks",
+      "title": "Missing API Authorization Scope Checks",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "An authenticated API credential can perform actions outside its intended scope.",
+        "usual_cause": "The server verifies that a token/key is valid but does not enforce scopes/permissions per endpoint.",
+        "potential_impact": "Integrations or leaked tokens gain excessive capabilities.",
+        "prevention": "Define least-privilege scopes and enforce required scopes server-side on every endpoint."
+      },
+      "applicability": {
+        "signals": [
+          "app issues API keys/tokens with different scopes/permissions"
+        ]
+      },
+      "verification": {
+        "modes": [
+          "SEMANTIC_REVIEW",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "each API endpoint checks the caller's token scope, not merely that a token is valid",
+        "negative test proving a token without the required scope is rejected by a scope-restricted endpoint"
+      ]
+    },
+    {
+      "id": "SEC-074",
+      "source_number": 74,
+      "slug": "insecure-ai-llm-tool-authorization",
+      "title": "Insecure AI/LLM Tool Authorization",
+      "severity": "CRITICAL",
+      "source_summary": {
+        "what_it_is": "An AI feature can invoke tools or backend actions with more authority than the requesting user should have.",
+        "usual_cause": "The model is trusted to decide permissions, or tools run with broad service credentials without per-user authorization.",
+        "potential_impact": "Prompt manipulation or model mistakes may cause unauthorized data access or actions.",
+        "prevention": "Treat the model as untrusted orchestration. Enforce normal server-side authorization inside every tool/action and minimize tool privileges."
+      },
+      "applicability": {
+        "signals": [
+          "app gives an LLM/agent the ability to call tools or access data on a user's behalf"
+        ],
+        "notes": "Model output is untrusted. Authorization must be enforced outside the model; a system prompt restricting tool use is not itself a security boundary."
+      },
+      "verification": {
+        "modes": [
+          "SEMANTIC_REVIEW",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "tool-call authorization is enforced by code outside the model, using the caller's real permissions, not the model's own output",
+        "negative test proving a tool call the model attempts outside the caller's authorization is rejected by the enforcement layer, not merely discouraged by a prompt"
+      ]
+    },
+    {
+      "id": "SEC-075",
+      "source_number": 75,
+      "slug": "prompt-injection-causing-unsafe-tool-use",
+      "title": "Prompt Injection Causing Unsafe Tool Use",
+      "severity": "HIGH",
+      "source_summary": {
+        "what_it_is": "Untrusted content manipulates an AI feature into ignoring intended instructions or attempting unsafe actions.",
+        "usual_cause": "The app gives an LLM access to tools/data and assumes prompts alone are a security boundary.",
+        "potential_impact": "The model may attempt unauthorized tool calls, disclose data it was given, or take unintended actions.",
+        "prevention": "Do not rely on system prompts for authorization. Isolate untrusted content, constrain tools, validate outputs, and enforce permissions outside the model."
+      },
+      "applicability": {
+        "signals": [
+          "app feeds untrusted content (user input, retrieved documents, tool output) into an LLM that can call tools or take actions"
+        ],
+        "notes": "A prevention prompt telling the model to ignore injected instructions is source material, not proof; enforcement must happen outside model reasoning."
+      },
+      "verification": {
+        "modes": [
+          "SEMANTIC_REVIEW",
+          "DYNAMIC_API"
+        ],
+        "dynamic_required": true,
+        "human_judgment_required": false
+      },
+      "required_evidence": [
+        "untrusted content is isolated from trusted instructions and cannot itself grant tool permissions",
+        "negative test proving injected instructions embedded in untrusted content do not result in an unauthorized tool call"
+      ]
+    }
+  ]
+}

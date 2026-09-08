@@ -88,6 +88,11 @@
 !diana/playwright/fixtures/app-broken/*.html
 !diana/templates/
 !diana/templates/*.md
+!diana/security/
+!diana/security/*.md
+!diana/security/*.json
+!diana/security/*.py
+!diana/security/*.sh
 
 # Explicit reminders for common files that must never be published here.
 .env
