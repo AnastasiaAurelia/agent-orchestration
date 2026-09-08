@@ -101,16 +101,18 @@ status is *computed* by `dynamic_normalizer.evaluate_scenario()` from the
 raw `assertions` outcomes, never read directly from the artifact. An
 artifact can only report what happened, not its own conclusion.
 
-## Scope: 17 controls, the dynamic half of each contract
+## Scope: 23 controls, the dynamic half of each contract
 
-Each of the 17 registered scenarios covers only the *dynamic* required_
-evidence item of its control -- every one of these controls' catalog
-entries has exactly one requirement that is inherently a runtime/
+Each of the 23 registered scenarios (17 from Security Phase 3, plus 6
+added in Security Track remediation round A for `SEC-010`, `SEC-011`,
+`SEC-021`, `SEC-035`, `SEC-058`, `SEC-064`) covers only the *dynamic*
+required_evidence item of its control -- every one of these controls'
+catalog entries has exactly one requirement that is inherently a runtime/
 negative-test claim, and one that is typically a static/semantic code-fact
 claim. This mirrors Phase 2's Gitleaks adapter, which only ever covered
 part of SEC-007's contract: a thin, uniform, table-driven normalizer
-handling 17 controls consistently is preferred over 17 bespoke
-implementations, and a single scenario's evidence composes with a
+handling these controls consistently is preferred over one bespoke
+implementation per control, and a single scenario's evidence composes with a
 different verifier's contribution for the other requirement through
 `evidence_model.py`'s existing multi-run aggregation -- no new machinery
 needed. `test-dynamic.sh`'s PASS-expecting cases demonstrate this
@@ -231,7 +233,7 @@ merely because the normalizer guessed wrong.
   `diana/adapters` (the pre-existing AO adapter).
 - Does not change `diana/security/catalog.json`, `validate_catalog.py`,
   `evidence_model.py`, or anything under `diana/security/adapters/`.
-- Does not claim broader coverage than the 17 controls above, and does
+- Does not claim broader coverage than the 23 controls above, and does
   not claim to fully prove even those (only their dynamic-evidence half).
 
 ## CLI
@@ -249,7 +251,7 @@ for `PASS`/`FAIL` attribution to ever be possible. Prints
 
 ## Tests
 
-`test-dynamic.sh` (42 assertions, offline, synthetic fixtures under
+`test-dynamic.sh` (60 assertions, offline, synthetic fixtures under
 `fixtures/*.json`) covers CASE A-Y (the originally required set:
 environment refusal/acceptance, wrong target, skipped assertion,
 execution crash, authorization-denied-with-state-unchanged,
@@ -264,4 +266,8 @@ environment-mismatch-blocks-attribution (E1-E3), per-control
 unavailable-verifier capability correctness (E4-E7), and cleanup-failure-
 blocks-PASS (E8-E11). E1-E3 and E9 specifically supersede the original
 implementation's CASE W, which incorrectly allowed a `SATISFIED` result
-alongside a visible cleanup failure.
+alongside a visible cleanup failure. **R1-R3** (Security Track
+remediation round A) prove the 6 new scenarios: assertion PASSED ->
+`SATISFIED` contribution (still `UNPROVEN` alone -- the 2nd, typically
+static, requirement is still needed), correct `verifier.type=DYNAMIC_API`
+reporting, and assertion FAILED -> `FAIL`.

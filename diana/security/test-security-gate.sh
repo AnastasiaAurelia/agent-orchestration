@@ -227,8 +227,15 @@ fi
 # T2: a checked-in fake semantic-review artifact with a structurally VALID
 # artifact_binding hash is not trusted merely because it exists on disk --
 # ci_verifier_runs.py takes no arguments, reads no PR-supplied file, and
-# always returns the same result regardless of what fake evidence files
-# are present anywhere in the working tree.
+# its output is never influenced by what fake evidence files are present
+# anywhere in the working tree. Since Security Track remediation round A
+# wired real (network-dependent) Semgrep execution in, this no longer
+# asserts a fixed "[]" baseline -- it instead asserts the planted fake
+# SEC-074 PASS claim never appears in the real output at all, and that
+# every control_id the real output DOES mention is confined to
+# ci_verifier_runs.py's own known, fixed LIVE_CONTROL_IDS set (proving
+# the fake file contributed nothing, regardless of whether Semgrep itself
+# was available in this environment).
 python3 -c "
 import hashlib, json
 env = {
@@ -251,11 +258,25 @@ canonical = json.dumps(env, sort_keys=True, separators=(',', ':'))
 env['artifact_binding'] = {'sha256': hashlib.sha256(canonical.encode()).hexdigest()}
 json.dump(env, open('$TMP_DIR/fake-semantic-evidence.json', 'w'))
 "
-t2_output="$(cd "$TMP_DIR" && python3 "$CI_RUNS_PY")"
-if [ "$t2_output" = "[]" ]; then
-  pass "T2: checked-in fake semantic PASS (valid artifact_binding) is not trusted -- ci_verifier_runs.py output unaffected"
+t2_output="$(cd "$TMP_DIR" && timeout 150 python3 "$CI_RUNS_PY" 2>/dev/null || echo '[]')"
+t2_ok="$(python3 -c "
+import json, sys
+sys.path.insert(0, '$SEC_DIR')
+import ci_verifier_runs
+try:
+    runs = json.loads('''$t2_output''')
+except json.JSONDecodeError:
+    print('False')
+else:
+    control_ids = {r.get('control_id') for r in runs if isinstance(r, dict)}
+    no_fake_sec074 = 'SEC-074' not in control_ids
+    only_known = control_ids <= set(ci_verifier_runs.LIVE_CONTROL_IDS)
+    print(no_fake_sec074 and only_known)
+")"
+if [ "$t2_ok" = "True" ]; then
+  pass "T2: checked-in fake semantic PASS (valid artifact_binding) is not trusted -- ci_verifier_runs.py output unaffected (no SEC-074, only known live control_ids)"
 else
-  fail "T2: expected ci_verifier_runs.py output [] regardless of a planted fake artifact, got: $t2_output"
+  fail "T2: expected ci_verifier_runs.py output to be unaffected by the planted fake artifact, got: $t2_output"
 fi
 
 # T3: missing trusted semantic verifier -> UNPROVEN, specifically for an
@@ -356,7 +377,7 @@ fi
 # real HIGH severity and honest UNPROVEN-driven REQUIRE_HUMAN decision,
 # never the head's fake always-PASS output or weakened severity.
 S3_REPO="$TMP_DIR/s3-repo"
-mkdir -p "$S3_REPO/diana/security"
+mkdir -p "$S3_REPO/diana/security/adapters" "$S3_REPO/diana/security/verifiers"
 git -C "$S3_REPO" init -q
 git -C "$S3_REPO" config user.email test@test.com
 git -C "$S3_REPO" config user.name test
@@ -366,6 +387,12 @@ cp "$SEC_DIR/evidence_model.py" "$S3_REPO/diana/security/evidence_model.py"
 cp "$BUNDLE_PY" "$S3_REPO/diana/security/security_bundle.py"
 cp "$REDUCER_PY" "$S3_REPO/diana/security/security_reducer.py"
 cp "$CI_RUNS_PY" "$S3_REPO/diana/security/ci_verifier_runs.py"
+# Security Track remediation round A: ci_verifier_runs.py now genuinely
+# imports these to run live Semgrep execution -- without them it cannot
+# even be imported, so this scratch trusted-base repo needs them too.
+cp "$SEC_DIR/adapters/adapter_base.py" "$S3_REPO/diana/security/adapters/adapter_base.py"
+cp "$SEC_DIR/adapters/semgrep_adapter.py" "$S3_REPO/diana/security/adapters/semgrep_adapter.py"
+cp "$SEC_DIR/verifiers/semgrep-rules.yml" "$S3_REPO/diana/security/verifiers/semgrep-rules.yml"
 git -C "$S3_REPO" add diana/security
 git -C "$S3_REPO" commit -q -m "trusted base state"
 S3_BASE_SHA="$(git -C "$S3_REPO" rev-parse HEAD)"

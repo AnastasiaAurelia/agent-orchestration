@@ -326,6 +326,65 @@ check_aggregate_with_companion "E10: cleanup required and successfully resolved 
 check_aggregate_with_companion "E11: cleanup not required -> no cleanup failure regardless of performed/success" \
   "$FIXTURES/case-e11-cleanup-not-required.json" "$EXPECTED_TEST" SEC-001 "$SEC001_OTHER_REQ" SEMANTIC_REVIEW
 
+# ==================================================================
+# R1-R6: Security Track remediation round A -- 6 new scenarios
+# (SEC-010, SEC-011, SEC-021, SEC-035, SEC-058, SEC-064)
+# ==================================================================
+
+build_scenario_artifact() {
+  # build_scenario_artifact <out_file> <scenario_id> <control_id> <requirement> <assertion_id> <outcome>
+  local out_file="$1" scenario_id="$2" control_id="$3" requirement="$4" assertion_id="$5" outcome="$6"
+  python3 -c "
+import hashlib, json
+
+env = {
+    'environment': 'TEST',
+    'target': {
+        'repository': 'AnastasiaAurelia/agent-orchestration',
+        'commit': '6b855b85f5cdca683e1a332eddf40021c83781d5',
+        'base_url': 'http://localhost:8080',
+    },
+    'scenario': {'id': '$scenario_id', 'version': '1.0.0'},
+    'verifier_mode': 'DYNAMIC_API',
+    'identities': [],
+    'execution': {'completed': True},
+    'assertions': [{'id': '$assertion_id', 'outcome': '$outcome'}],
+    'cleanup': {'required': False, 'performed': False, 'success': True},
+    'result': {'control_id': '$control_id', 'requirement': '''$requirement'''},
+}
+bound = {k: env[k] for k in ('environment', 'target', 'scenario', 'verifier_mode', 'identities', 'execution', 'assertions', 'cleanup', 'result')}
+canonical = json.dumps(bound, sort_keys=True, separators=(',', ':'))
+env['artifact_binding'] = {'sha256': hashlib.sha256(canonical.encode()).hexdigest()}
+json.dump(env, open('$out_file', 'w'))
+"
+}
+
+R_SCENARIOS=(
+  "shell-metacharacter-payload-inert|SEC-010|negative test proving a shell metacharacter payload does not execute unintended commands|shell_metacharacter_payload_no_effect"
+  "template-expression-payload-not-evaluated|SEC-011|negative test proving a template-expression payload is not evaluated|template_expression_payload_not_evaluated"
+  "forged-none-algorithm-jwt-rejected|SEC-021|negative test proving a token with a forged/none-algorithm signature is rejected|forged_jwt_rejected"
+  "ssrf-internal-address-request-rejected|SEC-035|negative test proving a request targeting an internal address is rejected|internal_address_request_rejected"
+  "crafted-deserialization-payload-inert|SEC-058|negative test proving a crafted serialized payload does not achieve code execution or object injection|crafted_payload_no_code_execution"
+  "sensitive-file-paths-not-fetchable|SEC-064|negative test proving common sensitive file paths (.env, .git/config, backup archives) are not publicly fetchable|sensitive_file_paths_not_fetchable"
+)
+
+for entry in "${R_SCENARIOS[@]}"; do
+  IFS='|' read -r scenario_id control_id requirement assertion_id <<< "$entry"
+  build_scenario_artifact "$TMP_DIR/r-${scenario_id}-passed.json" "$scenario_id" "$control_id" "$requirement" "$assertion_id" PASSED
+  check_aggregate "R1 ($control_id): $scenario_id assertion PASSED -> SATISFIED contribution (UNPROVEN alone, 2nd requirement needed)" \
+    "$TMP_DIR/r-${scenario_id}-passed.json" "$EXPECTED_TEST" UNPROVEN "$control_id"
+  run_verifier="$(run_verifier_type "$TMP_DIR/norm_out.json" "$control_id")"
+  if [ "$run_verifier" = "DYNAMIC_API" ]; then
+    pass "R2 ($control_id): $scenario_id reports verifier.type=DYNAMIC_API"
+  else
+    fail "R2 ($control_id): expected verifier.type=DYNAMIC_API, got $run_verifier"
+  fi
+
+  build_scenario_artifact "$TMP_DIR/r-${scenario_id}-failed.json" "$scenario_id" "$control_id" "$requirement" "$assertion_id" FAILED
+  check_aggregate "R3 ($control_id): $scenario_id assertion FAILED -> FAIL" \
+    "$TMP_DIR/r-${scenario_id}-failed.json" "$EXPECTED_TEST" FAIL "$control_id"
+done
+
 echo ""
 echo "diana/security/dynamic/test-dynamic.sh: $pass_count passed, $fail_count failed"
 

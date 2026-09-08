@@ -19,7 +19,23 @@ BASE_SHA="b8ab35e74d3391a85edaaec2822f000cfc12a62e"
 TARGET_SHA="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
 run_matrix() {
-  python3 "$MATRIX_PY" "$CATALOG" "$REPO" "$BASE_SHA" "$TARGET_SHA"
+  # Deterministic, offline: injects runs=[] directly via build_matrix()
+  # rather than shelling out to the CLI (main()), which -- since Security
+  # Track remediation round A -- calls the real, network-dependent
+  # ci_verifier_runs.collect_trusted_runs(). M1-M12 below test this
+  # function's own logic (matrix shape, determinism, capability
+  # accounting, anti-fabrication invariants) against a FIXED, known input,
+  # decoupled from whether semgrep/network happens to be available when
+  # this suite runs. The real CLI path is separately, non-fatally proven
+  # by the "real end-to-end" check at the bottom of this file.
+  python3 -c "
+import json, sys
+sys.path.insert(0, '$SEC_DIR')
+import coverage_matrix
+catalog = json.load(open('$CATALOG'))
+matrix = coverage_matrix.build_matrix(catalog, '$REPO', '$BASE_SHA', '$TARGET_SHA', runs=[])
+print(json.dumps(matrix, sort_keys=True))
+"
 }
 
 run_matrix > "$TMP_DIR/matrix.json"
@@ -82,34 +98,40 @@ else
   fail "M5: resulting_state_counts do not match the expected all-UNPROVEN distribution"
 fi
 
-# M6: live_execution_exists is False for every control -- track-wide,
-# honest fact (no phase has ever installed/run a live tool, browser, DB,
-# or model).
+# M6: with runs=[] explicitly injected (this suite's deterministic,
+# offline baseline -- see run_matrix() above), live_execution_exists is
+# False for every control and live_execution_wired_count is 0. This
+# specifically tests the "zero runs submitted" degenerate case, not a
+# track-wide claim that live execution never exists anywhere (Security
+# Track remediation round A wired real Semgrep execution into the actual
+# CLI path -- see the real end-to-end check at the bottom of this file).
 all_no_live="$(python3 -c "
 import json
 m = json.load(open('$TMP_DIR/matrix.json'))
 print(all(r['live_execution_exists'] is False for r in m['rows']) and m['live_execution_wired_count'] == 0)
 ")"
 if [ "$all_no_live" = "True" ]; then
-  pass "M6: live_execution_exists is False for all 75 controls, live_execution_wired_count = 0"
+  pass "M6: with runs=[] injected, live_execution_exists is False for all 75 controls, wired_count = 0"
 else
-  fail "M6: expected live_execution_exists=False uniformly and wired_count=0"
+  fail "M6: expected live_execution_exists=False uniformly and wired_count=0 for the runs=[] baseline"
 fi
 
 # M7: capability_coverage_counts sum to 75 and match the known, manually-
-# cross-checked distribution for the current catalog + Phase 2-4
-# implementation (regression pin -- a real change to any adapter,
-# scenario registry, or reviewer authorization should change these
-# numbers, and this test should be updated deliberately, not silently).
+# cross-checked distribution for the current catalog + Phase 2-4 + Phase
+# 6 remediation round A implementation (regression pin -- a real change
+# to any adapter, scenario registry, or reviewer authorization should
+# change these numbers, and this test should be updated deliberately,
+# not silently). capability_coverage is a STATIC fact independent of
+# `runs`, so this is unaffected by run_matrix()'s runs=[] injection.
 coverage_ok="$(python3 -c "
 import json
 m = json.load(open('$TMP_DIR/matrix.json'))
 c = m['capability_coverage_counts']
 total = c['FULLY_COVERED'] + c['PARTIALLY_COVERED'] + c['NOT_COVERED']
-print(total == 75 and c == {'FULLY_COVERED': 21, 'PARTIALLY_COVERED': 25, 'NOT_COVERED': 29})
+print(total == 75 and c == {'FULLY_COVERED': 26, 'PARTIALLY_COVERED': 26, 'NOT_COVERED': 23})
 ")"
 if [ "$coverage_ok" = "True" ]; then
-  pass "M7: capability_coverage_counts = {FULLY_COVERED:21, PARTIALLY_COVERED:25, NOT_COVERED:29}, sum=75"
+  pass "M7: capability_coverage_counts = {FULLY_COVERED:26, PARTIALLY_COVERED:26, NOT_COVERED:23}, sum=75"
 else
   fail "M7: capability_coverage_counts do not match the expected regression-pinned distribution"
   python3 -c "import json; print(json.load(open('$TMP_DIR/matrix.json'))['capability_coverage_counts'])" >&2
@@ -188,25 +210,69 @@ else
   fail "M11: expected non-zero exit + error field for a malformed catalog"
 fi
 
-# M12: identity check against the real, independently-invoked
-# security_bundle.py CLI -- the matrix's resulting_state must match
-# exactly what a direct, separate invocation of the shipped pipeline
-# produces (proving coverage_matrix.py isn't silently diverging from the
-# real Security Gate evaluation it's reporting on).
-python3 "$SEC_DIR/ci_verifier_runs.py" > "$TMP_DIR/real-runs.json"
-python3 "$SEC_DIR/security_bundle.py" "$CATALOG" "$TMP_DIR/real-runs.json" "$REPO" "$BASE_SHA" "$TARGET_SHA" > "$TMP_DIR/real-bundle.json"
+# M12: identity check against a direct, independent security_bundle.py
+# invocation fed the SAME FIXED (non-empty, deterministic) runs list --
+# the matrix's resulting_state must match exactly what a direct, separate
+# invocation of the shipped pipeline produces for identical input,
+# proving coverage_matrix.py isn't silently diverging from the real
+# Security Gate evaluation it's reporting on. Uses an explicit fixed
+# run (not [], to also prove the non-degenerate case) rather than the
+# real, network-dependent ci_verifier_runs.py, keeping this suite
+# deterministic and offline.
+python3 -c "
+import json
+runs = [{
+    'control_id': 'SEC-058',
+    'applicability': 'APPLICABLE',
+    'verifier': {'type': 'STATIC_ANALYZER', 'identity': 'test-fixed-run'},
+    'evidence': [{'requirement': 'deserialization of untrusted input uses a safe/restricted format or schema, not an unrestricted native object deserializer', 'status': 'SATISFIED', 'provenance': 'fixed test run'}],
+    'tool_error': None,
+}]
+json.dump(runs, open('$TMP_DIR/fixed-runs.json', 'w'))
+"
+python3 "$SEC_DIR/security_bundle.py" "$CATALOG" "$TMP_DIR/fixed-runs.json" "$REPO" "$BASE_SHA" "$TARGET_SHA" > "$TMP_DIR/fixed-bundle.json"
+matrix_with_fixed_runs="$(python3 -c "
+import json, sys
+sys.path.insert(0, '$SEC_DIR')
+import coverage_matrix
+catalog = json.load(open('$CATALOG'))
+runs = json.load(open('$TMP_DIR/fixed-runs.json'))
+matrix = coverage_matrix.build_matrix(catalog, '$REPO', '$BASE_SHA', '$TARGET_SHA', runs=runs)
+json.dump(matrix, open('$TMP_DIR/matrix-fixed-runs.json', 'w'))
+"
+)"
 identity_check="$(python3 -c "
 import json
-bundle = json.load(open('$TMP_DIR/real-bundle.json'))
-matrix = json.load(open('$TMP_DIR/matrix.json'))
+bundle = json.load(open('$TMP_DIR/fixed-bundle.json'))
+matrix = json.load(open('$TMP_DIR/matrix-fixed-runs.json'))
 bundle_states = {r['control_id']: r['result'] for r in bundle['results']}
 matrix_states = {r['control_id']: r['resulting_state'] for r in matrix['rows']}
 print(bundle_states == matrix_states)
 ")"
 if [ "$identity_check" = "True" ]; then
-  pass "M12: matrix resulting_state matches a direct, independent security_bundle.py invocation exactly"
+  pass "M12: matrix resulting_state matches a direct, independent security_bundle.py invocation exactly (fixed non-empty runs)"
 else
   fail "M12: matrix resulting_state diverges from a direct security_bundle.py invocation"
+fi
+
+# ==================================================================
+# Real, network-dependent end-to-end check (SKIPS gracefully, never
+# fails the suite, if network/pip install isn't available -- M1-M12
+# above already prove the logic deterministically and offline; this
+# additionally proves the real CLI path, calling the real
+# ci_verifier_runs.collect_trusted_runs(), actually reflects live
+# execution when it can run).
+# ==================================================================
+
+if timeout 150 python3 "$MATRIX_PY" "$CATALOG" "$REPO" "$BASE_SHA" "$TARGET_SHA" > "$TMP_DIR/real-matrix.json" 2>/dev/null; then
+  real_wired="$(python3 -c "import json; print(json.load(open('$TMP_DIR/real-matrix.json'))['live_execution_wired_count'])" 2>/dev/null || echo "parse-error")"
+  if [ "$real_wired" = "parse-error" ]; then
+    fail "real end-to-end: coverage_matrix.py CLI did not print valid JSON"
+  else
+    pass "real end-to-end: coverage_matrix.py CLI (real ci_verifier_runs.py) ran; live_execution_wired_count=$real_wired (4 if semgrep installed+ran; 0 if genuinely unavailable in this environment -- both honest)"
+  fi
+else
+  echo "SKIP: real end-to-end coverage_matrix.py CLI (network/pip install unavailable in this environment -- M1-M12 above already cover the logic)"
 fi
 
 echo ""

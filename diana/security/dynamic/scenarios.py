@@ -173,4 +173,47 @@ SCENARIO_REGISTRY: dict[str, dict] = {
         "required_identities": {"USER_A"},
         "requires_model_attempt": True,
     },
+    # -- Security Track remediation round A additions -------------------
+    "shell-metacharacter-payload-inert": {
+        "control_id": "SEC-010",
+        "requirement": "negative test proving a shell metacharacter payload does not execute unintended commands",
+        "allowed_verifier_modes": {"DYNAMIC_API"},
+        "required_assertions": ["shell_metacharacter_payload_no_effect"],
+        "required_identities": set(),
+    },
+    "template-expression-payload-not-evaluated": {
+        "control_id": "SEC-011",
+        "requirement": "negative test proving a template-expression payload is not evaluated",
+        "allowed_verifier_modes": {"DYNAMIC_API"},
+        "required_assertions": ["template_expression_payload_not_evaluated"],
+        "required_identities": set(),
+    },
+    "forged-none-algorithm-jwt-rejected": {
+        "control_id": "SEC-021",
+        "requirement": "negative test proving a token with a forged/none-algorithm signature is rejected",
+        "allowed_verifier_modes": {"DYNAMIC_API"},
+        "required_assertions": ["forged_jwt_rejected"],
+        "required_identities": set(),
+    },
+    "ssrf-internal-address-request-rejected": {
+        "control_id": "SEC-035",
+        "requirement": "negative test proving a request targeting an internal address is rejected",
+        "allowed_verifier_modes": {"DYNAMIC_API"},
+        "required_assertions": ["internal_address_request_rejected"],
+        "required_identities": set(),
+    },
+    "crafted-deserialization-payload-inert": {
+        "control_id": "SEC-058",
+        "requirement": "negative test proving a crafted serialized payload does not achieve code execution or object injection",
+        "allowed_verifier_modes": {"DYNAMIC_API"},
+        "required_assertions": ["crafted_payload_no_code_execution"],
+        "required_identities": set(),
+    },
+    "sensitive-file-paths-not-fetchable": {
+        "control_id": "SEC-064",
+        "requirement": "negative test proving common sensitive file paths (.env, .git/config, backup archives) are not publicly fetchable",
+        "allowed_verifier_modes": {"DYNAMIC_API"},
+        "required_assertions": ["sensitive_file_paths_not_fetchable"],
+        "required_identities": set(),
+    },
 }

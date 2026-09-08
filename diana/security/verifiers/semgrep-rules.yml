@@ -1,0 +1,75 @@
+# Diana Security -- pinned, explicit Semgrep rules for live trusted
+# verifier execution (Security Track remediation round A).
+#
+# Deliberately NOT `--config=auto` or a `p/...` registry reference: those
+# depend on a live external rule registry at scan time, which is neither
+# deterministic nor reproducible (rules can change or the registry can be
+# unreachable). These rules are committed, versioned source -- exactly
+# what runs is exactly what is reviewed. Scoped to Python only, matching
+# this repository's actual composition; broadening to other languages is
+# future work, not a blocker for this round.
+#
+# Each `id` below is referenced by diana/security/adapters/semgrep_adapter.py's
+# `ILLUSTRATIVE_TEST_ONLY_RULE_MAP` (tests only) and by
+# diana/security/ci_verifier_runs.py's real, production rule_map (the one
+# actually trusted at runtime) -- both must stay in sync with the ids
+# used here, or a real finding/clean-run for these rules would not be
+# attributable to any control at all.
+rules:
+  - id: diana.shell-injection-via-concatenation
+    languages: [python]
+    severity: ERROR
+    message: >-
+      A shell command is built via string concatenation/formatting/f-string
+      interpolation and executed with shell=True (or os.system/os.popen) --
+      maps to SEC-010 (OS Command Injection).
+    patterns:
+      - pattern-either:
+          - pattern: subprocess.run(..., shell=True)
+          - pattern: subprocess.call(..., shell=True)
+          - pattern: subprocess.Popen(..., shell=True)
+          - pattern: os.system(...)
+          - pattern: os.popen(...)
+
+  - id: diana.template-injection-via-render
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Untrusted input is passed to a template engine's string-template
+      constructor/renderer, which interprets it as template SOURCE rather
+      than template DATA -- maps to SEC-011 (Server-Side Template
+      Injection).
+    patterns:
+      - pattern-either:
+          - pattern: jinja2.Template(...)
+          - pattern: flask.render_template_string(...)
+          - pattern: render_template_string(...)
+
+  - id: diana.jwt-unsafe-verification
+    languages: [python]
+    severity: ERROR
+    message: >-
+      JWT decoding disables signature verification or does not pin an
+      expected algorithm set -- maps to SEC-021 (JWT Signature
+      Verification Errors).
+    patterns:
+      - pattern-either:
+          - pattern: jwt.decode(..., verify=False, ...)
+          - pattern: 'jwt.decode(..., options={"verify_signature": False}, ...)'
+          - pattern: jwt.decode($TOKEN, $KEY)
+
+  - id: diana.insecure-deserialization
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Untrusted data is passed to an unrestricted native deserializer
+      (pickle/marshal/unsafe yaml.load) rather than a safe/restricted
+      format or schema -- maps to SEC-058 (Insecure Deserialization).
+    patterns:
+      - pattern-either:
+          - pattern: pickle.loads(...)
+          - pattern: pickle.load(...)
+          - pattern: marshal.loads(...)
+          - pattern: yaml.load($DATA)
+          - pattern: yaml.load($DATA, Loader=yaml.Loader)
+          - pattern: yaml.load($DATA, Loader=yaml.UnsafeLoader)

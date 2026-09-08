@@ -159,15 +159,25 @@ scope) also surfaces as an explicit `UNPROVEN`, not an absent result.
 
 | Adapter | Capability | Tool identity | Authorized for | Why not more |
 |---|---|---|---|---|
-| [`gitleaks_adapter.py`](gitleaks_adapter.py) | `SECRET_SCANNER` | `"gitleaks"` | `SEC-007` requirement 1 only; `SATISFIED` also requires `target.scope == "full-repo"` | requirement 2, and all of `SEC-006`/`SEC-065`, make a scope claim this adapter's model doesn't yet represent |
+| [`gitleaks_adapter.py`](gitleaks_adapter.py) | `SECRET_SCANNER` | `"gitleaks"` | `SEC-007` requirement 1 only; `SATISFIED` also requires `target.scope == "full-repo"` | requirement 2, and all of `SEC-006`/`SEC-065`, make a scope claim this adapter's model doesn't yet represent (still true after Security Track remediation round A -- see that round's README section for why this was deliberately left blocked rather than rushed) |
 | [`osv_scanner_adapter.py`](osv_scanner_adapter.py) | `DEPENDENCY_SCANNER` | `"osv-scanner"` | `SEC-060` (its only requirement); `SATISFIED` also requires `scanned_inputs` to cover every expected manifest | `SEC-061`/`SEC-062` need provenance/registry-reservation checks this tool doesn't do |
-| [`semgrep_adapter.py`](semgrep_adapter.py) | `STATIC_ANALYZER` | `"semgrep"` | `SEC-055`, `SEC-056`, only via a caller-supplied, authorization-checked `config.rule_map` | see "On the Semgrep rule table" |
+| [`semgrep_adapter.py`](semgrep_adapter.py) | `STATIC_ANALYZER` | `"semgrep"` | `SEC-055`, `SEC-056`, plus (Security Track remediation round A) `SEC-010`, `SEC-011`, `SEC-021`, `SEC-058` -- only via a caller-supplied, authorization-checked `config.rule_map` | see "On the Semgrep rule table"; `SEC-035`'s static half was deliberately NOT added -- see `semgrep_adapter.py`'s own module docstring |
+| [`deterministic_repo_adapter.py`](deterministic_repo_adapter.py) (Security Track remediation round A) | `DETERMINISTIC_REPO` | `"diana-deterministic-repo-scan"` (Diana's own internal check, not a third-party tool) | `SEC-064` (its only requirement): a served-path listing contains no sensitive path pattern | a fixed, deliberately narrow pattern set -- see the adapter's own module docstring |
 
 **Trivy was deliberately not built this phase** -- its natural role
 overlaps with `osv_scanner_adapter.py`'s coverage of `SEC-060`, and its
 misconfiguration-scanning surface doesn't have a clean, unambiguous
 single-requirement mapping the way the three adapters above do. Deferred
 to a future, more carefully-scoped change rather than forced.
+
+As of Security Track remediation round A, `semgrep_adapter.py` is also
+the first adapter this repository actually EXECUTES live (via
+`diana/security/ci_verifier_runs.py`, using pinned, committed custom
+rules -- `diana/security/verifiers/semgrep-rules.yml` -- never a live
+external rule registry). Every adapter still, itself, "never installs,
+invokes, or bundles the tool" -- that boundary is unchanged; the new live
+execution lives entirely in `ci_verifier_runs.py`, a separate orchestration
+layer, not in this directory.
 
 ## On the Semgrep rule table
 
