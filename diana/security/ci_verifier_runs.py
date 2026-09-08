@@ -116,6 +116,7 @@ import io
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -136,6 +137,8 @@ import deterministic_repo_adapter  # noqa: E402
 sys.path.insert(0, str(SEC_DIR / "dynamic"))
 import dynamic_normalizer  # noqa: E402
 from scenarios import SCENARIO_REGISTRY  # noqa: E402
+sys.path.insert(0, str(SEC_DIR / "reviewer"))
+import github_review_adapter  # noqa: E402
 
 # The exact BOUND_FIELDS tuple dynamic_base.py uses for its own
 # artifact_binding hash -- duplicated here (not imported) only because
@@ -149,6 +152,25 @@ _SCENARIO_BOUND_FIELDS = (
 
 RULES_PATH = SEC_DIR / "verifiers" / "semgrep-rules.yml"
 GITLEAKS_CONFIG_PATH = SEC_DIR / "verifiers" / "gitleaks-config.toml"
+CATALOG_PATH = SEC_DIR / "catalog.json"
+
+# The real, verified GitHub login this session's credential authenticates
+# as (`gh api user --jq '.login'`) -- a review submitted BY this login is
+# never trusted as independent judgment, regardless of what its review
+# body claims. This is a worker-identity fact, not a secret.
+DIANA_AGENT_LOGIN = "DIANA-AGENT"
+
+# A GitHub review's body must contain one or more of these structured
+# blocks to carry any control-specific judgment at all -- GitHub's own
+# review UI has no per-control concept, so this is the minimum structure
+# a reviewer adds themselves to say WHICH catalog control their
+# Approve/Request-changes state is about, and WHY. A bare "LGTM" (no
+# block at all) parses to zero blocks -> zero contributions, by
+# construction -- never a guess at which control a blank approval might
+# have meant.
+_GITHUB_REVIEW_MARKER_RE = re.compile(
+    r"<!--\s*DIANA:HUMAN-REVIEW\s*(\{.*?\})\s*DIANA:HUMAN-REVIEW\s*-->", re.DOTALL
+)
 
 # The real, production authorization for the Semgrep live-wired run --
 # distinct from semgrep_adapter.ILLUSTRATIVE_TEST_ONLY_RULE_MAP (tests
@@ -375,6 +397,34 @@ def _detect_frontend_bundle_dir(repo_root: str) -> str | None:
     return None
 
 
+def _diag(stage: str, detail: str = "") -> None:
+    """Emits one safe, non-secret diagnostic line to STDERR (never
+    stdout -- stdout is the JSON runs array `diana-security-gate.yml`
+    parses, and nothing here may corrupt it). `stage` is always one of
+    the fixed GITLEAKS_DIAG_STAGES checkpoints (Security Track
+    remediation round D, Priority 2) so a CI log can be grepped for
+    exactly where a run stopped progressing. `detail`, when given, is
+    restricted by every call site below to booleans, counts, exit codes,
+    exception TYPE names, or fixed strings -- never file contents,
+    finding values, tokens, or any other secret-shaped data."""
+    print(f"[gitleaks-diag] {stage}{': ' + detail if detail else ''}", file=sys.stderr)
+
+
+GITLEAKS_DIAG_STAGES = (
+    "ON_PATH_CHECK",
+    "DOWNLOAD_ATTEMPTED",
+    "DOWNLOAD_SUCCEEDED",
+    "CHECKSUM_VERIFIED",
+    "BINARY_EXECUTABLE",
+    "SCAN_LAUNCHED",
+    "SCAN_EXITED_SUCCESSFULLY",
+    "ARTIFACT_PARSED",
+    "NORMALIZED_RUN_PRODUCED",
+    "EVIDENCE_MODEL_ACCEPTED",
+    "CONTROL_CONTRIBUTION_ACCEPTED",
+)
+
+
 def _verify_and_extract_gitleaks(archive_bytes: bytes, dest: Path) -> str | None:
     """Verifies archive_bytes against the pinned GITLEAKS_LINUX_X64_SHA256
     checksum BEFORE extracting anything. Returns the path to the
@@ -383,21 +433,27 @@ def _verify_and_extract_gitleaks(archive_bytes: bytes, dest: Path) -> str | None
     never silently run."""
     actual_sha256 = hashlib.sha256(archive_bytes).hexdigest()
     if actual_sha256 != GITLEAKS_LINUX_X64_SHA256:
+        _diag("CHECKSUM_VERIFIED", f"MISMATCH (downloaded {len(archive_bytes)} bytes; refusing to extract)")
         return None
+    _diag("CHECKSUM_VERIFIED", "match")
     try:
         with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
             dest_resolved = dest.resolve()
             for member in tar.getmembers():
                 member_path = (dest / member.name).resolve()
                 if member_path != dest_resolved and dest_resolved not in member_path.parents:
+                    _diag("BINARY_EXECUTABLE", "refused: path-traversal member in archive")
                     return None  # refuse any path-traversal member, fail closed
             tar.extractall(path=dest)  # noqa: S202 -- members individually validated above
-    except (tarfile.TarError, OSError):
+    except (tarfile.TarError, OSError) as exc:
+        _diag("BINARY_EXECUTABLE", f"extraction failed: {type(exc).__name__}")
         return None
     binary_path = dest / "gitleaks"
     if not binary_path.is_file():
+        _diag("BINARY_EXECUTABLE", "no 'gitleaks' file found after extraction")
         return None
     binary_path.chmod(0o755)
+    _diag("BINARY_EXECUTABLE", "yes")
     return str(binary_path)
 
 
@@ -409,20 +465,31 @@ def _find_or_install_gitleaks(workdir: Path) -> str | None:
     GitHub Actions' ubuntu-latest runners, the only environment this
     actually needs to work in) -- any other platform, or any download/
     checksum/network failure, gracefully returns None rather than
-    raising."""
+    raising. Emits GITLEAKS_DIAG_STAGES checkpoints to stderr throughout
+    (Security Track remediation round D, Priority 2 -- diagnosing a real
+    CI-vs-local reliability gap found on PR #34)."""
     on_path = shutil.which("gitleaks")
     if on_path is not None:
+        _diag("ON_PATH_CHECK", f"found at {on_path}")
         return on_path
+    _diag("ON_PATH_CHECK", "not found; will attempt pinned download")
 
     if platform.system() != "Linux" or platform.machine() not in ("x86_64", "AMD64"):
+        _diag("DOWNLOAD_ATTEMPTED", f"skipped: unsupported platform {platform.system()}/{platform.machine()}")
         return None
 
+    _diag("DOWNLOAD_ATTEMPTED", GITLEAKS_LINUX_X64_URL)
     try:
         request = urllib.request.Request(GITLEAKS_LINUX_X64_URL, headers={"User-Agent": "diana-security-ci"})
         with urllib.request.urlopen(request, timeout=_DOWNLOAD_TIMEOUT_SECONDS) as response:  # noqa: S310 -- fixed, pinned HTTPS URL to a known release asset
             archive_bytes = response.read()
-    except (urllib.error.URLError, TimeoutError, OSError):
+    except urllib.error.HTTPError as exc:
+        _diag("DOWNLOAD_SUCCEEDED", f"no: HTTP {exc.code}")
         return None
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        _diag("DOWNLOAD_SUCCEEDED", f"no: {type(exc).__name__}: {exc}")
+        return None
+    _diag("DOWNLOAD_SUCCEEDED", f"yes ({len(archive_bytes)} bytes)")
 
     return _verify_and_extract_gitleaks(archive_bytes, workdir)
 
@@ -434,10 +501,13 @@ def _run_gitleaks(gitleaks_path: str, config_path: Path, target_root: str) -> li
     parsed findings list on a clean (exit 0, valid JSON) run; None on any
     failure. `--exit-code=0` forces a consistent exit code regardless of
     finding count, so a non-zero exit here means the tool genuinely
-    failed to run, never "it found something.\""""
+    failed to run, never "it found something." Emits GITLEAKS_DIAG_STAGES
+    checkpoints to stderr -- never the findings themselves (finding
+    VALUES are never diagnostic output, only a count)."""
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
         report_path = f.name
     try:
+        _diag("SCAN_LAUNCHED", f"target={target_root!r}")
         proc = _run(
             [
                 gitleaks_path, "dir",
@@ -450,15 +520,24 @@ def _run_gitleaks(gitleaks_path: str, config_path: Path, target_root: str) -> li
             ],
             timeout=_SUBPROCESS_TIMEOUT_SECONDS,
         )
-        if proc is None or proc.returncode != 0:
+        if proc is None:
+            _diag("SCAN_EXITED_SUCCESSFULLY", "no: subprocess did not complete (timeout or OS error)")
             return None
+        if proc.returncode != 0:
+            stderr_tail = proc.stderr.decode("utf-8", "replace").strip().splitlines()[-1:] if proc.stderr else []
+            _diag("SCAN_EXITED_SUCCESSFULLY", f"no: exit code {proc.returncode}; stderr tail: {stderr_tail}")
+            return None
+        _diag("SCAN_EXITED_SUCCESSFULLY", "yes")
         try:
             with open(report_path, "r", encoding="utf-8") as f:
                 findings = json.load(f)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as exc:
+            _diag("ARTIFACT_PARSED", f"no: {type(exc).__name__}")
             return None
         if not isinstance(findings, list):
+            _diag("ARTIFACT_PARSED", f"no: report was not a JSON list (got {type(findings).__name__})")
             return None
+        _diag("ARTIFACT_PARSED", f"yes ({len(findings)} finding(s) -- count only, never contents)")
         return findings
     finally:
         Path(report_path).unlink(missing_ok=True)
@@ -503,7 +582,9 @@ def _ingest_gitleaks_scope(
 ) -> list[dict[str, Any]]:
     """One scoped Gitleaks scan -> gitleaks_adapter.ingest() for exactly
     the controls that scope is relevant to. Degrades to `ingest(None, ...)`
-    (explicit UNPROVEN) on any failure, exactly like the Semgrep path."""
+    (explicit UNPROVEN) on any failure, exactly like the Semgrep path.
+    Emits the final three GITLEAKS_DIAG_STAGES checkpoints (Security
+    Track remediation round D, Priority 2)."""
     if gitleaks_path is None:
         return gitleaks_adapter.ingest(None, control_ids, f"{identity}::{scope}", expected_target)
 
@@ -514,7 +595,19 @@ def _ingest_gitleaks_scope(
     envelope = build_gitleaks_envelope(repository, commit, root, scope, findings, GITLEAKS_VERSION)
     artifact_path = tmp / f"gitleaks-artifact-{scope}.json"
     artifact_path.write_text(json.dumps(envelope), encoding="utf-8")
-    return gitleaks_adapter.ingest(str(artifact_path), control_ids, f"{identity}::{scope}", expected_target)
+    _diag("NORMALIZED_RUN_PRODUCED", f"scope={scope!r}, controls={control_ids}")
+    runs = gitleaks_adapter.ingest(str(artifact_path), control_ids, f"{identity}::{scope}", expected_target)
+    accepted = [r for r in runs if r.get("tool_error") is None]
+    _diag(
+        "EVIDENCE_MODEL_ACCEPTED",
+        f"{len(accepted)}/{len(runs)} run(s) had no tool_error (scope={scope!r})",
+    )
+    contributed = [r["control_id"] for r in runs if r.get("evidence")]
+    _diag(
+        "CONTROL_CONTRIBUTION_ACCEPTED",
+        f"{contributed if contributed else 'none'} (scope={scope!r})",
+    )
+    return runs
 
 
 def collect_gitleaks_runs(repo_root: str = ".") -> list[dict[str, Any]]:
@@ -788,7 +881,207 @@ ALL_LIVE_WIREABLE_CONTROL_IDS = sorted(
     | set(gitleaks_adapter.AUTHORIZED_EVIDENCE.keys())
     | set(deterministic_repo_adapter.AUTHORIZED_EVIDENCE.keys())
     | {SCENARIO_REGISTRY[SENSITIVE_FETCH_SCENARIO_ID]["control_id"]}
+    | github_review_adapter._authorized_control_ids(
+        {c["id"]: c for c in json.load(open(CATALOG_PATH, "r", encoding="utf-8"))["controls"]}
+    )
 )
+
+
+def _gh_api(path: str) -> Any | None:
+    """Runs `gh api <path>` (read-only GET; this function never passes
+    -X or a request body) and parses its JSON stdout. Returns None on
+    ANY failure -- missing `gh`, no/insufficient auth, network failure,
+    non-2xx response, unparseable output -- so callers uniformly degrade
+    to tool-unavailable rather than crash or guess. Needs only
+    `pull-requests: read` (to read PR metadata and reviews); never
+    requests a write scope."""
+    proc = _run(["gh", "api", path], timeout=30)
+    if proc is None or proc.returncode != 0:
+        return None
+    try:
+        return json.loads(proc.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+
+def _pr_number_from_env() -> int | None:
+    """The PR number is read from an environment variable the WORKFLOW
+    itself sets from GitHub's own `github.event.pull_request.number` --
+    GitHub's own determination of which PR triggered this run, not a
+    string a PR could type into its own body or a commit message. Absent
+    or non-numeric -> None, degrading to tool-unavailable (this function
+    never guesses a PR number)."""
+    raw = os.environ.get("DIANA_PR_NUMBER", "").strip()
+    return int(raw) if raw.isdigit() else None
+
+
+def _parse_human_review_blocks(body: str) -> list[dict[str, Any]]:
+    """Extracts every well-formed `<!-- DIANA:HUMAN-REVIEW {...}
+    DIANA:HUMAN-REVIEW -->` JSON object from a real GitHub review body.
+    A block must be a JSON object with non-empty string `control_id` and
+    `rationale` fields to count; anything else (malformed JSON, wrong
+    shape, missing fields) is silently skipped -- one malformed block
+    never invalidates other well-formed blocks in the same review body,
+    and a body with zero valid blocks correctly yields zero
+    contributions (a blanket approval never becomes evidence for any
+    control it never named)."""
+    blocks: list[dict[str, Any]] = []
+    for match in _GITHUB_REVIEW_MARKER_RE.finditer(body):
+        try:
+            parsed = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        if (
+            isinstance(parsed, dict)
+            and isinstance(parsed.get("control_id"), str)
+            and parsed.get("control_id", "").strip()
+            and isinstance(parsed.get("rationale"), str)
+            and parsed.get("rationale", "").strip()
+        ):
+            blocks.append(parsed)
+    return blocks
+
+
+def build_github_review_envelope(
+    repository: str,
+    commit: str,
+    reviewer_login: str,
+    review_id: int,
+    control_id: str,
+    requirement: str,
+    judgment: str,
+    rationale: str,
+    independence: dict[str, bool],
+    submitted_at: str,
+) -> dict[str, Any]:
+    """Pure function: shapes real, already-fetched GitHub review fields
+    into the github_review_adapter.py envelope, for ONE (review,
+    control_id, requirement) triple. Never calls the GitHub API itself --
+    separated out for deterministic, offline unit testing, exactly like
+    every other build_*_envelope function in this module."""
+    envelope: dict[str, Any] = {
+        "reviewer": {"login": reviewer_login, "review_id": review_id},
+        "target": {"repository": repository, "commit": commit},
+        "control_id": control_id,
+        "requirement": requirement,
+        "judgment": judgment,
+        "rationale": rationale,
+        "independence": independence,
+        "submitted_at": submitted_at,
+    }
+    bound = {k: envelope[k] for k in github_review_adapter.BOUND_FIELDS}
+    canonical = json.dumps(bound, sort_keys=True, separators=(",", ":"))
+    envelope["artifact_binding"] = {"sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest()}
+    return envelope
+
+
+def collect_github_review_runs(repo_root: str = ".") -> list[dict[str, Any]]:
+    """Orchestrates real, live GitHub-backed human-review evidence end to
+    end. Fetches the current PR's metadata and reviews via `gh api`
+    (protected-base, trusted code -- the fetch itself, and every
+    independence/binding computation below, runs from the trusted
+    checkout, never from PR-supplied content), builds one
+    github_review_adapter.py artifact per (well-formed structured block,
+    control's own required_evidence item), and ingests each through the
+    real, unmodified adapter.
+
+    Trust properties: the PR number comes from the workflow's own
+    GitHub-event context (`_pr_number_from_env`), never PR content.
+    Reviewer identity (`login`, `review_id`) is copied verbatim from the
+    real `gh api .../reviews` response. Independence
+    (`reviewer_is_pr_author`/`reviewer_is_diana_agent`) is computed HERE,
+    by trusted code, from the PR's real fetched author login and the
+    fixed `DIANA_AGENT_LOGIN` constant -- never self-declared by a PR or
+    a review body. A review whose `commit_id` does not exactly match the
+    commit currently being evaluated is skipped BEFORE even reaching the
+    adapter (defense in depth; `github_review_adapter.py`'s own target
+    binding would independently reject it too) -- this is exactly how
+    staleness after a new push is handled: no new mechanism, the same
+    exact-commit binding this whole track already uses everywhere.
+    `COMMENTED`/`DISMISSED`/`PENDING` review states are not a terminal
+    judgment and are skipped. Any failure at any step (PR number
+    unavailable, git identity unavailable, `gh api` failure) degrades to
+    `github_review_adapter.ingest(catalog_controls, None, ...)` -- the
+    explicit tool-unavailable path, never a crash, never fabricated
+    evidence."""
+    identity = "ci_verifier_runs::github-review"
+
+    with open(CATALOG_PATH, "r", encoding="utf-8") as f:
+        catalog = json.load(f)
+    catalog_controls = {c["id"]: c for c in catalog["controls"]}
+    control_ids = sorted(github_review_adapter._authorized_control_ids(catalog_controls))
+
+    target = git_repository_identity(repo_root)
+    pr_number = _pr_number_from_env()
+    if target is None or pr_number is None:
+        return github_review_adapter.ingest(catalog_controls, None, control_ids, identity, None)
+    repository, commit = target
+    expected_target = {"repository": repository, "commit": commit}
+
+    pr_data = _gh_api(f"repos/{repository}/pulls/{pr_number}")
+    reviews = _gh_api(f"repos/{repository}/pulls/{pr_number}/reviews")
+    if not isinstance(pr_data, dict) or not isinstance(reviews, list):
+        return github_review_adapter.ingest(catalog_controls, None, control_ids, identity, expected_target)
+
+    pr_author_login = pr_data.get("user", {}).get("login") if isinstance(pr_data.get("user"), dict) else None
+
+    all_runs: list[dict[str, Any]] = []
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        artifact_index = 0
+        for review in reviews:
+            if not isinstance(review, dict):
+                continue
+            reviewer = review.get("user")
+            reviewer_login = reviewer.get("login") if isinstance(reviewer, dict) else None
+            review_id = review.get("id")
+            state = review.get("state")
+            commit_id = review.get("commit_id")
+            body = review.get("body") or ""
+            submitted_at = review.get("submitted_at")
+            if (
+                not isinstance(reviewer_login, str) or not reviewer_login
+                or not isinstance(review_id, int) or isinstance(review_id, bool)
+                or not isinstance(commit_id, str)
+                or not isinstance(submitted_at, str) or not submitted_at
+            ):
+                continue
+            if commit_id != commit:
+                continue  # stale relative to the commit being evaluated -- never attempted
+            if state not in ("APPROVED", "CHANGES_REQUESTED"):
+                continue  # COMMENTED/DISMISSED/PENDING: not a terminal judgment
+            judgment = "APPROVE" if state == "APPROVED" else "REQUEST_CHANGES"
+            independence = {
+                "reviewer_is_pr_author": reviewer_login == pr_author_login,
+                "reviewer_is_diana_agent": reviewer_login == DIANA_AGENT_LOGIN,
+            }
+            for block in _parse_human_review_blocks(body):
+                control_id = block["control_id"]
+                if control_id not in control_ids:
+                    continue
+                control = catalog_controls.get(control_id)
+                if control is None:
+                    continue
+                for requirement in control["required_evidence"]:
+                    envelope = build_github_review_envelope(
+                        repository, commit, reviewer_login, review_id, control_id,
+                        requirement, judgment, block["rationale"], independence, submitted_at,
+                    )
+                    artifact_path = tmp / f"github-review-{artifact_index}.json"
+                    artifact_index += 1
+                    artifact_path.write_text(json.dumps(envelope), encoding="utf-8")
+                    all_runs.extend(
+                        github_review_adapter.ingest(
+                            catalog_controls, str(artifact_path), [control_id],
+                            f"{identity}::{reviewer_login}::{review_id}", expected_target,
+                        )
+                    )
+
+    covered = {r["control_id"] for r in all_runs}
+    missing = [c for c in control_ids if c not in covered]
+    if missing:
+        all_runs.extend(github_review_adapter.ingest(catalog_controls, None, missing, identity, expected_target))
+    return all_runs
 
 
 def collect_trusted_runs() -> list[dict[str, Any]]:
@@ -818,6 +1111,10 @@ def collect_trusted_runs() -> list[dict[str, Any]]:
         pass
     try:
         runs.extend(collect_sensitive_path_fetch_scenario_runs())
+    except Exception:  # noqa: BLE001 -- absolute safety net, see docstring
+        pass
+    try:
+        runs.extend(collect_github_review_runs())
     except Exception:  # noqa: BLE001 -- absolute safety net, see docstring
         pass
     return runs

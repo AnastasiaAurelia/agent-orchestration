@@ -125,6 +125,25 @@ check("gitleaks degraded runs carry UNKNOWN applicability (never PASS/FAIL)", al
 check("gitleaks degraded runs carry no tool_error (unavailable, not a tool error)", all(r["tool_error"] is None for r in gl_degraded))
 
 # ------------------------------------------------------------------
+# Gitleaks CI reliability diagnostics (Security Track remediation round
+# D, Priority 2): all 10 requested checkpoints exist as fixed stage
+# names, and _diag() writes to stderr only -- stdout stays pure JSON.
+# ------------------------------------------------------------------
+check("GITLEAKS_DIAG_STAGES has exactly the 10 requested checkpoints", set(m.GITLEAKS_DIAG_STAGES) == {
+    "ON_PATH_CHECK", "DOWNLOAD_ATTEMPTED", "DOWNLOAD_SUCCEEDED", "CHECKSUM_VERIFIED",
+    "BINARY_EXECUTABLE", "SCAN_LAUNCHED", "SCAN_EXITED_SUCCESSFULLY", "ARTIFACT_PARSED",
+    "NORMALIZED_RUN_PRODUCED", "EVIDENCE_MODEL_ACCEPTED", "CONTROL_CONTRIBUTION_ACCEPTED",
+})
+import io as _io
+import contextlib as _contextlib
+_diag_stdout = _io.StringIO()
+_diag_stderr = _io.StringIO()
+with _contextlib.redirect_stdout(_diag_stdout), _contextlib.redirect_stderr(_diag_stderr):
+    m._diag("SCAN_LAUNCHED", "target='.'")
+check("_diag() writes nothing to stdout", _diag_stdout.getvalue() == "")
+check("_diag() writes the stage name to stderr", "SCAN_LAUNCHED" in _diag_stderr.getvalue())
+
+# ------------------------------------------------------------------
 # build_deterministic_repo_envelope: pure function, deterministic,
 # correctly shaped.
 # ------------------------------------------------------------------
@@ -247,14 +266,187 @@ sf_degraded = m.collect_sensitive_path_fetch_scenario_runs(".")
 check("dynamic scenario degraded (no web root) run present for SEC-064", any(r["control_id"] == "SEC-064" for r in sf_degraded))
 check("dynamic scenario degraded runs carry UNKNOWN applicability (never PASS/FAIL)", all(r["applicability"] == "UNKNOWN" for r in sf_degraded))
 
+sys.path.insert(0, "diana/security/reviewer")
+import github_review_adapter
+import evidence_model
+
+# ------------------------------------------------------------------
+# GitHub-backed human review live wiring (Security Track remediation
+# round D, Priority 1): _parse_human_review_blocks, build_github_review_
+# envelope, and the full collect_github_review_runs() orchestration --
+# offline, with _gh_api mocked (no real network/gh CLI dependency for
+# these checks; the real end-to-end check further below additionally
+# proves this against genuine `gh api` responses when available).
+# ------------------------------------------------------------------
+check(
+    "_parse_human_review_blocks extracts a well-formed block",
+    m._parse_human_review_blocks('<!-- DIANA:HUMAN-REVIEW {"control_id": "SEC-016", "rationale": "x"} DIANA:HUMAN-REVIEW -->')
+    == [{"control_id": "SEC-016", "rationale": "x"}],
+)
+check("_parse_human_review_blocks on a bare LGTM body -> zero blocks", m._parse_human_review_blocks("LGTM") == [])
+check("_parse_human_review_blocks skips malformed JSON, keeps other well-formed blocks", m._parse_human_review_blocks(
+    '<!-- DIANA:HUMAN-REVIEW {not valid json} DIANA:HUMAN-REVIEW -->'
+    '<!-- DIANA:HUMAN-REVIEW {"control_id": "SEC-016", "rationale": "x"} DIANA:HUMAN-REVIEW -->'
+) == [{"control_id": "SEC-016", "rationale": "x"}])
+check("_parse_human_review_blocks rejects a block missing rationale", m._parse_human_review_blocks(
+    '<!-- DIANA:HUMAN-REVIEW {"control_id": "SEC-016"} DIANA:HUMAN-REVIEW -->'
+) == [])
+
+check("_pr_number_from_env: absent -> None", m._pr_number_from_env() is None)
+os.environ["DIANA_PR_NUMBER"] = "42"
+check("_pr_number_from_env: numeric string -> int", m._pr_number_from_env() == 42)
+os.environ["DIANA_PR_NUMBER"] = "not-a-number"
+check("_pr_number_from_env: non-numeric -> None (fail closed)", m._pr_number_from_env() is None)
+del os.environ["DIANA_PR_NUMBER"]
+
+gr_env = m.build_github_review_envelope(
+    "owner/repo", "deadbeef" * 5, "a-codeowner", 555, "SEC-016",
+    "passwords are hashed with a modern adaptive algorithm (bcrypt/argon2/scrypt) with per-user salt",
+    "APPROVE", "Reviewed SEC-016 thoroughly: bcrypt cost 12, per-user salt confirmed.",
+    {"reviewer_is_pr_author": False, "reviewer_is_diana_agent": False}, "2026-09-09T00:00:00Z",
+)
+check("github-review envelope has all required fields", set(gr_env.keys()) == set(github_review_adapter.REQUIRED_ENVELOPE_FIELDS))
+gr_env2 = m.build_github_review_envelope(
+    "owner/repo", "deadbeef" * 5, "a-codeowner", 555, "SEC-016",
+    "passwords are hashed with a modern adaptive algorithm (bcrypt/argon2/scrypt) with per-user salt",
+    "APPROVE", "Reviewed SEC-016 thoroughly: bcrypt cost 12, per-user salt confirmed.",
+    {"reviewer_is_pr_author": False, "reviewer_is_diana_agent": False}, "2026-09-09T00:00:00Z",
+)
+check("build_github_review_envelope is deterministic (same hash for same inputs)", gr_env["artifact_binding"]["sha256"] == gr_env2["artifact_binding"]["sha256"])
+gr_env3 = m.build_github_review_envelope(
+    "owner/repo", "deadbeef" * 5, "a-codeowner", 555, "SEC-016",
+    "passwords are hashed with a modern adaptive algorithm (bcrypt/argon2/scrypt) with per-user salt",
+    "REQUEST_CHANGES", "Reviewed SEC-016: found a plain sha256 path.",
+    {"reviewer_is_pr_author": False, "reviewer_is_diana_agent": False}, "2026-09-09T00:00:00Z",
+)
+check("build_github_review_envelope hash changes when judgment/rationale change", gr_env["artifact_binding"]["sha256"] != gr_env3["artifact_binding"]["sha256"])
+
+# The envelope this module builds must actually be ACCEPTED by the real,
+# unmodified github_review_adapter.py.
+gr_catalog_controls = github_review_adapter._load_catalog_controls("diana/security/catalog.json")
+with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+    json.dump(gr_env, f)
+    gr_artifact_path = f.name
+try:
+    gr_runs = github_review_adapter.ingest(gr_catalog_controls, gr_artifact_path, ["SEC-016"], "test-identity", {"repository": "owner/repo", "commit": "deadbeef" * 5})
+    gr_statuses = {r["control_id"]: (r["evidence"][0]["status"] if r["evidence"] else "NONE") for r in gr_runs}
+    check("real github_review_adapter accepts the built envelope: SEC-016 SATISFIED", gr_statuses.get("SEC-016") == "SATISFIED")
+finally:
+    os.unlink(gr_artifact_path)
+
+# Full orchestration: collect_github_review_runs() with a mocked _gh_api
+# (no real network dependency for this specific check -- the real
+# end-to-end check below separately proves genuine `gh api` connectivity
+# when available).
+_FAKE_COMMIT = "deadbeef" * 5
+_FAKE_PR = {"user": {"login": "pr-author"}}
+
+
+def _fake_gh_api_factory(reviews):
+    def _fake(path):
+        if path.endswith("/pulls/99"):
+            return _FAKE_PR
+        if path.endswith("/pulls/99/reviews"):
+            return reviews
+        return None
+    return _fake
+
+
+m.git_repository_identity = lambda repo_root: ("owner/repo", _FAKE_COMMIT)
+os.environ["DIANA_PR_NUMBER"] = "99"
+
+# No PR number at all -> tool-unavailable for every authorized control.
+del os.environ["DIANA_PR_NUMBER"]
+gr_no_pr = m.collect_github_review_runs(".")
+check("no PR number set -> every authorized control degrades to UNKNOWN", all(r["applicability"] == "UNKNOWN" for r in gr_no_pr) and len(gr_no_pr) >= 30)
+os.environ["DIANA_PR_NUMBER"] = "99"
+
+# gh api totally unavailable -> tool-unavailable.
+m._gh_api = lambda path: None
+gr_api_down = m.collect_github_review_runs(".")
+check("gh api unavailable -> every authorized control degrades to UNKNOWN", all(r["applicability"] == "UNKNOWN" for r in gr_api_down))
+
+_good_body = (
+    '<!-- DIANA:HUMAN-REVIEW {"control_id": "SEC-016", '
+    '"rationale": "Reviewed SEC-016 in diana/auth/hash.py: bcrypt cost 12, per-user salt confirmed, no fast/reversible hash path exists."} '
+    'DIANA:HUMAN-REVIEW -->'
+)
+
+# Genuine, independent, substantiated APPROVE -> real PASS through the
+# FULL live orchestration + the real, unmodified evidence_model.py.
+m._gh_api = _fake_gh_api_factory([
+    {"user": {"login": "a-codeowner"}, "id": 555, "state": "APPROVED", "commit_id": _FAKE_COMMIT, "body": _good_body, "submitted_at": "2026-09-09T00:00:00Z"}
+])
+gr_runs_happy = m.collect_github_review_runs(".")
+gr_catalog = json.load(open("diana/security/catalog.json"))
+gr_controls_all = {c["id"]: c for c in gr_catalog["controls"]}
+gr_agg = evidence_model.evaluate(gr_runs_happy, gr_controls_all)
+gr_sec016 = next(r for r in gr_agg if r["control_id"] == "SEC-016")
+check(
+    "live collect_github_review_runs(): a real, independent, structured review reaches genuine PASS "
+    "through the unmodified evidence_model.py",
+    gr_sec016["result"] == "PASS",
+)
+
+# DIANA-AGENT "reviewing" its own PR must never be trusted, even with a
+# well-formed, substantiated block -- no self-certification path.
+m._gh_api = _fake_gh_api_factory([
+    {"user": {"login": "DIANA-AGENT"}, "id": 556, "state": "APPROVED", "commit_id": _FAKE_COMMIT, "body": _good_body, "submitted_at": "2026-09-09T00:00:00Z"}
+])
+gr_runs_self = m.collect_github_review_runs(".")
+gr_self_sec016 = [r for r in gr_runs_self if r["control_id"] == "SEC-016"]
+check(
+    "DIANA-AGENT self-review is rejected (ERROR, never trusted) even with a well-formed block",
+    all(r["tool_error"] is not None and r["evidence"] == [] for r in gr_self_sec016),
+)
+
+# The PR author reviewing their own PR must never be trusted either.
+m._gh_api = _fake_gh_api_factory([
+    {"user": {"login": "pr-author"}, "id": 557, "state": "APPROVED", "commit_id": _FAKE_COMMIT, "body": _good_body, "submitted_at": "2026-09-09T00:00:00Z"}
+])
+gr_runs_author = m.collect_github_review_runs(".")
+gr_author_sec016 = [r for r in gr_runs_author if r["control_id"] == "SEC-016"]
+check(
+    "PR author self-review is rejected (ERROR, never trusted) even with a well-formed block",
+    all(r["tool_error"] is not None and r["evidence"] == [] for r in gr_author_sec016),
+)
+
+# A review against a SUPERSEDED commit (stale after a new push) must
+# never be attempted -- staleness handling, no new mechanism.
+m._gh_api = _fake_gh_api_factory([
+    {"user": {"login": "a-codeowner"}, "id": 558, "state": "APPROVED", "commit_id": "cafebabe" * 5, "body": _good_body, "submitted_at": "2026-09-09T00:00:00Z"}
+])
+gr_runs_stale = m.collect_github_review_runs(".")
+gr_stale_sec016 = [r for r in gr_runs_stale if r["control_id"] == "SEC-016"]
+check("stale review (commit_id != current head) -> no contribution", all(r["evidence"] == [] and r["tool_error"] is None for r in gr_stale_sec016))
+
+# A bare "LGTM" approval (no structured block at all) never becomes
+# evidence for any control.
+m._gh_api = _fake_gh_api_factory([
+    {"user": {"login": "a-codeowner"}, "id": 559, "state": "APPROVED", "commit_id": _FAKE_COMMIT, "body": "LGTM, ship it!", "submitted_at": "2026-09-09T00:00:00Z"}
+])
+gr_runs_lgtm = m.collect_github_review_runs(".")
+check("bare LGTM approval -> zero contributions for every control", all(r["evidence"] == [] for r in gr_runs_lgtm))
+
+# A COMMENTED review (not a terminal judgment) never becomes evidence
+# even with a well-formed block.
+m._gh_api = _fake_gh_api_factory([
+    {"user": {"login": "a-codeowner"}, "id": 560, "state": "COMMENTED", "commit_id": _FAKE_COMMIT, "body": _good_body, "submitted_at": "2026-09-09T00:00:00Z"}
+])
+gr_runs_commented = m.collect_github_review_runs(".")
+check("COMMENTED review state -> zero contributions (not a terminal judgment)", all(r["evidence"] == [] for r in gr_runs_commented))
+
+os.environ.pop("DIANA_PR_NUMBER", None)
+
 # collect_trusted_runs() must never raise even under a total internal
-# failure -- the absolute safety net, across all four live families.
+# failure -- the absolute safety net, across all five live families.
 def _boom():
     raise RuntimeError("simulated total failure")
 m.collect_semgrep_runs = _boom
 m.collect_gitleaks_runs = _boom
 m.collect_deterministic_repo_runs = _boom
 m.collect_sensitive_path_fetch_scenario_runs = _boom
+m.collect_github_review_runs = _boom
 safe_result = m.collect_trusted_runs()
 check("collect_trusted_runs() degrades to [] rather than raising on unexpected failure", safe_result == [])
 

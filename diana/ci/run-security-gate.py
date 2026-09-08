@@ -82,6 +82,10 @@ TRUSTED_FILES = (
     "diana/security/adapters/adapter_base.py",
     "diana/security/adapters/semgrep_adapter.py",
     "diana/security/verifiers/semgrep-rules.yml",
+    # Security Track remediation round D: ci_verifier_runs.py now also
+    # unconditionally imports this for the GitHub-backed human-review
+    # live wiring -- same reasoning as the round A entries above.
+    "diana/security/reviewer/github_review_adapter.py",
 )
 
 
