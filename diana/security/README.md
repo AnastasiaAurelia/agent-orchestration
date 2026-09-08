@@ -56,6 +56,16 @@ multi-verifier aggregation" below for the exact rules.
   state, that an out-of-capability or otherwise-invalid verifier can never
   manufacture `PASS`, and that a problem run for one control never affects
   a different control's result in the same batch.
+- `adapters/` -- Security Phase 2's static adapters (Gitleaks, osv-scanner,
+  Semgrep): deterministic normalizers that turn a **verified scan-evidence
+  artifact** (a tool report bound to a caller-checked target/commit/scope,
+  not a bare report) into `evidence_model.py` run records. Each adapter
+  declares an explicit authorization mapping so a tool can never
+  manufacture `PASS` for a control/requirement it isn't actually capable
+  of proving, and a clean result can only become `SATISFIED` when the
+  adapter can prove the scan actually covered what the requirement needs
+  -- "no finding" from the wrong or incomplete target proves nothing. See
+  `adapters/README.md` for the full design and per-adapter scope.
 
 ## Source-derived vs. Diana-designed fields
 
@@ -303,17 +313,23 @@ scanner or a fixed rule can fully settle on its own.
 
 - Diana cannot yet detect or prove any of these 75 controls against a real
   repository end to end. Phase 0 is a catalog; Phase 1 is a result
-  calculator that something else must feed. Neither is an implementation
-  that inspects real code.
-- No security tools have been installed in either phase.
+  calculator that something else must feed; Phase 2 adds 3 normalizers
+  (of the 75 controls' many verifier capabilities) that only work against
+  an already-produced tool report handed to them -- none of this inspects
+  a live repository or invokes a scanner itself.
+- No security tools have been installed in any phase so far. Phase 2's
+  adapters parse documented tool *output formats*; they do not run, ship,
+  or depend on Gitleaks/osv-scanner/Semgrep/Trivy being present anywhere.
 - `diana/gate` and `diana/preflight` are completely unchanged -- their
   schemas, behavior, and test suites are untouched by this track so far.
+- Phase 2 covers 3 verifier capabilities (`SECRET_SCANNER`,
+  `DEPENDENCY_SCANNER`, `STATIC_ANALYZER`) for a handful of controls each
+  (`SEC-007`; `SEC-060`; `SEC-055`/`SEC-056`) -- most of the catalog's 75
+  controls still have no adapter at all, and none of dynamic verification,
+  semantic review, or applicability automation exist yet.
 
 ## Future phases (not started here)
 
-- **Security Phase 2 -- Static Security Adapters**: thin adapters that
-  normalize real static analyzer/secret-scanner/dependency-scanner output
-  into Phase 1 evidence runs.
 - **Security Phase 3 -- Dynamic Verification**: bounded runtime tests
   (authorization, injection, webhook, race-condition, payment-sandbox,
   etc.) that also produce Phase 1 evidence runs.
@@ -335,6 +351,7 @@ scanner or a fixed rule can fully settle on its own.
 python3 diana/security/validate_catalog.py diana/security/catalog.json
 bash diana/security/test-catalog.sh
 bash diana/security/test-evidence-model.sh
+bash diana/security/adapters/test-adapters.sh
 ```
 
 All of the above are deterministic, offline, and make no changes to this

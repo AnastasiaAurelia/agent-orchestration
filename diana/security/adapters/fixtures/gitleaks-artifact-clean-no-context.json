@@ -1,0 +1,16 @@
+{
+  "tool": {
+    "name": "gitleaks",
+    "version": "8.18.1"
+  },
+  "execution": {
+    "completed": true
+  },
+  "target": {},
+  "config": {},
+  "scanned_inputs": [],
+  "report": [],
+  "artifact_binding": {
+    "sha256": "8c6477cba7731acbed063b957ad0f2148e836f1f707078e13a60276b89dba4d7"
+  }
+}

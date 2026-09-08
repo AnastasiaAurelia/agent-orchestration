@@ -1,0 +1,33 @@
+{
+  "tool": {
+    "name": "semgrep",
+    "version": "1.78.0"
+  },
+  "execution": {
+    "completed": true
+  },
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "c51ce15a301df2d7804b36d59e9d508b8653249b",
+    "root": ".",
+    "scope": "full-repo"
+  },
+  "config": {
+    "rule_map": {
+      "python.lang.security.insecure-random": [
+        "SEC-056",
+        "this is not the real SEC-056 requirement text"
+      ]
+    }
+  },
+  "scanned_inputs": [],
+  "report": {
+    "results": [],
+    "rules_run": [
+      "python.lang.security.insecure-random"
+    ]
+  },
+  "artifact_binding": {
+    "sha256": "a80ce998e8840c1be1b2c03b2c65964a342900d5f7735fc700e4896ee2159081"
+  }
+}

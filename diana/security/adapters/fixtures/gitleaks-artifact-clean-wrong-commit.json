@@ -1,0 +1,21 @@
+{
+  "tool": {
+    "name": "gitleaks",
+    "version": "8.18.1"
+  },
+  "execution": {
+    "completed": true
+  },
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "0000000000000000000000000000000000000000",
+    "root": ".",
+    "scope": "full-repo"
+  },
+  "config": {},
+  "scanned_inputs": [],
+  "report": [],
+  "artifact_binding": {
+    "sha256": "329a73ebd4cb26211c380a213d8f522ec17b026b85f3f97549dab178022c0352"
+  }
+}

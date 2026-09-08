@@ -1,0 +1,31 @@
+{
+  "tool": {
+    "name": "semgrep",
+    "version": "1.78.0"
+  },
+  "execution": {
+    "completed": true
+  },
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "c51ce15a301df2d7804b36d59e9d508b8653249b",
+    "root": ".",
+    "scope": "full-repo"
+  },
+  "config": {
+    "rule_map": {
+      "": [
+        "SEC-056",
+        "security-relevant random values are generated with a cryptographically secure random source, not a general-purpose PRNG"
+      ]
+    }
+  },
+  "scanned_inputs": [],
+  "report": {
+    "results": [],
+    "rules_run": []
+  },
+  "artifact_binding": {
+    "sha256": "065d0203a415911ea7b8175b065143bb0b1c0452978e09f47e2a82d02ff6a776"
+  }
+}

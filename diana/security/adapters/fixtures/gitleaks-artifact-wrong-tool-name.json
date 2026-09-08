@@ -1,0 +1,21 @@
+{
+  "tool": {
+    "name": "trufflehog",
+    "version": "3.0.0"
+  },
+  "execution": {
+    "completed": true
+  },
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "c51ce15a301df2d7804b36d59e9d508b8653249b",
+    "root": ".",
+    "scope": "full-repo"
+  },
+  "config": {},
+  "scanned_inputs": [],
+  "report": [],
+  "artifact_binding": {
+    "sha256": "3c7a6fa79dbb6395eb2a7db5b1eee1ec6dac1a3de8897c250e415b5cda993b9a"
+  }
+}

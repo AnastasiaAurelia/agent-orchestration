@@ -1,0 +1,46 @@
+{
+  "tool": {
+    "name": "osv-scanner",
+    "version": "1.7.0"
+  },
+  "execution": {
+    "completed": true
+  },
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "0000000000000000000000000000000000000000",
+    "root": ".",
+    "scope": "full-repo"
+  },
+  "config": {},
+  "scanned_inputs": [
+    "requirements.txt",
+    "package-lock.json"
+  ],
+  "report": {
+    "results": [
+      {
+        "source": {
+          "path": "requirements.txt"
+        },
+        "packages": [
+          {
+            "package": {
+              "name": "django",
+              "version": "3.2.0"
+            },
+            "vulnerabilities": [
+              {
+                "id": "GHSA-xxxx-yyyy-zzzz",
+                "severity": "HIGH"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "artifact_binding": {
+    "sha256": "bd6c6e84baadf74820ad28af93c327fd58b34d2e316cc11abc74736a934e147b"
+  }
+}

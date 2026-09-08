@@ -1,0 +1,28 @@
+{
+  "tool": {
+    "name": "gitleaks",
+    "version": "8.18.1"
+  },
+  "execution": {
+    "completed": true
+  },
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "0000000000000000000000000000000000000000",
+    "root": ".",
+    "scope": "full-repo"
+  },
+  "config": {},
+  "scanned_inputs": [],
+  "report": [
+    {
+      "Description": "AWS Access Key",
+      "File": "config/settings.py",
+      "RuleID": "aws-access-key-id",
+      "Secret": "AKIAABCDEFGHIJKLMNOP"
+    }
+  ],
+  "artifact_binding": {
+    "sha256": "9ccb62c9b3b935b3fb4da397966c07cb610fcead071a9a820d59ff18f6f9d9b4"
+  }
+}
