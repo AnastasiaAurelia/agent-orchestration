@@ -57,10 +57,14 @@ multi-verifier aggregation" below for the exact rules.
   manufacture `PASS`, and that a problem run for one control never affects
   a different control's result in the same batch.
 - `adapters/` -- Security Phase 2's static adapters (Gitleaks, osv-scanner,
-  Semgrep): deterministic normalizers that turn an already-produced tool
-  report into `evidence_model.py` run records, each with an explicit,
-  hardcoded authorization mapping so a tool can never manufacture `PASS`
-  for a control/requirement it isn't actually capable of proving. See
+  Semgrep): deterministic normalizers that turn a **verified scan-evidence
+  artifact** (a tool report bound to a caller-checked target/commit/scope,
+  not a bare report) into `evidence_model.py` run records. Each adapter
+  declares an explicit authorization mapping so a tool can never
+  manufacture `PASS` for a control/requirement it isn't actually capable
+  of proving, and a clean result can only become `SATISFIED` when the
+  adapter can prove the scan actually covered what the requirement needs
+  -- "no finding" from the wrong or incomplete target proves nothing. See
   `adapters/README.md` for the full design and per-adapter scope.
 
 ## Source-derived vs. Diana-designed fields

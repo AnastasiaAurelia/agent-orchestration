@@ -11,6 +11,9 @@ GITLEAKS="$ADAPTERS_DIR/gitleaks_adapter.py"
 OSV="$ADAPTERS_DIR/osv_scanner_adapter.py"
 SEMGREP="$ADAPTERS_DIR/semgrep_adapter.py"
 
+EXPECTED_FULL_REPO="$FIXTURES/expected-target-full-repo.json"
+EXPECTED_FULL_REPO_MANIFESTS="$FIXTURES/expected-target-full-repo-with-manifests.json"
+
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -20,8 +23,36 @@ fail_count=0
 pass() { echo "PASS: $1"; pass_count=$((pass_count + 1)); }
 fail() { echo "FAIL: $1" >&2; fail_count=$((fail_count + 1)); }
 
-# Run an adapter's runs list through evidence_model.py and print the
-# result for the given control_id.
+run_adapter() {
+  # run_adapter <adapter.py> <artifact-path-or-'-'> <expected-path-or-'-'> <control_id...>
+  # -> writes adapter stdout to $TMP_DIR/adapter_out.json
+  local adapter="$1"; shift
+  python3 "$adapter" "$@" > "$TMP_DIR/adapter_out.json"
+}
+
+adapter_runs() {
+  python3 -c "
+import json, sys
+print(json.dumps(json.load(open(sys.argv[1]))['runs']))
+" "$1"
+}
+
+# Extracts the status of the (only) evidence item this adapter emitted
+# for <control_id>, or NONE if no run for that control_id was emitted at
+# all -- the direct way to check "did this artifact produce a SATISFIED/
+# VIOLATED contribution", without going through evidence_model.py.
+contribution_status() {
+  python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+for r in d['runs']:
+    if r['control_id'] == sys.argv[2]:
+        print(r['evidence'][0]['status'] if r['evidence'] else 'NONE')
+        sys.exit(0)
+print('NONE')
+" "$1" "$2"
+}
+
 evaluate_runs() {
   local runs_json_array="$1" out_file="$2"
   echo "$runs_json_array" > "$TMP_DIR/runs_in.json"
@@ -40,44 +71,53 @@ print('MISSING')
 " "$1" "$2"
 }
 
-# Extract just the "runs" array from an adapter's own JSON output.
-adapter_runs() {
-  python3 -c "
-import json, sys
-print(json.dumps(json.load(open(sys.argv[1]))['runs']))
-" "$1"
+check_contribution() {
+  # check_contribution <name> <adapter> <artifact> <expected> <control_id> <expected_status>
+  local name="$1" adapter="$2" artifact="$3" expected="$4" control_id="$5" expected_status="$6"
+  run_adapter "$adapter" "$artifact" "$expected" "$control_id"
+  local actual
+  actual="$(contribution_status "$TMP_DIR/adapter_out.json" "$control_id")"
+  if [ "$actual" = "$expected_status" ]; then
+    pass "$name -> $expected_status"
+  else
+    fail "$name (expected $expected_status, got $actual)"
+    cat "$TMP_DIR/adapter_out.json" >&2
+  fi
 }
 
-run_adapter() {
-  # run_adapter <adapter.py> <fixture-path-or-'-'> <control_id...> -> writes adapter stdout to $TMP_DIR/adapter_out.json
-  local adapter="$1"; shift
-  local fixture="$1"; shift
-  python3 "$adapter" "$fixture" "$@" > "$TMP_DIR/adapter_out.json"
+check_aggregate_error() {
+  # check_aggregate_error <name> <adapter> <artifact> <expected> <control_id...>
+  local name="$1" adapter="$2" artifact="$3" expected="$4"; shift 4
+  run_adapter "$adapter" "$artifact" "$expected" "$@"
+  local runs
+  runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
+  evaluate_runs "$runs" "$TMP_DIR/agg.out.json"
+  local all_error=1
+  for cid in "$@"; do
+    r="$(result_for "$TMP_DIR/agg.out.json" "$cid")"
+    if [ "$r" != "ERROR" ]; then
+      all_error=0
+      fail "$name (expected ERROR for $cid, got $r)"
+    fi
+  done
+  [ "$all_error" -eq 1 ] && pass "$name -> ERROR"
 }
 
 # ==================================================================
-# Gitleaks adapter
+# Gitleaks: SEC-007, one authorized requirement, target/scope-aware
 # ==================================================================
 
-# CASE G1: clean scan -> SATISFIED for SEC-007's ONE authorized item, but
-# evidence_model.py's aggregate is still UNPROVEN because SEC-007's other
-# required_evidence item ("secrets loaded from config") is never claimed
-# by this adapter -- proving a clean scan alone cannot manufacture PASS
-# for a control this adapter is only PARTIALLY authorized for.
-run_adapter "$GITLEAKS" "$FIXTURES/gitleaks-clean.json" SEC-007
-runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-evaluate_runs "$runs" "$TMP_DIR/g1.out.json"
-r="$(result_for "$TMP_DIR/g1.out.json" SEC-007)"
-[ "$r" = "UNPROVEN" ] && pass "CASE G1: gitleaks clean scan alone is UNPROVEN for SEC-007 (2nd requirement not authorized)" \
-  || fail "CASE G1: expected UNPROVEN, got $r"
-
-# CASE G2: gitleaks clean scan + a second run supplying the 2nd
-# requirement from SEC-007's OTHER permitted capability (STATIC_ANALYZER;
-# SEC-007's verification.modes is [SECRET_SCANNER, STATIC_ANALYZER], not
-# SEMANTIC_REVIEW) together satisfy SEC-007 -> PASS, proving multi-
-# verifier aggregation composes correctly with an adapter's partial
+# CASE P1: clean report + correct target/commit/full-repo scope -> the
+# adapter's one authorized SEC-007 requirement gets a SATISFIED
 # contribution.
-G2_RUNS="$TMP_DIR/g2_runs.json"
+check_contribution "CASE P1 (gitleaks): clean + verified full-repo target" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-clean-full-repo.json" "$EXPECTED_FULL_REPO" SEC-007 SATISFIED
+
+# End-to-end: that SATISFIED contribution, combined with a second run
+# supplying SEC-007's other permitted-capability requirement, reaches
+# PASS -- proving Phase 1 aggregation still composes correctly.
+run_adapter "$GITLEAKS" "$FIXTURES/gitleaks-artifact-clean-full-repo.json" "$EXPECTED_FULL_REPO" SEC-007
+runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
 python3 -c "
 import json
 gitleaks_runs = json.loads('''$runs''')
@@ -91,163 +131,201 @@ static_run = {
     ],
     'tool_error': None,
 }
-json.dump(gitleaks_runs + [static_run], open('$G2_RUNS', 'w'))
+json.dump(gitleaks_runs + [static_run], open('$TMP_DIR/g_combined.json', 'w'))
 "
-python3 "$EVIDENCE_MODEL" "$CATALOG" "$G2_RUNS" > "$TMP_DIR/g2.out.json"
-r="$(result_for "$TMP_DIR/g2.out.json" SEC-007)"
-[ "$r" = "PASS" ] && pass "CASE G2: gitleaks clean scan + a static-analyzer contribution together satisfy SEC-007 -> PASS" \
-  || fail "CASE G2: expected PASS, got $r"
+python3 "$EVIDENCE_MODEL" "$CATALOG" "$TMP_DIR/g_combined.json" > "$TMP_DIR/g_combined.out.json"
+r="$(result_for "$TMP_DIR/g_combined.out.json" SEC-007)"
+[ "$r" = "PASS" ] && pass "CASE P1b (gitleaks): verified clean scan + static-analyzer 2nd requirement -> PASS" \
+  || fail "CASE P1b: expected PASS, got $r"
 
-# CASE G3: a real finding -> VIOLATED -> aggregate FAIL.
-run_adapter "$GITLEAKS" "$FIXTURES/gitleaks-finding.json" SEC-007
-runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-evaluate_runs "$runs" "$TMP_DIR/g3.out.json"
-r="$(result_for "$TMP_DIR/g3.out.json" SEC-007)"
-[ "$r" = "FAIL" ] && pass "CASE G3: gitleaks finding -> FAIL" || fail "CASE G3: expected FAIL, got $r"
+# CASE P2: clean report + WRONG commit -> not PASS (no contribution).
+check_contribution "CASE P2 (gitleaks): clean + wrong commit" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-clean-wrong-commit.json" "$EXPECTED_FULL_REPO" SEC-007 NONE
 
-# CASE G4: tool missing (no report file) -> adapter emits no runs -> UNPROVEN.
-run_adapter "$GITLEAKS" "$TMP_DIR/does-not-exist.json" SEC-007
-runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-if [ "$runs" = "[]" ]; then
-  pass "CASE G4: gitleaks tool-missing emits no runs"
-else
-  fail "CASE G4: expected empty runs when tool output is missing, got $runs"
-fi
-evaluate_runs "$runs" "$TMP_DIR/g4.out.json" 2>/dev/null || true
-r="$(result_for "$TMP_DIR/g4.out.json" SEC-007 2>/dev/null || echo MISSING)"
-[ "$r" = "MISSING" ] && pass "CASE G4b: tool-missing control never appears in evidence_model results (no runs submitted)" \
-  || fail "CASE G4b: expected control to be absent from results, got $r"
+# CASE P3: clean report + missing scan context entirely -> not PASS.
+check_contribution "CASE P3 (gitleaks): clean + no target context" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-clean-no-context.json" "$EXPECTED_FULL_REPO" SEC-007 NONE
 
-# CASE G5: malformed report (wrong shape) -> ERROR.
-run_adapter "$GITLEAKS" "$FIXTURES/gitleaks-malformed.json" SEC-007
-runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-evaluate_runs "$runs" "$TMP_DIR/g5.out.json"
-r="$(result_for "$TMP_DIR/g5.out.json" SEC-007)"
-[ "$r" = "ERROR" ] && pass "CASE G5: malformed gitleaks report -> ERROR" || fail "CASE G5: expected ERROR, got $r"
+# CASE P4: clean report + partial/subdirectory scope -> not PASS for a
+# repository-wide requirement.
+check_contribution "CASE P4 (gitleaks): clean + partial scope" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-clean-partial-scope.json" "$EXPECTED_FULL_REPO" SEC-007 NONE
 
-# CASE G6: gitleaks (SECRET_SCANNER capability) is not authorized for
-# SEC-006/SEC-065 -- requesting them returns no runs at all (silently
-# skipped, never fabricated), regardless of scan content.
-run_adapter "$GITLEAKS" "$FIXTURES/gitleaks-clean.json" SEC-006 SEC-065
+# CASE P5: report_binding hash mismatch (tampered/substituted report) ->
+# ERROR, not silently trusted.
+check_aggregate_error "CASE P5 (gitleaks): report_binding hash mismatch" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-binding-mismatch.json" "$EXPECTED_FULL_REPO" SEC-007
+
+# CASE P6: execution.completed=false -> ERROR.
+check_aggregate_error "CASE P6 (gitleaks): execution did not complete" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-execution-incomplete.json" "$EXPECTED_FULL_REPO" SEC-007
+
+# CASE P7: a recognized finding under PARTIAL scope is still trusted and
+# visible as VIOLATED -- positive evidence doesn't need full coverage.
+check_contribution "CASE P7 (gitleaks): finding under partial scope still VIOLATED" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-finding-partial-scope.json" "$EXPECTED_FULL_REPO" SEC-007 VIOLATED
+
+# A finding under full-repo scope -> also VIOLATED, and end-to-end FAIL.
+run_adapter "$GITLEAKS" "$FIXTURES/gitleaks-artifact-finding-full-repo.json" "$EXPECTED_FULL_REPO" SEC-007
 runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-[ "$runs" = "[]" ] && pass "CASE G6: gitleaks silently refuses unauthorized controls (SEC-006, SEC-065)" \
-  || fail "CASE G6: expected empty runs for unauthorized controls, got $runs"
+evaluate_runs "$runs" "$TMP_DIR/g_fail.out.json"
+r="$(result_for "$TMP_DIR/g_fail.out.json" SEC-007)"
+[ "$r" = "FAIL" ] && pass "CASE (gitleaks): finding -> aggregate FAIL" || fail "expected FAIL, got $r"
+
+# Malformed wrapped report (wrong shape) -> ERROR.
+check_aggregate_error "CASE (gitleaks): malformed wrapped report" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-malformed-report.json" "$EXPECTED_FULL_REPO" SEC-007
+
+# Structurally incomplete artifact (missing required envelope fields) -> ERROR.
+check_aggregate_error "CASE (gitleaks): artifact missing required fields" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-missing-fields.json" "$EXPECTED_FULL_REPO" SEC-007
+
+# Tool missing (no artifact at all) -> no runs -> UNPROVEN.
+run_adapter "$GITLEAKS" "$TMP_DIR/does-not-exist.json" "$EXPECTED_FULL_REPO" SEC-007
+runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
+[ "$runs" = "[]" ] && pass "CASE (gitleaks): tool-missing emits no runs" || fail "expected empty runs, got $runs"
+
+# Silently refuses unauthorized controls.
+run_adapter "$GITLEAKS" "$FIXTURES/gitleaks-artifact-clean-full-repo.json" "$EXPECTED_FULL_REPO" SEC-006 SEC-065
+runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
+[ "$runs" = "[]" ] && pass "CASE (gitleaks): silently refuses unauthorized controls (SEC-006, SEC-065)" \
+  || fail "expected empty runs for unauthorized controls, got $runs"
 
 # ==================================================================
-# osv-scanner adapter
+# osv-scanner: SEC-060, fail-open bug fixed, manifest-coverage-aware
 # ==================================================================
 
-# CASE O1: clean scan -> SEC-060 fully satisfiable by this capability
-# alone (single mode, single requirement) -> PASS.
-run_adapter "$OSV" "$FIXTURES/osv-clean.json" SEC-060
-runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-evaluate_runs "$runs" "$TMP_DIR/o1.out.json"
-r="$(result_for "$TMP_DIR/o1.out.json" SEC-060)"
-[ "$r" = "PASS" ] && pass "CASE O1: osv-scanner clean scan alone -> PASS (SEC-060 needs only DEPENDENCY_SCANNER)" \
-  || fail "CASE O1: expected PASS, got $r"
+# CASE P8: {} report (no 'results' key at all) -> ERROR, never treated as
+# a clean scan. This is the exact fail-open bug from human review.
+check_aggregate_error "CASE P8 (osv-scanner): empty-object report is NOT a clean scan" \
+  "$OSV" "$FIXTURES/osv-artifact-empty-object-report.json" "$EXPECTED_FULL_REPO_MANIFESTS" SEC-060
 
-# CASE O2: a HIGH-severity finding -> VIOLATED -> FAIL.
-run_adapter "$OSV" "$FIXTURES/osv-finding-high.json" SEC-060
-runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-evaluate_runs "$runs" "$TMP_DIR/o2.out.json"
-r="$(result_for "$TMP_DIR/o2.out.json" SEC-060)"
-[ "$r" = "FAIL" ] && pass "CASE O2: osv-scanner HIGH finding -> FAIL" || fail "CASE O2: expected FAIL, got $r"
+# CASE P9: clean report, but scanned_inputs doesn't cover all expected
+# manifests -> UNPROVEN (no contribution), not PASS.
+check_contribution "CASE P9 (osv-scanner): clean + incomplete manifest coverage" \
+  "$OSV" "$FIXTURES/osv-artifact-clean-incomplete-manifests.json" "$EXPECTED_FULL_REPO_MANIFESTS" SEC-060 NONE
 
-# CASE O3: only LOW-severity findings present -> still SATISFIED, matching
-# the catalog's exact wording ("no unresolved critical/high finding") --
-# proves the adapter doesn't overclaim beyond what the control actually
-# requires.
-run_adapter "$OSV" "$FIXTURES/osv-finding-low-only.json" SEC-060
+# Clean + full manifest coverage + verified target -> SATISFIED -> PASS
+# end-to-end (SEC-060 needs only DEPENDENCY_SCANNER).
+run_adapter "$OSV" "$FIXTURES/osv-artifact-clean-full-coverage.json" "$EXPECTED_FULL_REPO_MANIFESTS" SEC-060
 runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-evaluate_runs "$runs" "$TMP_DIR/o3.out.json"
-r="$(result_for "$TMP_DIR/o3.out.json" SEC-060)"
-[ "$r" = "PASS" ] && pass "CASE O3: osv-scanner LOW-only findings still -> PASS (matches catalog's critical/high wording)" \
-  || fail "CASE O3: expected PASS, got $r"
+evaluate_runs "$runs" "$TMP_DIR/o_pass.out.json"
+r="$(result_for "$TMP_DIR/o_pass.out.json" SEC-060)"
+[ "$r" = "PASS" ] && pass "CASE (osv-scanner): clean + full manifest coverage -> PASS" || fail "expected PASS, got $r"
 
-# CASE O4: tool missing -> no runs -> UNPROVEN (absent from results).
-run_adapter "$OSV" "$TMP_DIR/does-not-exist.json" SEC-060
+# A HIGH finding is trusted even with incomplete manifest coverage
+# (positive evidence asymmetry) -> VIOLATED -> FAIL.
+run_adapter "$OSV" "$FIXTURES/osv-artifact-finding-high-incomplete-manifests.json" "$EXPECTED_FULL_REPO_MANIFESTS" SEC-060
 runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-[ "$runs" = "[]" ] && pass "CASE O4: osv-scanner tool-missing emits no runs" \
-  || fail "CASE O4: expected empty runs, got $runs"
+evaluate_runs "$runs" "$TMP_DIR/o_fail_partial.out.json"
+r="$(result_for "$TMP_DIR/o_fail_partial.out.json" SEC-060)"
+[ "$r" = "FAIL" ] && pass "CASE (osv-scanner): HIGH finding trusted despite incomplete manifest coverage -> FAIL" \
+  || fail "expected FAIL, got $r"
 
-# CASE O5: malformed report -> ERROR.
-run_adapter "$OSV" "$FIXTURES/osv-malformed.json" SEC-060
+# A HIGH finding with full coverage -> also FAIL.
+run_adapter "$OSV" "$FIXTURES/osv-artifact-finding-high-full-coverage.json" "$EXPECTED_FULL_REPO_MANIFESTS" SEC-060
 runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-evaluate_runs "$runs" "$TMP_DIR/o5.out.json"
-r="$(result_for "$TMP_DIR/o5.out.json" SEC-060)"
-[ "$r" = "ERROR" ] && pass "CASE O5: malformed osv-scanner report -> ERROR" || fail "CASE O5: expected ERROR, got $r"
+evaluate_runs "$runs" "$TMP_DIR/o_fail_full.out.json"
+r="$(result_for "$TMP_DIR/o_fail_full.out.json" SEC-060)"
+[ "$r" = "FAIL" ] && pass "CASE (osv-scanner): HIGH finding + full coverage -> FAIL" || fail "expected FAIL, got $r"
 
-# CASE O6: osv-scanner is not authorized for SEC-061/SEC-062 even though
-# both list DEPENDENCY_SCANNER -- requesting them returns nothing.
-run_adapter "$OSV" "$FIXTURES/osv-clean.json" SEC-061 SEC-062
+# Only LOW findings present + full coverage -> still SATISFIED, matching
+# the catalog's exact "no unresolved critical/high" wording -> PASS.
+run_adapter "$OSV" "$FIXTURES/osv-artifact-low-only-full-coverage.json" "$EXPECTED_FULL_REPO_MANIFESTS" SEC-060
 runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-[ "$runs" = "[]" ] && pass "CASE O6: osv-scanner silently refuses unauthorized controls (SEC-061, SEC-062)" \
-  || fail "CASE O6: expected empty runs for unauthorized controls, got $runs"
+evaluate_runs "$runs" "$TMP_DIR/o_low.out.json"
+r="$(result_for "$TMP_DIR/o_low.out.json" SEC-060)"
+[ "$r" = "PASS" ] && pass "CASE (osv-scanner): LOW-only + full coverage -> PASS" || fail "expected PASS, got $r"
+
+# An unrecognized severity string fails closed to ERROR for the whole
+# artifact, rather than being silently excluded from the critical/high
+# check.
+check_aggregate_error "CASE (osv-scanner): unrecognized severity value" \
+  "$OSV" "$FIXTURES/osv-artifact-unrecognized-severity.json" "$EXPECTED_FULL_REPO_MANIFESTS" SEC-060
+
+# Tool missing.
+run_adapter "$OSV" "$TMP_DIR/does-not-exist.json" "$EXPECTED_FULL_REPO_MANIFESTS" SEC-060
+runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
+[ "$runs" = "[]" ] && pass "CASE (osv-scanner): tool-missing emits no runs" || fail "expected empty runs, got $runs"
+
+# Silently refuses unauthorized controls.
+run_adapter "$OSV" "$FIXTURES/osv-artifact-clean-full-coverage.json" "$EXPECTED_FULL_REPO_MANIFESTS" SEC-061 SEC-062
+runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
+[ "$runs" = "[]" ] && pass "CASE (osv-scanner): silently refuses unauthorized controls (SEC-061, SEC-062)" \
+  || fail "expected empty runs for unauthorized controls, got $runs"
 
 # ==================================================================
-# Semgrep adapter
+# Semgrep: SEC-055/SEC-056, verified rule_map only, target/scope-aware
 # ==================================================================
 
-# CASE S1: clean scan where the mapped rules actually ran -> SATISFIED
-# for both SEC-055 and SEC-056 -> both PASS (neither is dynamic_required
-# or human_judgment_required, so STATIC_ANALYZER alone suffices).
-run_adapter "$SEMGREP" "$FIXTURES/semgrep-clean-with-rules-run.json" SEC-055 SEC-056
-runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-evaluate_runs "$runs" "$TMP_DIR/s1.out.json"
-r55="$(result_for "$TMP_DIR/s1.out.json" SEC-055)"
-r56="$(result_for "$TMP_DIR/s1.out.json" SEC-056)"
-[ "$r55" = "PASS" ] && [ "$r56" = "PASS" ] && pass "CASE S1: semgrep clean, rule-covered scan -> PASS for SEC-055 and SEC-056" \
-  || fail "CASE S1: expected [PASS, PASS], got [$r55, $r56]"
+# CASE P10: no config.rule_map supplied at all -- the illustrative
+# constant in this module must NOT be consulted by production code, so
+# nothing is authorized despite rules_run listing the illustrative rule
+# IDs verbatim.
+check_contribution "CASE P10 (semgrep): no verified rule_map -> illustrative mapping cannot create PASS" \
+  "$SEMGREP" "$FIXTURES/semgrep-artifact-clean-no-rule-map.json" "$EXPECTED_FULL_REPO" SEC-056 NONE
 
-# CASE S2: a real finding for a mapped rule -> VIOLATED -> FAIL for that
-# control only (SEC-056 here); SEC-055's rule never ran in this fixture,
-# so SEC-055 gets no contribution at all -> UNPROVEN, not silently PASS.
-run_adapter "$SEMGREP" "$FIXTURES/semgrep-finding.json" SEC-055 SEC-056
+# CASE P11: a caller-verified rule_map, the mapped rules actually ran,
+# and the target/scope matches what was expected -> SATISFIED for both
+# mapped controls -> both PASS (neither is dynamic/human-judgment gated).
+run_adapter "$SEMGREP" "$FIXTURES/semgrep-artifact-clean-verified-full-scope.json" "$EXPECTED_FULL_REPO" SEC-055 SEC-056
 runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-evaluate_runs "$runs" "$TMP_DIR/s2.out.json"
-r55="$(result_for "$TMP_DIR/s2.out.json" SEC-055)"
-r56="$(result_for "$TMP_DIR/s2.out.json" SEC-056)"
-[ "$r56" = "FAIL" ] && [ "$r55" = "MISSING" ] && pass "CASE S2: semgrep finding -> FAIL for the matched control; unrun rule leaves the other control unaddressed" \
-  || fail "CASE S2: expected [MISSING, FAIL] for [SEC-055, SEC-056], got [$r55, $r56]"
+evaluate_runs "$runs" "$TMP_DIR/s_pass.out.json"
+r55="$(result_for "$TMP_DIR/s_pass.out.json" SEC-055)"
+r56="$(result_for "$TMP_DIR/s_pass.out.json" SEC-056)"
+[ "$r55" = "PASS" ] && [ "$r56" = "PASS" ] && pass "CASE P11 (semgrep): verified rule_map + rules ran + full scope -> PASS for SEC-055 and SEC-056" \
+  || fail "CASE P11: expected [PASS, PASS], got [$r55, $r56]"
 
-# CASE S3: unmapped check_id -> silently dropped, no contribution for any
-# control -- proves "unknown/unmapped output: UNPROVEN, never PASS."
-run_adapter "$SEMGREP" "$FIXTURES/semgrep-unmapped-rule.json" SEC-055 SEC-056
-runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-[ "$runs" = "[]" ] && pass "CASE S3: unmapped semgrep check_id produces no contribution at all" \
-  || fail "CASE S3: expected empty runs for an entirely-unmapped rule, got $runs"
+# CASE P12: same verified rule_map and rules ran, but the artifact's
+# declared scope is "partial" while the caller expected "full-repo" ->
+# target mismatch -> not PASS.
+check_contribution "CASE P12 (semgrep): verified rule_map + rules ran but scope mismatch" \
+  "$SEMGREP" "$FIXTURES/semgrep-artifact-clean-verified-partial-scope.json" "$EXPECTED_FULL_REPO" SEC-056 NONE
 
-# CASE S4: mapped rules exist in RULE_MAP but NONE of them actually ran in
-# this scan (rules_run only lists an unrelated rule) -> "clean" is
-# meaningless here, so no SATISFIED contribution is emitted -> UNPROVEN.
-run_adapter "$SEMGREP" "$FIXTURES/semgrep-rule-not-run.json" SEC-056
+# A recognized finding from a verified, mapped rule is trusted regardless
+# of scope -> VIOLATED -> FAIL.
+run_adapter "$SEMGREP" "$FIXTURES/semgrep-artifact-finding-verified.json" "$EXPECTED_FULL_REPO" SEC-055 SEC-056
 runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-[ "$runs" = "[]" ] && pass "CASE S4: semgrep clean result is not treated as evidence when the mapped rule never ran" \
-  || fail "CASE S4: expected empty runs when the mapped rule didn't run, got $runs"
+evaluate_runs "$runs" "$TMP_DIR/s_fail.out.json"
+r56="$(result_for "$TMP_DIR/s_fail.out.json" SEC-056)"
+[ "$r56" = "FAIL" ] && pass "CASE (semgrep): verified finding -> FAIL" || fail "expected FAIL, got $r56"
 
-# CASE S5: tool missing -> no runs.
-run_adapter "$SEMGREP" "$TMP_DIR/does-not-exist.json" SEC-056
+# Same finding under partial scope -- still trusted -> FAIL (positive
+# evidence asymmetry, same as Gitleaks/osv-scanner above).
+run_adapter "$SEMGREP" "$FIXTURES/semgrep-artifact-finding-verified-partial-scope.json" "$EXPECTED_FULL_REPO" SEC-056
 runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-[ "$runs" = "[]" ] && pass "CASE S5: semgrep tool-missing emits no runs" || fail "CASE S5: expected empty runs, got $runs"
+evaluate_runs "$runs" "$TMP_DIR/s_fail_partial.out.json"
+r56="$(result_for "$TMP_DIR/s_fail_partial.out.json" SEC-056)"
+[ "$r56" = "FAIL" ] && pass "CASE (semgrep): verified finding under partial scope still -> FAIL" \
+  || fail "expected FAIL, got $r56"
 
-# CASE S6: malformed report -> ERROR.
-run_adapter "$SEMGREP" "$FIXTURES/semgrep-malformed.json" SEC-055 SEC-056
+# An unmapped check_id (not in the verified rule_map either) is silently
+# dropped -- no contribution for any control.
+run_adapter "$SEMGREP" "$FIXTURES/semgrep-artifact-unmapped-rule-verified.json" "$EXPECTED_FULL_REPO" SEC-055 SEC-056
 runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-evaluate_runs "$runs" "$TMP_DIR/s6.out.json"
-r55="$(result_for "$TMP_DIR/s6.out.json" SEC-055)"
-r56="$(result_for "$TMP_DIR/s6.out.json" SEC-056)"
-[ "$r55" = "ERROR" ] && [ "$r56" = "ERROR" ] && pass "CASE S6: malformed semgrep report -> ERROR for every requested control" \
-  || fail "CASE S6: expected [ERROR, ERROR], got [$r55, $r56]"
+[ "$runs" = "[]" ] && pass "CASE (semgrep): unmapped check_id (even with a verified rule_map present) produces no contribution" \
+  || fail "expected empty runs, got $runs"
 
-# CASE S7: semgrep (STATIC_ANALYZER) is not authorized for SEC-001 (which
-# needs SEMANTIC_REVIEW/DYNAMIC_API) -- requesting it returns nothing,
-# and even if it somehow did, evidence_model.py's own capability check
-# would independently reject a STATIC_ANALYZER contribution to SEC-001
-# (defense in depth, proven already by test-evidence-model.sh CASE A).
-run_adapter "$SEMGREP" "$FIXTURES/semgrep-clean-with-rules-run.json" SEC-001
+# The mapped rule exists in the verified rule_map but never actually ran
+# (rules_run only lists an unrelated rule) -> no contribution.
+check_contribution "CASE (semgrep): verified rule_map but mapped rule never ran" \
+  "$SEMGREP" "$FIXTURES/semgrep-artifact-rule-not-run-verified.json" "$EXPECTED_FULL_REPO" SEC-056 NONE
+
+# Malformed wrapped report -> ERROR.
+check_aggregate_error "CASE (semgrep): malformed wrapped report" \
+  "$SEMGREP" "$FIXTURES/semgrep-artifact-malformed-report.json" "$EXPECTED_FULL_REPO" SEC-055 SEC-056
+
+# Tool missing.
+run_adapter "$SEMGREP" "$TMP_DIR/does-not-exist.json" "$EXPECTED_FULL_REPO" SEC-056
 runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-[ "$runs" = "[]" ] && pass "CASE S7: semgrep silently refuses an unauthorized control (SEC-001)" \
-  || fail "CASE S7: expected empty runs for an unauthorized control, got $runs"
+[ "$runs" = "[]" ] && pass "CASE (semgrep): tool-missing emits no runs" || fail "expected empty runs, got $runs"
+
+# Silently refuses an unauthorized control (SEC-001 needs
+# SEMANTIC_REVIEW/DYNAMIC_API, not STATIC_ANALYZER).
+run_adapter "$SEMGREP" "$FIXTURES/semgrep-artifact-clean-verified-full-scope.json" "$EXPECTED_FULL_REPO" SEC-001
+runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
+[ "$runs" = "[]" ] && pass "CASE (semgrep): silently refuses an unauthorized control (SEC-001)" \
+  || fail "expected empty runs for an unauthorized control, got $runs"
 
 echo ""
 echo "diana/security/adapters/test-adapters.sh: $pass_count passed, $fail_count failed"

@@ -1,6 +1,0 @@
-{
-  "results": [
-    {"check_id": "python.lang.security.insecure-random", "path": "app/tokens.py"}
-  ],
-  "rules_run": ["python.lang.security.insecure-random"]
-}

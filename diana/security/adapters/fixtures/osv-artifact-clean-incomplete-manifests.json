@@ -1,0 +1,25 @@
+{
+  "tool": {
+    "name": "osv-scanner",
+    "version": "1.7.0"
+  },
+  "execution": {
+    "completed": true
+  },
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "c51ce15a301df2d7804b36d59e9d508b8653249b",
+    "root": ".",
+    "scope": "full-repo"
+  },
+  "config": {},
+  "scanned_inputs": [
+    "requirements.txt"
+  ],
+  "report": {
+    "results": []
+  },
+  "report_binding": {
+    "sha256": "5021e624e752b001ce3e3846e8f158ed4aeb93a4c9a72fdb35a0c5b14a0eea84"
+  }
+}
