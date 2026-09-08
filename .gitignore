@@ -114,6 +114,7 @@
 !diana/security/adapters/fixtures/*.json
 !diana/security/verifiers/
 !diana/security/verifiers/semgrep-rules.yml
+!diana/security/verifiers/gitleaks-config.toml
 !diana/security/test-ci-verifier-runs.sh
 !diana/security/dynamic/
 !diana/security/dynamic/README.md

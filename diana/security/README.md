@@ -886,6 +886,170 @@ evidence, not blanket absence) as described above.
   control/requirement its catalog `verification.modes` doesn't already
   structurally permit.
 
+## Security Track remediation round B
+
+A second focused round, starting from round A's real baseline (26
+`FULLY_COVERED` / 26 `PARTIALLY_COVERED` / 23 `NOT_COVERED`,
+`live_execution_wired_count` 4, `resulting_state` `UNPROVEN` for all 75).
+Three priorities, again addressed honestly rather than by loosening any
+catalog mode, evidence-model aggregation semantics, or inventing
+authorization the catalog doesn't permit.
+
+### Priority 1: close SEC-006/SEC-065's zero-capability gap properly
+
+Round A left `SEC-006`/`SEC-065` explicitly blocked because
+`gitleaks_adapter.py`'s `target.scope` model only recognized
+`"full-repo"` -- neither control's claim ("no third-party secret in the
+shipped frontend bundle" / "elevated keys never shipped to a client
+build, conjoined with never committed to source") could be honestly
+represented. This round fixes the underlying representation instead of
+merely adding the controls to `AUTHORIZED_EVIDENCE`:
+
+- `SCOPE_FRONTEND_BUNDLE` ("exactly the shipped/built frontend bundle
+  output") for `SEC-006`.
+- `SCOPE_FULL_REPO_AND_FRONTEND_BUNDLE` (both surfaces scanned together
+  in ONE artifact) for `SEC-065` -- its required_evidence string is a
+  conjunction across two surfaces, and `evidence_model.py`'s Phase 1
+  aggregation only supports OR-semantics across contributions to one
+  `(control_id, requirement)` pair. Rather than change that shared
+  aggregation (out of bounds for an adapter-level round), the conjunction
+  is pushed onto the artifact producer: a `SATISFIED` claim under this
+  scope asserts both surfaces were genuinely scanned together, exactly
+  the same trust model `"full-repo"` already uses for SEC-007.
+- Each control now has an explicit `REQUIRED_SCOPE_FOR_SATISFIED` (the
+  exact scope a clean scan needs to count as `SATISFIED`) and
+  `RELEVANT_SCOPES_FOR_VIOLATION` (which scopes make a finding count as
+  evidence at all) -- `SEC-007` keeps its original scope-independent
+  `VIOLATED` behavior (`None` sentinel) so a finding under any scope
+  string still counts, unchanged from Phase 2.
+- Scope is never fabricated: `ci_verifier_runs.py` only ever declares
+  `SCOPE_FRONTEND_BUNDLE`/`SCOPE_FULL_REPO_AND_FRONTEND_BUNDLE` when
+  `_detect_frontend_bundle_dir()` finds a REAL, existing conventional
+  build-output directory (`dist`, `build`, `out`, `.next`,
+  `public/build`) at the repository root -- deterministic trusted
+  filesystem inspection, never a model guess. This repository (Diana's
+  own tooling, not a deployed web app) has no such directory, so those
+  two scopes are correctly never attempted here; `SEC-006`/`SEC-065`
+  stay honestly `UNPROVEN` rather than a scope being invented.
+
+**Gitleaks is now wired into live execution.** A version-pinned
+(`8.30.1`), SHA256-checksum-verified (checksum pinned in
+`ci_verifier_runs.py`'s own source, from Gitleaks' published
+`_checksums.txt`) release binary is downloaded on demand -- never
+`@latest`, never unverified -- using the same "no workflow-file changes
+needed" pattern round A established for Semgrep. It runs against a
+pinned, committed config (`diana/security/verifiers/gitleaks-config.toml`)
+that extends Gitleaks' own default ruleset (`[extend] useDefault = true`)
+with an allowlist for this Security Track's own synthetic test fixtures
+(fake secret-shaped strings that exist specifically to test the
+adapter's parsing logic -- the standard, honest way to handle intentional
+fixtures with a real scanner, not evidence-hiding; see that file's own
+comments). Always scans `SCOPE_FULL_REPO` for `SEC-007`; additionally
+scans a detected frontend-bundle directory for `SEC-006`/`SEC-065` only
+when one is actually found.
+
+### Priority 2: deterministic-repo-scan wired into live execution
+
+`deterministic_repo_adapter.py`'s `SEC-064` capability (added in round A)
+was capability-only until this round. `ci_verifier_runs.py` now performs
+a real, deterministic filesystem traversal (`_list_served_paths` --
+sorted, relative, forward-slash paths, no execution of anything found)
+of the SAME detected public deployment web root Gitleaks' frontend-bundle
+scope uses, and wraps the result as the `{"served_paths": [...]}` report
+`deterministic_repo_adapter.py` expects. Protected-base checkout only,
+inspected as data; explicit producer identity
+(`diana-deterministic-repo-scan`, this module's own internal version
+string, never a fabricated third-party name); exact repository+commit
+target binding. If no web root directory is detected (true for this
+repository today), `SEC-064`'s static half correctly stays `UNPROVEN`
+rather than a served-path listing being fabricated for a deployment
+surface that does not exist.
+
+### Priority 3: one dynamic verifier family brought live
+
+The `sensitive-file-paths-not-fetchable` scenario (`SEC-064`'s dynamic
+half) is now genuinely live. `ci_verifier_runs.py` starts a real HTTP
+server bound ONLY to `127.0.0.1` on an OS-assigned ephemeral port
+(`http.server.SimpleHTTPRequestHandler`, this process's own, torn down
+in a `finally` block), serving the SAME detected web root as Priority 2,
+and issues real negative-fetch GET requests for a small, fixed,
+non-PR-influenced set of well-known sensitive paths
+(`SENSITIVE_FETCH_CANDIDATE_PATHS`: `.env`, `.git/config`, `backup.sql`,
+`backup.zip`). No production target, no public network exposure, no
+PR-provided paths or commands, no PR-head code executed (the server only
+serves static file bytes, exactly like Gitleaks/Semgrep read files as
+data). Every probe has a short, bounded timeout
+(`_LOCAL_FETCH_TIMEOUT_SECONDS`). The result is normalized through the
+real, unmodified `dynamic_normalizer.py`/`dynamic_base.py` -- environment
+declared as `LOCAL` (never inferred), execution context (environment +
+repository + commit + `base_url`) verified exactly like every other
+dynamic scenario. Only attempted when a real web root directory is
+detected; otherwise `SEC-064`'s dynamic half correctly stays `UNPROVEN`.
+
+This was chosen over the other 22 registered dynamic families because it
+required no external application, no test identities, no payment-
+provider sandbox, and no model-attempt harness to run honestly -- it is
+the smallest scenario that can produce genuinely truthful evidence using
+only what this round already had (a detected web root, a bounded local
+HTTP server) without becoming a general dynamic execution platform.
+
+### New totals after this round
+
+| capability_coverage | before (round A) | after (round B) |
+|---|---|---|
+| `FULLY_COVERED` | 26 | 27 |
+| `PARTIALLY_COVERED` | 26 | 27 |
+| `NOT_COVERED` | 23 | 21 |
+
+Zero `CRITICAL` controls remain `NOT_COVERED` (16 `HIGH` + 5 `MEDIUM`
+remain `NOT_COVERED`, unchanged in severity mix from round A --
+`SEC-006`/`SEC-065` moved out of `NOT_COVERED` this round). \
+`live_execution_wired_count` is 6, up from 4 (`SEC-007`, `SEC-010`,
+`SEC-011`, `SEC-021`, `SEC-058`, `SEC-064` each received at least one
+genuinely submitted live run this invocation -- some of which stayed
+`UNKNOWN`/`UNPROVEN` because this repository lacks a frontend-bundle
+directory, which is itself honest, not a gap in the wiring).
+
+`resulting_state_counts` remains `{PASS: 0, FAIL: 0, NOT_APPLICABLE: 0,
+UNPROVEN: 75, ERROR: 0}` on this repository today -- still zero `PASS`
+anywhere. This is expected, not a shortfall in this round's wiring:
+every one of the 75 controls' `required_evidence` is an AND across
+(typically) a static and a dynamic (or semantic-reviewer) claim, and no
+single control yet has ALL of its required items live-satisfied at once
+(e.g. `SEC-007` also needs a semantic "secrets loaded from
+environment/secret-manager configuration" claim no live semantic
+reviewer session yet produces; `SEC-010`/`SEC-011`/`SEC-021`/`SEC-058`
+have live static evidence but their dynamic half, while now a
+capability, isn't the one family this round brought live). Reaching
+`PASS` anywhere is future work, and reaching PASS honestly requires that
+AND to be genuinely, individually earned -- exactly what "no finding !=
+PASS" has meant since Phase 1.
+
+### What this round does not do
+
+- Does not wire live semantic-reviewer (`SEMANTIC_REVIEW`/`HUMAN`)
+  sessions into CI -- every control needing
+  `human_judgment_required=true` remains capability-only.
+- Does not bring any dynamic family live besides
+  `sensitive-file-paths-not-fetchable` -- the other 22 registered
+  scenarios (cross-account access, SQL injection, stored XSS, webhook
+  replay, payment-provider sandboxes, AI tool-call enforcement, etc.)
+  remain capability-only; each would need its own real test
+  identities/fixtures/sandbox this round did not build.
+- Does not modify `evidence_model.py`'s aggregation semantics -- SEC-065's
+  conjunction is represented via a single combined-scope artifact, not a
+  change to how multiple contributions to one requirement are combined.
+- Does not claim PASS for any control -- see `resulting_state_counts`
+  above.
+- Does not change `catalog.json`'s modes, or authorize any adapter for a
+  control/requirement its catalog `verification.modes` doesn't already
+  structurally permit.
+- Does not build a generic scanner or dynamic-execution platform --
+  `ci_verifier_runs.py` wires in exactly four real verifier
+  families (Semgrep, Gitleaks, the deterministic-repo-scan, and one
+  dynamic scenario), each using this repository's own pinned
+  rules/config/candidate lists, not a configurable multi-tool framework.
+
 ## Future phases (not started here)
 
 - This README does not promise the exact shape of future work ahead of

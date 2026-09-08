@@ -1,0 +1,33 @@
+# Diana Security -- pinned, committed Gitleaks config for live trusted
+# verifier execution (Security Track remediation round B).
+#
+# Extends Gitleaks' own default ruleset (`[extend] useDefault = true`) --
+# not a replacement -- so this repository benefits from the full,
+# actively-maintained default rule set without Diana reimplementing any
+# of it. The only Diana-specific addition is the allowlist below.
+#
+# Why an allowlist is needed and honest: this Security Track's own test
+# suites (diana/security/adapters/fixtures/, dynamic/fixtures/,
+# reviewer/fixtures/) deliberately contain fake, synthetic strings shaped
+# like a well-known cloud provider's access-key format, specifically to
+# test that gitleaks_adapter.py's own finding-parsing logic works -- they
+# are not real secrets, and their entire purpose is to look like one
+# (deliberately not spelled out literally in this comment, to avoid this
+# config file itself becoming a false-positive source). Scanning them for real would
+# produce a real Gitleaks "leak" and a real VIOLATED SEC-007 evidence
+# item that has nothing to do with an actual credential exposure. This
+# is the standard, industry-normal way to handle intentional test
+# fixtures with a real secret scanner -- not a way to hide or suppress a
+# genuine finding.
+title = "Diana Security Track -- live Gitleaks verifier config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Diana Security Track's own synthetic test fixtures (not real secrets)"
+paths = [
+  '''diana/security/adapters/fixtures/.*''',
+  '''diana/security/dynamic/fixtures/.*''',
+  '''diana/security/reviewer/fixtures/.*''',
+]
