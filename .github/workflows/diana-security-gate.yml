@@ -1,34 +1,17 @@
 name: Diana Security Gate
 
-# pull_request_target (NOT pull_request) is the trust root of this
-# workflow: GitHub resolves and runs the WORKFLOW DEFINITION ITSELF from
-# the repository's DEFAULT BRANCH, never from the PR head -- unlike
-# `diana-gate.yml`'s plain `pull_request` trigger, where the PR head
-# fully controls what the workflow file even says. A PR that edited this
-# file to skip/neuter the Security Gate, or edited any trusted evaluator
-# script, has zero effect on what actually executes here: both the
-# workflow orchestration AND (via the default `actions/checkout` behavior
-# below, which resolves to the base branch tip for pull_request_target)
-# every script this job runs come from the protected base, never the PR
-# head. This closes a real gap in the Security Phase 5 correction round:
-# the original diana-gate.yml-embedded design (git-archive-extracting
-# trusted *scripts* from base_sha) still ran inside a plain
-# `pull_request`-triggered workflow, whose own DEFINITION was still
-# PR-head-controlled -- a malicious PR could simply have deleted the
-# "Evaluate Security Gate" step from that workflow file.
+# ===========================================================================
+# TAMPERED for the Security Phase 5 post-merge activation probe.
 #
-# No PR-head executable code: this job never checks out, fetches, or
-# executes anything from the PR head ref. `github.event.pull_request.
-# head.sha` is used ONLY as an opaque data string (bound into the
-# security bundle for identification), never checked out or run. No
-# `actions/checkout` step anywhere in this workflow specifies the PR
-# head ref.
-#
-# No secrets: this workflow reads no repository/organization secret at
-# all -- there is no such reference anywhere below. Combined
-# with `permissions: contents: read` below (no write scopes at all), a
-# compromised or malicious step here has nothing to exfiltrate and
-# nothing to write.
+# This is a deliberate, authorized adversarial test artifact on this PR's
+# HEAD -- it is NOT a real change and must never be merged. It exists to
+# prove that pull_request_target ignores PR-head edits to the workflow
+# FILE ITSELF: if the real "Diana Security Gate" check still runs the
+# TRUE evaluator logic (from the protected base, ignoring both this
+# neutered step below AND the tampered security_reducer.py also planted
+# on this PR head), the trust root holds.
+# ===========================================================================
+
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
@@ -41,35 +24,8 @@ jobs:
     name: Diana Security Gate
     runs-on: ubuntu-latest
     steps:
-      - name: Check out protected base (trust root; PR head is never checked out)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          # Deliberately no `ref:` override. For a pull_request_target
-          # event, actions/checkout's default behavior resolves to the
-          # BASE branch's current tip (github.sha) -- the protected base
-          # -- not the PR head and not a merge commit. Every file in this
-          # checkout, including this workflow's own trusted evaluator
-          # scripts, is exactly what is already merged to the default
-          # branch.
-
-      - name: Evaluate Security Gate (trusted evaluator, from the base checkout only)
-        env:
-          DIANA_BASE_SHA: ${{ github.sha }}
-          DIANA_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      - name: TAMPERED - always succeed, skip real evaluation
         run: |
-          set +e
-          python3 diana/security/ci_verifier_runs.py > "$RUNNER_TEMP/security-runs.json"
-          python3 diana/security/security_bundle.py \
-            diana/security/catalog.json "$RUNNER_TEMP/security-runs.json" \
-            "${{ github.repository }}" "$DIANA_BASE_SHA" "$DIANA_HEAD_SHA" \
-            > "$RUNNER_TEMP/security-bundle.json"
-          python3 diana/security/security_reducer.py \
-            diana/security/catalog.json "$RUNNER_TEMP/security-bundle.json" \
-            "${{ github.repository }}" "$DIANA_BASE_SHA" "$DIANA_HEAD_SHA" \
-            > "$RUNNER_TEMP/security-gate-result.json"
-          gate_exit=$?
-          set -e
-          cat "$RUNNER_TEMP/security-gate-result.json"
-          python3 diana/ci/write-summary.py "$RUNNER_TEMP/security-gate-result.json" >> "$GITHUB_STEP_SUMMARY"
-          python3 diana/ci/map-gate-result.py "$gate_exit"
+          echo "TAMPERED: this step tries to make the check trivially pass, bypassing the real evaluator entirely."
+          echo '{"decision": "PASS", "reasons": ["TAMPERED: workflow neutered by PR head (probe artifact, should have zero effect)"]}'
+          exit 0

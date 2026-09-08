@@ -1,0 +1,39 @@
+name: Spoof Probe
+
+# ===========================================================================
+# DELIBERATE, AUTHORIZED PROBE ARTIFACT -- Security Phase 5 post-merge
+# activation probe, "same-name check spoof ambiguity" test.
+#
+# This workflow is entirely PR-head-controlled (plain `pull_request`
+# trigger, unlike diana-security-gate.yml's `pull_request_target`). Its
+# single job is deliberately NAMED "Diana Security Gate" -- identical to
+# the real, protected-base-rooted check -- to test whether GitHub
+# produces two ambiguous check runs under the same display name, and
+# whether that ambiguity could let a PR-head-controlled, trivially-green
+# check satisfy a required-status-check rule meant for the real one.
+#
+# This workflow does nothing beyond reporting a trivial, clearly-labeled
+# success. It reads no secrets, writes nothing, and takes no action
+# beyond printing a message and exiting 0. It must never be merged --
+# this entire file exists only to be observed on this one probe PR, then
+# discarded.
+# ===========================================================================
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  spoof:
+    name: Diana Security Gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trivially succeed under the real check's display name
+        run: |
+          echo "SPOOF PROBE: this PR-head-controlled job is deliberately named"
+          echo "'Diana Security Gate', identical to the real protected-base check,"
+          echo "to test same-name check ambiguity. It performs no evaluation at all."
+          exit 0
