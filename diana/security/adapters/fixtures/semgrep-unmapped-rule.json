@@ -1,0 +1,6 @@
+{
+  "results": [
+    {"check_id": "python.lang.security.some-other-rule-not-in-our-table", "path": "app/foo.py"}
+  ],
+  "rules_run": ["python.lang.security.some-other-rule-not-in-our-table"]
+}

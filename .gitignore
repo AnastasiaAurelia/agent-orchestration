@@ -95,6 +95,15 @@
 !diana/security/test-catalog.sh
 !diana/security/evidence_model.py
 !diana/security/test-evidence-model.sh
+!diana/security/adapters/
+!diana/security/adapters/README.md
+!diana/security/adapters/adapter_base.py
+!diana/security/adapters/gitleaks_adapter.py
+!diana/security/adapters/osv_scanner_adapter.py
+!diana/security/adapters/semgrep_adapter.py
+!diana/security/adapters/test-adapters.sh
+!diana/security/adapters/fixtures/
+!diana/security/adapters/fixtures/*.json
 
 # Explicit reminders for common files that must never be published here.
 .env

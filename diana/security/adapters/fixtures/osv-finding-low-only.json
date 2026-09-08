@@ -1,0 +1,15 @@
+{
+  "results": [
+    {
+      "source": {"path": "package-lock.json"},
+      "packages": [
+        {
+          "package": {"name": "leftpad", "version": "1.0.0"},
+          "vulnerabilities": [
+            {"id": "GHSA-aaaa-bbbb-cccc", "severity": "LOW"}
+          ]
+        }
+      ]
+    }
+  ]
+}

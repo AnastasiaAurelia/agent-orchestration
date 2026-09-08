@@ -1,0 +1,8 @@
+[
+  {
+    "Description": "AWS Access Key",
+    "File": "config/settings.py",
+    "RuleID": "aws-access-key-id",
+    "Secret": "AKIAABCDEFGHIJKLMNOP"
+  }
+]

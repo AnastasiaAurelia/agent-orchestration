@@ -1,0 +1,4 @@
+{
+  "results": [],
+  "rules_run": ["python.lang.security.insecure-random", "python.lang.security.weak-crypto-cipher"]
+}
