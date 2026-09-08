@@ -89,10 +89,10 @@
 !diana/templates/
 !diana/templates/*.md
 !diana/security/
-!diana/security/*.md
-!diana/security/*.json
-!diana/security/*.py
-!diana/security/*.sh
+!diana/security/README.md
+!diana/security/catalog.json
+!diana/security/validate_catalog.py
+!diana/security/test-catalog.sh
 
 # Explicit reminders for common files that must never be published here.
 .env
