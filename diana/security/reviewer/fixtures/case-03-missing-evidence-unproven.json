@@ -1,0 +1,37 @@
+{
+  "reviewer": {
+    "session_id": "reviewer-session-001",
+    "independent_from_implementation": true,
+    "session_type": "fresh_read_only"
+  },
+  "execution": {
+    "completed": true,
+    "mutations_attempted": false
+  },
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "4dd125a5790f593a229b468d6875dba3c11b9b07"
+  },
+  "verifier_type": "SEMANTIC_REVIEW",
+  "control_id": "SEC-001",
+  "requirement": "server-side object ownership/permission check exists on every read/write route",
+  "files_inspected": [
+    "app/orders/views.py"
+  ],
+  "architecture_reasoning": "Traced the request/response path in app/orders/views.py: the handler derives the authenticated user from the trusted session (request.user), loads the Order record by primary key from the URL, and compares order.owner_id == request.user.id before returning or mutating the record. No client-supplied field overrides this check.",
+  "call_chain": "HTTP request -> auth middleware (session) -> OrdersView.get/post -> Order.objects.get(pk=order_id) -> ownership check -> response",
+  "evidence_references": [
+    {
+      "file": "app/orders/views.py",
+      "detail": "ownership check at line 42: if order.owner_id != request.user.id: raise PermissionDenied"
+    }
+  ],
+  "unresolved_assumptions": [
+    "whether the ORM mixin enforces ownership internally was not verified"
+  ],
+  "result": "UNPROVEN",
+  "result_reasoning": "Could not locate the ownership-check logic within the time available; the handler delegates to a third-party ORM mixin whose authorization behavior was not traceable from the files inspected. Flagging as unresolved rather than guessing.",
+  "artifact_binding": {
+    "sha256": "6a802d1e9d2fddc7a5ff896f828dada95a3b5733caf2673efda2b9320243bf5a"
+  }
+}

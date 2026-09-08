@@ -1,0 +1,35 @@
+{
+  "reviewer": {
+    "session_id": "reviewer-session-001",
+    "independent_from_implementation": true,
+    "session_type": "fresh_read_only"
+  },
+  "execution": {
+    "completed": true,
+    "mutations_attempted": false
+  },
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "4dd125a5790f593a229b468d6875dba3c11b9b07"
+  },
+  "verifier_type": "SEMANTIC_REVIEW",
+  "control_id": "SEC-066",
+  "requirement": "row-level security is enabled on tables containing user-scoped data, with policies enforced at the database layer",
+  "files_inspected": [
+    "db/migrations/0007_rls_policies.sql"
+  ],
+  "architecture_reasoning": "Traced the request/response path in app/orders/views.py: the handler derives the authenticated user from the trusted session (request.user), loads the Order record by primary key from the URL, and compares order.owner_id == request.user.id before returning or mutating the record. No client-supplied field overrides this check.",
+  "call_chain": "HTTP request -> auth middleware (session) -> OrdersView.get/post -> Order.objects.get(pk=order_id) -> ownership check -> response",
+  "evidence_references": [
+    {
+      "file": "db/migrations/0007_rls_policies.sql",
+      "detail": "ENABLE ROW LEVEL SECURITY + CREATE POLICY scoped to auth.uid()"
+    }
+  ],
+  "unresolved_assumptions": [],
+  "result": "PASS",
+  "result_reasoning": "Confirmed via `SELECT relrowsecurity FROM pg_class` and policy definitions in db/migrations/0007_rls_policies.sql that row-level security is enabled on the orders and profiles tables, with USING/WITH CHECK clauses scoped to auth.uid().",
+  "artifact_binding": {
+    "sha256": "b2f74a3a32f22bebf666cf6a57e6120a4d38e6db9e4db6f366b49adbacc6f023"
+  }
+}

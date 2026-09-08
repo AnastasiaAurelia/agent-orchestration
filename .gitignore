@@ -112,6 +112,13 @@
 !diana/security/dynamic/test-dynamic.sh
 !diana/security/dynamic/fixtures/
 !diana/security/dynamic/fixtures/*.json
+!diana/security/reviewer/
+!diana/security/reviewer/README.md
+!diana/security/reviewer/reviewer_base.py
+!diana/security/reviewer/reviewer_normalizer.py
+!diana/security/reviewer/test-reviewer.sh
+!diana/security/reviewer/fixtures/
+!diana/security/reviewer/fixtures/*.json
 
 # Explicit reminders for common files that must never be published here.
 .env

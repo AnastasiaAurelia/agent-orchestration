@@ -1,0 +1,37 @@
+{
+  "reviewer": {
+    "session_id": "reviewer-session-001",
+    "independent_from_implementation": true,
+    "session_type": "fresh_read_only"
+  },
+  "execution": {
+    "completed": true,
+    "mutations_attempted": false
+  },
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "4dd125a5790f593a229b468d6875dba3c11b9b07"
+  },
+  "verifier_type": "SEMANTIC_REVIEW",
+  "control_id": "SEC-001",
+  "requirement": "server-side object ownership/permission check exists on every read/write route",
+  "files_inspected": [
+    "app/dashboard/views.py"
+  ],
+  "architecture_reasoning": "Reviewed app/dashboard/views.py: the only view module found in this deployment serves a shared, org-wide aggregate with no per-object URL parameter and no user-owned record lookup. No other view modules were located in the time available.",
+  "call_chain": "HTTP request -> auth middleware (session) -> OrdersView.get/post -> Order.objects.get(pk=order_id) -> ownership check -> response",
+  "evidence_references": [
+    {
+      "file": "app/dashboard/views.py",
+      "detail": "single route registered, org-wide aggregate query with no id parameter"
+    }
+  ],
+  "unresolved_assumptions": [
+    "whether an internal-only admin panel module (not found in this pass) exposes a per-object resource was not fully ruled out"
+  ],
+  "result": "NOT_APPLICABLE",
+  "result_reasoning": "SEC-001 does not apply to the routes reviewed: no per-object resource is addressable by id in app/dashboard/views.py.",
+  "artifact_binding": {
+    "sha256": "6987227b2e09efe6ad0b9ac098fd078d5ec5fa45297bd881b3947fca1e4a9637"
+  }
+}
