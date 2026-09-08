@@ -94,6 +94,25 @@ multi-verifier aggregation" below for the exact rules.
   design, the stated departure from Phase 1-3's "never trust self-reported
   conclusions" principle, and the explicit trust-boundary documentation
   (artifact integrity is not producer authenticity).
+- **Security Phase 5 -- Security Gate + CI integration**:
+  `security_bundle.py` builds the complete, deterministic 75-control
+  result bundle (running `evidence_model.py` and explicitly filling
+  `UNPROVEN` for every control with zero submitted runs -- "no run
+  submitted" is never silently absent); `security_reducer.py` reduces a
+  validated bundle to one `PASS`/`REQUIRE_HUMAN`/`FAIL` decision by
+  severity policy; `ci_verifier_runs.py` is the single, explicit (today
+  empty) extension point for real trusted verifier execution. A
+  **separate** required CI check, `.github/workflows/diana-security-
+  gate.yml`, evaluates this using `pull_request_target` -- its workflow
+  *definition itself*, not just the scripts it runs, is resolved from the
+  protected base, never the PR head, so a PR cannot weaken its own
+  current evaluation by editing either the evaluator code or the
+  orchestrating workflow. `diana-gate.py` (the ordinary, pre-existing
+  Gate) is untouched beyond one narrow `REVIEW_PATHS` addition -- the two
+  checks stay fully separate; GitHub branch protection requiring both
+  reproduces the intended combination policy. See "Security Phase 5"
+  below for the full trust-boundary design, the PR-body-is-untrusted-
+  for-security rule, and the post-merge activation requirement.
 
 ## Source-derived vs. Diana-designed fields
 
@@ -355,10 +374,14 @@ scanner or a fixed rule can fully settle on its own.
   review artifact. None runs, ships, or depends on Gitleaks/osv-scanner/
   Semgrep/Trivy/a browser/a database/a payment provider/an LLM being
   present anywhere in this repository.
-- `diana/gate`, `diana/preflight`, `diana/playwright`, and
-  `diana/adapters` (the pre-existing AO adapter) are completely
-  unchanged -- their schemas, behavior, and test suites are untouched by
-  this track so far.
+- `diana/preflight`, `diana/playwright`, and `diana/adapters` (the
+  pre-existing AO adapter) remain completely unchanged by this track.
+  `diana/gate/diana-gate.py` gained only one narrow, additive `REVIEW_PATHS`
+  entry set (Security Phase 5); its `evaluate()` function, input schema,
+  and every pre-existing behavior/test are byte-for-byte unchanged -- see
+  "Security Phase 5" below. Security evidence is evaluated by a wholly
+  separate CI check (`diana-security-gate.yml`), never by code inside
+  `diana-gate.py` itself.
 - Phase 2 covers 3 verifier capabilities (`SECRET_SCANNER`,
   `DEPENDENCY_SCANNER`, `STATIC_ANALYZER`) for a handful of controls
   (`SEC-007`; `SEC-060`; `SEC-055`/`SEC-056`). Phase 3 covers the dynamic
@@ -367,16 +390,294 @@ scanner or a fixed rule can fully settle on its own.
   quality of a real reviewer session this repository doesn't run --
   passing a substantiation bar is not the same as being right. Most of
   the catalog's 75 controls still have no verifier at all, and
-  applicability automation doesn't exist yet.
+  applicability automation doesn't exist yet. **Phase 5 does not change
+  any of this**: `ci_verifier_runs.py` currently always returns zero
+  trusted runs (no live verifier execution is wired into CI), so every
+  catalog control is honestly `UNPROVEN` and the Security Gate honestly
+  returns `REQUIRE_HUMAN` for every PR today -- see "Security Phase 5"
+  below for why that is the correct, intended state, not a bug.
+
+## Security Phase 5 -- Security Gate + CI integration
+
+Integrates the Security Track's results into Diana's merge-boundary
+decision, without collapsing the existing Preflight/Gate separation, as
+a **separate, independently required CI check**:
+
+```
+trusted verifier execution (ci_verifier_runs.py -- today: none, so [])
+        |
+normalized Phase 1 runs
+        |
+evidence_model.py
+        |
+complete security result bundle (security_bundle.py)
+        |
+deterministic security reducer (security_reducer.py)
+        |
+required "Diana Security Gate" check (map-gate-result.py, unmodified)
+        |                                    (runs alongside, not through,
+human review  <-------------------------------  the unmodified "Diana Gate" check)
+        |
+merge
+```
+
+Preserved throughout: **no finding != PASS**, **missing evidence !=
+PASS**, **UNPROVEN != PASS**, **ERROR != PASS**. Human review remains the
+final merge authority -- Security Phase 5 can force `REQUIRE_HUMAN` or
+`FAIL` on its own check, but never bypasses or replaces the required
+human/code-owner review rule.
+
+### The trust root is the WORKFLOW, not just the evaluator code
+
+A first version of this phase ran the trusted evaluator scripts via
+`git archive`-based extraction from a PR's protected base SHA, but did so
+*inside a step of the ordinary, plain-`pull_request`-triggered*
+`diana-gate.yml`. That protected the evaluator **scripts** from
+PR-head tampering, but not the **workflow orchestration itself** -- for a
+plain `pull_request` trigger, GitHub resolves and runs the workflow
+*file* from the PR head, so a malicious PR could simply delete or edit
+the step that invoked the extraction, with nothing to stop it. That is
+not a sound trust root.
+
+The corrected design uses a **separate** workflow,
+`.github/workflows/diana-security-gate.yml`, triggered by
+`pull_request_target` instead of `pull_request`. For `pull_request_target`,
+GitHub resolves and runs the **workflow definition itself** from the
+repository's default branch, never the PR head -- a PR that edits this
+workflow file has zero effect on what actually executes against it. Its
+`actions/checkout` step deliberately specifies no `ref:` override, so it
+also defaults to the base branch's tip (never the PR head, never a merge
+commit): the entire checked-out tree, including
+`diana/security/{ci_verifier_runs.py, security_bundle.py,
+security_reducer.py}`, is already the protected base -- no extraction
+step is needed, those scripts run directly from that checkout. The
+workflow declares `permissions: contents: read` (no write scopes) and
+references no `secrets.*` anywhere; it never checks out, fetches, or
+executes anything from the PR head ref (`test-security-gate.sh` W1-W6
+check these properties structurally).
+
+`diana/ci/run-security-gate.py` (the original git-archive-extraction
+script) remains in the repository, but is **not** what the live CI check
+invokes -- it is kept as a local/offline dry-run tool and as the
+reference implementation `test-security-gate.sh`'s S2+S3 test uses to
+prove the general "protected base beats PR head" property against a real
+ephemeral git repository (a technique still useful for other trigger
+types that don't hand you a base-rooted checkout for free). See its own
+module docstring for the full explanation.
+
+### Security evidence must not come from the PR body
+
+The existing `DIANA:EVIDENCE` PR-body HTML-comment block
+(`diana/ci/build-gate-input.py`, consumed only by the separate, ordinary
+"Diana Gate" check) stays scoped to exactly its five pre-existing fields
+(`dod`, `verification`, `preflight`, `risk`, `human_only_conditions`) --
+unchanged by this phase. A PR body claiming `"SEC-001": "PASS"` or
+similar has zero authority over the Security reducer: the strict
+`set(value) != EVIDENCE_FIELDS` check rejects any extra field outright
+(proven by `test-security-gate.sh` T1). The real Security evidence
+pipeline (`ci_verifier_runs.py`) takes no arguments and reads no
+PR-supplied content at all -- not the PR body, not an arbitrary
+checked-in JSON file, even one with a structurally valid Phase 2/3/4
+`artifact_binding` hash (proven by T2: a fake, correctly-hashed Phase 4
+semantic-review artifact planted in the working tree does not change
+`ci_verifier_runs.py`'s output). `artifact_binding` proves internal
+artifact integrity only, never who produced an artifact or that it came
+through a genuine CI-controlled verifier path (Phase 2/3/4's own stated
+limitation, not erased here). The Security Gate workflow does not even
+parse the PR body at all -- there is no code path in it that could read a
+security claim out of it.
+
+### Producer trust: why every control is UNPROVEN today
+
+`ci_verifier_runs.py` always returns `[]`. No live static analyzer,
+dependency scanner, secret scanner, dynamic scenario runner, or semantic
+reviewer session is wired into CI yet -- Phase 2/3/4 built normalizers
+for already-produced evidence artifacts, not live execution. This means
+`security_bundle.build_bundle()` marks all 75 controls `UNPROVEN`, and
+`security_reducer.py` maps `UNPROVEN` to `REQUIRE_HUMAN` -- so the
+Security Gate currently returns `REQUIRE_HUMAN` for every PR. **This is
+the correct, honest, fail-closed state**, not a placeholder bug: Diana
+has not yet wired any trusted verifier into CI, so it correctly refuses
+to claim any control is proven. `ci_verifier_runs.py` is the single,
+explicit extension point for later wiring in real trusted verifier
+execution; nothing else in this pipeline needs to change when that
+happens (proven by T3/T4/T5).
+
+### Preventing security self-certification
+
+A PR may modify `diana/security/*`, `diana/gate/*`, `diana/ci/*`, or
+`.github/workflows/*` -- those changes must never be able to weaken their
+own current evaluation. As described above, `pull_request_target`
+resolves BOTH the workflow definition AND (via the default checkout) the
+evaluator code from the protected base -- a PR that weakens a control's
+severity in `catalog.json`, or replaces `security_reducer.py` with one
+that always returns `PASS`, has zero effect on its own evaluation. The
+underlying "protected base wins over PR head" extraction property is
+additionally proven end-to-end against a real, ephemeral git repository
+by `test-security-gate.sh`'s S2+S3 test (using the reference
+`run-security-gate.py` tool, since a live `pull_request_target` run can't
+be simulated locally).
+
+**Bootstrap limitation, stated explicitly**: `pull_request_target`
+workflows only run when the workflow FILE already exists on the default
+branch. `diana-security-gate.yml` is introduced by this very PR, so it
+does not exist on the default branch yet, and **does not fire at all**
+against this PR -- there is no `SKIPPED_BOOTSTRAP` decision to combine
+with anything, because there is no run at all. **This PR does not claim
+Security Phase 5 retroactively protects itself** -- it remains protected
+only by the pre-existing Diana Gate (DoD/verification/Preflight/
+diff-risk/human_only_conditions) plus the required human/code-owner
+review, exactly as before this phase existed. After this PR merges, the
+**next** pull request opened against this repository is the first real
+opportunity to confirm the workflow actually fires and produces a
+sensible result -- **Security Phase 6 must not begin until that
+post-merge activation has been observed** (a probe: open or push to any
+subsequent PR and confirm the "Diana Security Gate" check appears and
+completes).
+
+### Catalog authority
+
+Severity/policy decisions use the protected-base canonical
+`catalog.json`, never a PR-head catalog (guaranteed by the same
+`pull_request_target` checkout described above, not by any manual
+extraction). A `security_bundle.py` bundle binds `catalog_version` (the
+catalog's own version integer) AND `catalog_sha256` (a SHA-256
+fingerprint of the whole trusted catalog content) -- either mismatching
+the trusted catalog fails the bundle closed (`security_bundle.
+validate_bundle`), so a bundle generated against one catalog content can
+never silently validate against a different one. A PR that changes
+`diana/security/catalog.json` is itself forced to `REQUIRE_HUMAN` by the
+Gate's existing sensitive-path mechanism (see "Security-control changes
+require human review" below) and cannot use its own changed catalog to
+weaken its own current evaluation; the new catalog only becomes
+authoritative for evaluations run against a base that includes it, i.e.
+after human merge.
+
+### Security result bundle
+
+`security_bundle.build_bundle()` produces exactly one aggregate result
+for every canonical control `SEC-001`..`SEC-075` (never an arbitrary
+self-authored status string): it runs `evidence_model.evaluate()` over
+the supplied runs, then explicitly fills `UNPROVEN` (`"no verification
+runs submitted for this control"`) for every canonical control that
+received zero runs, so a zero-run control is never silently absent from
+the bundle. Each bundle carries `version`, `repository`, `base_sha`,
+`target_sha`, `catalog_version`, `catalog_sha256`, `generated_count`
+(the number of raw runs consumed), and `results` (75 entries, each with
+`control_id`, `severity`, `result`, `applicability`, `reasons`,
+`evidence`, `run_issues`).
+
+`security_bundle.validate_bundle()` fails closed on: malformed bundle
+(wrong/missing top-level or per-result fields), wrong repository, wrong
+target/head SHA, wrong base SHA, wrong catalog version/hash, unknown
+control, duplicate control, missing canonical control, invalid result
+state, and an "impossible" per-control severity mismatch against the
+trusted catalog (proven by `test-security-gate.sh` I1-I8 plus a bonus
+severity-mismatch case).
+
+### Security reducer policy
+
+`security_reducer.reduce_bundle()` (called only on an already-validated
+bundle):
+
+| Severity | Result | Decision |
+|---|---|---|
+| CRITICAL | FAIL | `FAIL` |
+| HIGH | FAIL | `FAIL` |
+| MEDIUM | FAIL | `REQUIRE_HUMAN` |
+| LOW | FAIL | `REQUIRE_HUMAN` (never silently clean) |
+| any | UNPROVEN | `REQUIRE_HUMAN` |
+| any | verifier ERROR | `REQUIRE_HUMAN` |
+| any | NOT_APPLICABLE | no penalty |
+| any | PASS | no penalty |
+
+The final decision is the worst decision implied by any single control
+(`PASS < REQUIRE_HUMAN < FAIL`) -- never averaged, never majority-voted; a
+trusted `FAIL` is never suppressed by other controls' `PASS`/
+`NOT_APPLICABLE`/errored/unavailable state (proven G1-G9 plus a dedicated
+"FAIL not hidden" case). A **malformed/mismatched bundle** (the input
+itself is untrustworthy) is a categorically different, worse failure than
+a **per-control verifier `ERROR`** (some evidence exists but can't be
+trusted) -- `security_reducer.evaluate()` maps the former to `FAIL`
+(via `validate_bundle` raising `BundleError`) and the latter to
+`REQUIRE_HUMAN` (via the table above); `reduce_bundle()` itself is only
+ever called on an already-validated bundle and never needs to make this
+distinction internally.
+
+### Security-control changes require human review
+
+`diana-gate.py`'s existing, unmodified sensitive-path mechanism
+(`REVIEW_PATHS`/`REVIEW_PREFIXES` -> forces `REQUIRE_HUMAN` regardless of
+self-declared `risk`/`human_only_conditions`) now also lists
+`diana/security/catalog.json`, `diana/security/evidence_model.py`,
+`diana/security/security_bundle.py`, `diana/security/security_reducer.py`,
+`diana/security/ci_verifier_runs.py`, `diana/gate/diana-gate.py`,
+`diana/ci/build-gate-input.py`, `diana/ci/run-security-gate.py`, and
+`diana/ci/map-gate-result.py` (`.github/workflows/` was already a
+sensitive prefix, so `diana-security-gate.yml` is already covered). This
+reuses the existing, already-tested mechanism rather than inventing a
+second one -- proven by `test-security-gate.sh` S1/S1b.
+
+### Separation from the existing Diana Gate (no in-process combination)
+
+`diana-gate.py`'s `evaluate()` function, its 6-field input schema, and
+its whole pre-existing CLI behavior are **completely unchanged** -- every
+pre-existing test (`test-gate.sh`, `test-gate-integration.sh`,
+`test-ship.sh`) passes unmodified, and `diana-gate.yml` itself is
+byte-for-byte unchanged from before this phase. There is deliberately
+**no in-process combination**: "Diana Gate" and "Diana Security Gate" are
+two separate, independently required GitHub status checks. Both map
+their own decision through the identical, unmodified
+`map-gate-result.py` convention (`PASS`/`REQUIRE_HUMAN` -> check
+succeeds, `FAIL` -> check fails); GitHub branch protection requiring
+BOTH checks reproduces the intended combination policy purely through
+platform-level AND-of-required-checks semantics:
+
+    either check FAILs                    -> merge blocked
+    either check is REQUIRE_HUMAN         -> that check still succeeds,
+                                              but the SEPARATE required-
+                                              review rule still blocks
+                                              merge until reviewed
+    both checks clean                     -> merge allowed (subject to
+                                              the same required-review
+                                              rule as always)
+
+No code anywhere needs to read both decisions at once for this to work
+correctly (proven C1-C4).
+
+### What Security Phase 5 does not do
+
+- Does not run any live scanner, dynamic tester, or reviewer session --
+  `ci_verifier_runs.py` always returns `[]` today (see "Producer trust"
+  above); wiring in real trusted verifier execution is future work, and
+  belongs entirely inside that one file.
+- Does not change `evidence_model.py`'s result semantics, `catalog.json`,
+  or any Phase 1-4 file.
+- Does not change `diana/preflight`, `diana/playwright`, or
+  `diana/adapters` (the pre-existing AO adapter) at all.
+- Does not weaken, bypass, or replace the required human/code-owner
+  review rule -- `REQUIRE_HUMAN` still means "check succeeds, merge stays
+  blocked by that independent rule," exactly as before this phase.
+- Does not claim to protect its own PR (see "bootstrap limitation"
+  above) -- that PR's protection is the pre-existing Diana Gate +
+  required human review, unchanged.
+- Does not fabricate successful dynamic tests, semantic-review PASS, or
+  provider-sandbox evidence; when actual verifier evidence is
+  unavailable, it emits `UNPROVEN`, never a synthetic `PASS`. Synthetic
+  fixtures exist only inside `test-security-gate.sh`, never in the real
+  CI path.
+- Does not claim Security Phase 6 can begin before the post-merge
+  activation probe above has been observed.
 
 ## Future phases (not started here)
 
-- **Security Phase 5 -- Security Gate + CI**: feed Phase 1 results into
-  Diana's merge decision without collapsing the existing Preflight/Gate
-  separation.
 - **Security Phase 6 -- Prove 75/75 Coverage**: an executable coverage
   matrix showing every catalog control has a defined, testable
-  verification path.
+  verification path. **Blocked until the Security Phase 5 post-merge
+  activation probe has been observed** (see "Bootstrap limitation" above)
+  -- `diana-security-gate.yml` cannot be confirmed to actually fire and
+  behave correctly until it exists on the default branch and a real
+  subsequent PR triggers it.
 - This README does not promise the exact shape of that work ahead of each
   phase actually landing.
 
@@ -389,10 +690,14 @@ bash diana/security/test-evidence-model.sh
 bash diana/security/adapters/test-adapters.sh
 bash diana/security/dynamic/test-dynamic.sh
 bash diana/security/reviewer/test-reviewer.sh
+bash diana/security/test-security-gate.sh
 ```
 
 All of the above are deterministic, offline, and make no changes to this
-repository. `evidence_model.py` itself takes two arguments (a catalog path
+repository. `test-security-gate.sh` additionally creates and destroys
+small, ephemeral, local-only `git init` scratch repositories under a
+`mktemp -d` directory (to prove the protected-base extraction end to end,
+S2+S3) -- no network access and no changes to this repository. `evidence_model.py` itself takes two arguments (a catalog path
 and a runs-file path) and is normally invoked directly for ad hoc checks:
 
 ```

@@ -34,3 +34,28 @@ The `preflight` array is normally produced by
 `diana/preflight/reduce_for_gate.py`. Preflight detects quality/safety
 conditions; this gate decides whether the supplied evidence is allowed to
 proceed. The two stay separate components on purpose.
+
+`REVIEW_PATHS`/`REVIEW_PREFIXES` (deterministic sensitive-path escalation
+to `REQUIRE_HUMAN` regardless of self-declared `risk`) additionally cover
+the Security Track's own enforcement surface as of Security Phase 5 (see
+[`diana/security/README.md`](../security/README.md#security-phase-5----security-gate--ci-integration)):
+the catalog, evidence model, bundle/reducer policy, and the Gate/CI wiring
+that runs them.
+
+## Security Phase 5: a separate check, not a code change here
+
+`evaluate()`, this file's input schema, and its whole CLI behavior are
+**completely unchanged** by Security Phase 5 -- there is no "combine"
+mode and no Security-specific branching in this file beyond the
+`REVIEW_PATHS` addition above. Security evidence is evaluated by an
+entirely separate required CI check
+(`.github/workflows/diana-security-gate.yml`, see
+[`diana/ci/README.md`](../ci/README.md)) running independent, separate
+code (`diana/security/security_bundle.py`/`security_reducer.py`).
+GitHub branch protection requiring BOTH checks reproduces the intended
+"existing FAIL or security FAIL blocks merge; either check being
+REQUIRE_HUMAN still leaves the required-review rule blocking merge;
+both clean allows merge" combination without any code here needing to
+know the Security Gate exists at all. See `diana/security/README.md`'s
+"Security Phase 5" section for the full trust-boundary design and why
+this separation (rather than one workflow computing both) is the point.

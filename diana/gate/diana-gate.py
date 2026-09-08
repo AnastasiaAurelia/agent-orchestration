@@ -26,9 +26,25 @@ HUMAN_ONLY_CONDITIONS = {
 
 # Exact repository paths/prefixes that deserve human review. Substring matching
 # is deliberately avoided so nearby fixture/test names do not false-positive.
+#
+# Security Phase 5 addition: the Security Track's own enforcement surface
+# (catalog, evidence model, bundle/reducer policy, and the Gate/CI wiring
+# that runs them) is deterministically sensitive -- a change to any of
+# these paths always requires human review, regardless of the PR author's
+# self-declared diff.risk or human_only_conditions (Security Phase 5,
+# section 10: "do not rely only on a PR author's self-declared risk=SAFE").
 REVIEW_PATHS = {
     ".github/CODEOWNERS",
     ".github/dependabot.yml",
+    "diana/security/catalog.json",
+    "diana/security/evidence_model.py",
+    "diana/security/security_bundle.py",
+    "diana/security/security_reducer.py",
+    "diana/security/ci_verifier_runs.py",
+    "diana/gate/diana-gate.py",
+    "diana/ci/build-gate-input.py",
+    "diana/ci/run-security-gate.py",
+    "diana/ci/map-gate-result.py",
 }
 REVIEW_PREFIXES = (
     ".github/workflows/",
