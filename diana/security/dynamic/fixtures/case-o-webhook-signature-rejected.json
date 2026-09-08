@@ -1,0 +1,35 @@
+{
+  "environment": "TEST",
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "6b855b85f5cdca683e1a332eddf40021c83781d5",
+    "base_url": "http://localhost:8080"
+  },
+  "scenario": {
+    "id": "invalid-webhook-signature-rejected",
+    "version": "1.0.0"
+  },
+  "verifier_mode": "DYNAMIC_API",
+  "identities": [],
+  "execution": {
+    "completed": true
+  },
+  "assertions": [
+    {
+      "id": "invalid_signature_rejected",
+      "outcome": "PASSED"
+    }
+  ],
+  "cleanup": {
+    "required": false,
+    "performed": false,
+    "success": true
+  },
+  "result": {
+    "control_id": "SEC-068",
+    "requirement": "negative test proving a request with a missing/invalid signature is rejected"
+  },
+  "artifact_binding": {
+    "sha256": "e1cdafa99ebab2b6fbf082e9716721efb5681c7a4b97eaa27abfe33f3a2b4dd6"
+  }
+}

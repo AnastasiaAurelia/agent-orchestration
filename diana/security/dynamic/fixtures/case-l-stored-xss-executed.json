@@ -1,0 +1,39 @@
+{
+  "environment": "TEST",
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "6b855b85f5cdca683e1a332eddf40021c83781d5",
+    "base_url": "http://localhost:8080"
+  },
+  "scenario": {
+    "id": "stored-xss-payload-inert",
+    "version": "1.0.0"
+  },
+  "verifier_mode": "DYNAMIC_BROWSER",
+  "identities": [
+    "USER_A",
+    "USER_B"
+  ],
+  "execution": {
+    "completed": true
+  },
+  "assertions": [
+    {
+      "id": "stored_payload_not_executed",
+      "outcome": "FAILED"
+    }
+  ],
+  "cleanup": {
+    "required": false,
+    "performed": false,
+    "success": true
+  },
+  "result": {
+    "control_id": "SEC-012",
+    "requirement": "negative test proving a stored script payload does not execute in another user's session"
+  },
+  "payload_marker": "DIANA_XSS_PROBE_MARKER",
+  "artifact_binding": {
+    "sha256": "7b7b82fd5c61feeffa050d58ccf806761c46d2af1863089293b8ff4c7b38d3a0"
+  }
+}

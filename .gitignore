@@ -104,6 +104,14 @@
 !diana/security/adapters/test-adapters.sh
 !diana/security/adapters/fixtures/
 !diana/security/adapters/fixtures/*.json
+!diana/security/dynamic/
+!diana/security/dynamic/README.md
+!diana/security/dynamic/dynamic_base.py
+!diana/security/dynamic/dynamic_normalizer.py
+!diana/security/dynamic/scenarios.py
+!diana/security/dynamic/test-dynamic.sh
+!diana/security/dynamic/fixtures/
+!diana/security/dynamic/fixtures/*.json
 
 # Explicit reminders for common files that must never be published here.
 .env

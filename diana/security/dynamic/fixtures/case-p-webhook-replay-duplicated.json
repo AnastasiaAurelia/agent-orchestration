@@ -1,0 +1,35 @@
+{
+  "environment": "TEST",
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "6b855b85f5cdca683e1a332eddf40021c83781d5",
+    "base_url": "http://localhost:8080"
+  },
+  "scenario": {
+    "id": "duplicate-webhook-no-duplicate-effect",
+    "version": "1.0.0"
+  },
+  "verifier_mode": "DYNAMIC_API",
+  "identities": [],
+  "execution": {
+    "completed": true
+  },
+  "assertions": [
+    {
+      "id": "replayed_event_no_duplicate_effect",
+      "outcome": "FAILED"
+    }
+  ],
+  "cleanup": {
+    "required": false,
+    "performed": false,
+    "success": true
+  },
+  "result": {
+    "control_id": "SEC-069",
+    "requirement": "replay test proving the same webhook event delivered twice does not double-apply its effect"
+  },
+  "artifact_binding": {
+    "sha256": "967064a1e88fdb7943b0089b4bbc9590def8a74eae79bde9f0494be16502b7d7"
+  }
+}

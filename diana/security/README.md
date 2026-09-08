@@ -66,6 +66,17 @@ multi-verifier aggregation" below for the exact rules.
   adapter can prove the scan actually covered what the requirement needs
   -- "no finding" from the wrong or incomplete target proves nothing. See
   `adapters/README.md` for the full design and per-adapter scope.
+- `dynamic/` -- Security Phase 3's dynamic-verification normalizer:
+  consumes an already-produced **dynamic scenario evidence artifact**
+  (produced by an external runtime scenario runner -- Diana never sends
+  requests, drives a browser, or touches a database itself) and computes
+  `evidence_model.py` runs for 17 controls' runtime/negative-test
+  requirement, reusing Phase 2's `adapter_base.py` output-construction
+  helpers and the same target-identity-vs-coverage split. See
+  `dynamic/README.md` for the full design, scenario registry, and safety
+  invariants (bounded environments, bounded identity labels, bounded
+  concurrency, sandbox-only payments, no privileged DB bypass, no
+  model-refusal-as-proof).
 
 ## Source-derived vs. Diana-designed fields
 
@@ -313,26 +324,29 @@ scanner or a fixed rule can fully settle on its own.
 
 - Diana cannot yet detect or prove any of these 75 controls against a real
   repository end to end. Phase 0 is a catalog; Phase 1 is a result
-  calculator that something else must feed; Phase 2 adds 3 normalizers
-  (of the 75 controls' many verifier capabilities) that only work against
-  an already-produced tool report handed to them -- none of this inspects
-  a live repository or invokes a scanner itself.
+  calculator that something else must feed; Phase 2 adds 3 static
+  normalizers for a handful of controls; Phase 3 adds 17 dynamic
+  scenario registrations, each covering only the runtime half of its
+  control's contract -- none of this inspects a live repository, invokes
+  a scanner, or executes a real request/browser/DB/payment action itself.
 - No security tools have been installed in any phase so far. Phase 2's
-  adapters parse documented tool *output formats*; they do not run, ship,
-  or depend on Gitleaks/osv-scanner/Semgrep/Trivy being present anywhere.
-- `diana/gate` and `diana/preflight` are completely unchanged -- their
-  schemas, behavior, and test suites are untouched by this track so far.
+  adapters parse documented tool *output formats*; Phase 3's normalizer
+  parses an already-produced scenario artifact. Neither runs, ships, or
+  depends on Gitleaks/osv-scanner/Semgrep/Trivy/a browser/a database/a
+  payment provider being present anywhere in this repository.
+- `diana/gate`, `diana/preflight`, `diana/playwright`, and
+  `diana/adapters` (the pre-existing AO adapter) are completely
+  unchanged -- their schemas, behavior, and test suites are untouched by
+  this track so far.
 - Phase 2 covers 3 verifier capabilities (`SECRET_SCANNER`,
-  `DEPENDENCY_SCANNER`, `STATIC_ANALYZER`) for a handful of controls each
-  (`SEC-007`; `SEC-060`; `SEC-055`/`SEC-056`) -- most of the catalog's 75
-  controls still have no adapter at all, and none of dynamic verification,
-  semantic review, or applicability automation exist yet.
+  `DEPENDENCY_SCANNER`, `STATIC_ANALYZER`) for a handful of controls
+  (`SEC-007`; `SEC-060`; `SEC-055`/`SEC-056`). Phase 3 covers the dynamic
+  half of 17 controls' contracts. Most of the catalog's 75 controls still
+  have no verifier at all, and semantic review and applicability
+  automation don't exist yet.
 
 ## Future phases (not started here)
 
-- **Security Phase 3 -- Dynamic Verification**: bounded runtime tests
-  (authorization, injection, webhook, race-condition, payment-sandbox,
-  etc.) that also produce Phase 1 evidence runs.
 - **Security Phase 4 -- Semantic Security Reviewer**: a fresh, read-only
   reviewer for controls that can't be settled by static/dynamic tooling
   alone.
@@ -352,6 +366,7 @@ python3 diana/security/validate_catalog.py diana/security/catalog.json
 bash diana/security/test-catalog.sh
 bash diana/security/test-evidence-model.sh
 bash diana/security/adapters/test-adapters.sh
+bash diana/security/dynamic/test-dynamic.sh
 ```
 
 All of the above are deterministic, offline, and make no changes to this

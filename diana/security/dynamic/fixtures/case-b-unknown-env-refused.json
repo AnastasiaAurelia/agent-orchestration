@@ -1,0 +1,37 @@
+{
+  "environment": "STAGING",
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "6b855b85f5cdca683e1a332eddf40021c83781d5",
+    "base_url": "http://localhost:8080"
+  },
+  "scenario": {
+    "id": "anonymous-protected-endpoint-denied",
+    "version": "1.0.0"
+  },
+  "verifier_mode": "DYNAMIC_API",
+  "identities": [
+    "ANONYMOUS"
+  ],
+  "execution": {
+    "completed": true
+  },
+  "assertions": [
+    {
+      "id": "anonymous_request_denied",
+      "outcome": "PASSED"
+    }
+  ],
+  "cleanup": {
+    "required": false,
+    "performed": false,
+    "success": true
+  },
+  "result": {
+    "control_id": "SEC-003",
+    "requirement": "unauthenticated request to a sensitive endpoint is rejected"
+  },
+  "artifact_binding": {
+    "sha256": "5a4ef0adac84c783dedca576aeec403a67683ee488d7339315b137a16b51611f"
+  }
+}

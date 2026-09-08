@@ -1,0 +1,39 @@
+{
+  "environment": "TEST",
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "6b855b85f5cdca683e1a332eddf40021c83781d5",
+    "base_url": "http://localhost:8080"
+  },
+  "scenario": {
+    "id": "cross-user-db-session-denied",
+    "version": "1.0.0"
+  },
+  "verifier_mode": "DYNAMIC_DB",
+  "identities": [
+    "USER_A",
+    "USER_B"
+  ],
+  "execution": {
+    "completed": true
+  },
+  "assertions": [
+    {
+      "id": "cross_user_db_access_denied",
+      "outcome": "PASSED"
+    }
+  ],
+  "cleanup": {
+    "required": false,
+    "performed": false,
+    "success": true
+  },
+  "result": {
+    "control_id": "SEC-066",
+    "requirement": "runtime test with multiple identities proving one user's database session cannot read/write another user's rows"
+  },
+  "used_privileged_bypass": true,
+  "artifact_binding": {
+    "sha256": "4c8a12b57398e5c66fb59c159a710b14a4302030746c9ac928b156410f149ec3"
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "environment": "SANDBOX",
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "6b855b85f5cdca683e1a332eddf40021c83781d5",
+    "base_url": "http://localhost:8080"
+  },
+  "scenario": {
+    "id": "privileged-action-denied-for-normal-user",
+    "version": "1.0.0"
+  },
+  "verifier_mode": "DYNAMIC_API",
+  "identities": [
+    "USER_A"
+  ],
+  "execution": {
+    "completed": true
+  },
+  "assertions": [
+    {
+      "id": "privileged_action_denied",
+      "outcome": "FAILED"
+    }
+  ],
+  "cleanup": {
+    "required": false,
+    "performed": false,
+    "success": true
+  },
+  "result": {
+    "control_id": "SEC-002",
+    "requirement": "negative test proving a lower-privilege account is rejected from a privileged action"
+  },
+  "artifact_binding": {
+    "sha256": "eb65f4baa25539dee85054854fdf95ce5518bfb94e514e02c4516661aecc7ef7"
+  }
+}
