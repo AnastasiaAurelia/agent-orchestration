@@ -266,10 +266,20 @@ check_aggregate "(gitleaks): malformed wrapped report" \
 check_aggregate "(gitleaks): artifact missing required fields" \
   "$GITLEAKS" "$FIXTURES/gitleaks-artifact-missing-fields.json" "$EXPECTED_FULL_REPO" ERROR SEC-007
 
-run_adapter "$GITLEAKS" "$FIXTURES/gitleaks-artifact-clean-full-repo.json" "$EXPECTED_FULL_REPO" SEC-006 SEC-065
+run_adapter "$GITLEAKS" "$FIXTURES/gitleaks-artifact-clean-full-repo.json" "$EXPECTED_FULL_REPO" SEC-001
 runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-[ "$runs" = "[]" ] && pass "(gitleaks): silently refuses unauthorized controls (SEC-006, SEC-065)" \
-  || fail "expected empty runs for unauthorized controls, got $runs"
+[ "$runs" = "[]" ] && pass "(gitleaks): silently refuses a genuinely unauthorized control (SEC-001)" \
+  || fail "expected empty runs for an unauthorized control, got $runs"
+
+# Since Security Track remediation round B, SEC-006/SEC-065 ARE
+# authorized -- but a "full-repo"-scoped clean artifact doesn't match
+# EITHER control's required scope (frontend-bundle / combined), so both
+# must correctly produce UNPROVEN (an explicit empty-evidence run), not
+# a fabricated SATISFIED from the wrong surface.
+check_aggregate "(gitleaks): SEC-006 clean full-repo scan (wrong scope) -> UNPROVEN, never fabricated SATISFIED" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-clean-full-repo.json" "$EXPECTED_FULL_REPO" UNPROVEN SEC-006
+check_aggregate "(gitleaks): SEC-065 clean full-repo scan (wrong scope) -> UNPROVEN, never fabricated SATISFIED" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-clean-full-repo.json" "$EXPECTED_FULL_REPO" UNPROVEN SEC-065
 
 check_aggregate "P8 (osv-scanner): empty-object report is NOT a clean scan" \
   "$OSV" "$FIXTURES/osv-artifact-empty-object-report.json" "$EXPECTED_FULL_REPO_MANIFESTS" ERROR SEC-060
@@ -414,6 +424,74 @@ evaluate_runs "$runs" "$TMP_DIR/r6.out.json"
 r="$(result_for "$TMP_DIR/r6.out.json" SEC-064)"
 [ "$r" = "UNPROVEN" ] && pass "R6: deterministic-repo-scan tool-missing -> explicit UNPROVEN" \
   || fail "R6: expected UNPROVEN, got $r"
+
+# ==================================================================
+# B1-B6: Security Track remediation round B -- gitleaks_adapter.py's
+# real scope model for SEC-006 (frontend-bundle) and SEC-065
+# (full-repo-and-frontend-bundle)
+# ==================================================================
+
+build_gitleaks_scoped_artifact() {
+  # build_gitleaks_scoped_artifact <out_file> <scope> <findings_json_array>
+  local out_file="$1" scope="$2" findings_json="$3"
+  python3 -c "
+import hashlib, json
+env = {
+    'tool': {'name': 'gitleaks', 'version': '8.18.1'},
+    'execution': {'completed': True},
+    'target': {'repository': 'AnastasiaAurelia/agent-orchestration', 'commit': '912004328edd9d67671eb216f90b5697a6660350', 'root': '.', 'scope': '$scope'},
+    'config': {},
+    'scanned_inputs': [],
+    'report': json.loads('''$findings_json'''),
+}
+bound = {k: env[k] for k in ('tool', 'execution', 'target', 'config', 'scanned_inputs', 'report')}
+canonical = json.dumps(bound, sort_keys=True, separators=(',', ':'))
+env['artifact_binding'] = {'sha256': hashlib.sha256(canonical.encode()).hexdigest()}
+json.dump(env, open('$out_file', 'w'))
+"
+}
+
+python3 -c "
+import json
+json.dump({'repository': 'AnastasiaAurelia/agent-orchestration', 'commit': '912004328edd9d67671eb216f90b5697a6660350', 'scope': 'frontend-bundle'}, open('$TMP_DIR/expected-frontend-bundle.json', 'w'))
+json.dump({'repository': 'AnastasiaAurelia/agent-orchestration', 'commit': '912004328edd9d67671eb216f90b5697a6660350', 'scope': 'full-repo-and-frontend-bundle'}, open('$TMP_DIR/expected-combined-scope.json', 'w'))
+"
+EXPECTED_FRONTEND="$TMP_DIR/expected-frontend-bundle.json"
+EXPECTED_COMBINED="$TMP_DIR/expected-combined-scope.json"
+
+# B1: SEC-006 clean scan correctly scoped to frontend-bundle -> SATISFIED.
+build_gitleaks_scoped_artifact "$TMP_DIR/gitleaks-frontend-clean.json" "frontend-bundle" '[]'
+check_contribution "B1: SEC-006 clean frontend-bundle-scoped scan -> SATISFIED" \
+  "$GITLEAKS" "$TMP_DIR/gitleaks-frontend-clean.json" "$EXPECTED_FRONTEND" SEC-006 SATISFIED
+
+# B2: SEC-006 finding within a frontend-bundle-scoped scan -> VIOLATED.
+build_gitleaks_scoped_artifact "$TMP_DIR/gitleaks-frontend-finding.json" "frontend-bundle" '[{"RuleID": "stripe-secret-key", "File": "dist/app.bundle.js"}]'
+check_contribution "B2: SEC-006 finding in frontend-bundle-scoped scan -> VIOLATED" \
+  "$GITLEAKS" "$TMP_DIR/gitleaks-frontend-finding.json" "$EXPECTED_FRONTEND" SEC-006 VIOLATED
+
+# B3: SEC-065 clean scan correctly scoped to full-repo-and-frontend-bundle -> SATISFIED.
+build_gitleaks_scoped_artifact "$TMP_DIR/gitleaks-combined-clean.json" "full-repo-and-frontend-bundle" '[]'
+check_contribution "B3: SEC-065 clean combined-scope scan -> SATISFIED" \
+  "$GITLEAKS" "$TMP_DIR/gitleaks-combined-clean.json" "$EXPECTED_COMBINED" SEC-065 SATISFIED
+
+# B4: SEC-065 finding within a combined-scope scan -> VIOLATED.
+build_gitleaks_scoped_artifact "$TMP_DIR/gitleaks-combined-finding.json" "full-repo-and-frontend-bundle" '[{"RuleID": "aws-access-key", "File": "dist/config.js"}]'
+check_contribution "B4: SEC-065 finding in combined-scope scan -> VIOLATED" \
+  "$GITLEAKS" "$TMP_DIR/gitleaks-combined-finding.json" "$EXPECTED_COMBINED" SEC-065 VIOLATED
+
+# B5: a full-repo-only finding is NOT evidence for SEC-065 (wrong scope
+# for this control's specific conjunction claim) -- no contribution.
+build_gitleaks_scoped_artifact "$TMP_DIR/gitleaks-fullrepo-finding.json" "full-repo" '[{"RuleID": "generic-api-key", "File": "backend/config.py"}]'
+check_contribution "B5: full-repo-scoped finding is NOT evidence for SEC-065 (needs combined scope)" \
+  "$GITLEAKS" "$TMP_DIR/gitleaks-fullrepo-finding.json" "$EXPECTED_FULL_REPO" SEC-065 NONE
+
+# B6: SEC-007 (scope-independent for VIOLATED) still accepts a finding
+# under a non-enumerated, arbitrary scope string ("partial") -- proves
+# the round B scope model did not narrow SEC-007's original, unmodified
+# behavior (this is also covered by the pre-existing T1 fixture, restated
+# explicitly here for round B traceability).
+check_contribution "B6: SEC-007 finding under an arbitrary/unenumerated scope string still VIOLATED" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-finding-partial-scope.json" "$EXPECTED_FULL_REPO" SEC-007 VIOLATED
 
 echo ""
 echo "diana/security/adapters/test-adapters.sh: $pass_count passed, $fail_count failed"

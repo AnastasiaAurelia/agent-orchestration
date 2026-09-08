@@ -229,13 +229,14 @@ fi
 # ci_verifier_runs.py takes no arguments, reads no PR-supplied file, and
 # its output is never influenced by what fake evidence files are present
 # anywhere in the working tree. Since Security Track remediation round A
-# wired real (network-dependent) Semgrep execution in, this no longer
-# asserts a fixed "[]" baseline -- it instead asserts the planted fake
-# SEC-074 PASS claim never appears in the real output at all, and that
-# every control_id the real output DOES mention is confined to
-# ci_verifier_runs.py's own known, fixed LIVE_CONTROL_IDS set (proving
-# the fake file contributed nothing, regardless of whether Semgrep itself
-# was available in this environment).
+# wired real (network-dependent) Semgrep/Gitleaks/deterministic-repo-scan/
+# dynamic-scenario execution in, this no longer asserts a fixed "[]"
+# baseline -- it instead asserts the planted fake SEC-074 PASS claim
+# never appears in the real output at all, and that every control_id the
+# real output DOES mention is confined to ci_verifier_runs.py's own
+# known, fixed ALL_LIVE_WIREABLE_CONTROL_IDS set (proving the fake file
+# contributed nothing, regardless of which tools were actually available
+# in this environment).
 python3 -c "
 import hashlib, json
 env = {
@@ -270,7 +271,7 @@ except json.JSONDecodeError:
 else:
     control_ids = {r.get('control_id') for r in runs if isinstance(r, dict)}
     no_fake_sec074 = 'SEC-074' not in control_ids
-    only_known = control_ids <= set(ci_verifier_runs.LIVE_CONTROL_IDS)
+    only_known = control_ids <= set(ci_verifier_runs.ALL_LIVE_WIREABLE_CONTROL_IDS)
     print(no_fake_sec074 and only_known)
 ")"
 if [ "$t2_ok" = "True" ]; then
@@ -377,7 +378,7 @@ fi
 # real HIGH severity and honest UNPROVEN-driven REQUIRE_HUMAN decision,
 # never the head's fake always-PASS output or weakened severity.
 S3_REPO="$TMP_DIR/s3-repo"
-mkdir -p "$S3_REPO/diana/security/adapters" "$S3_REPO/diana/security/verifiers"
+mkdir -p "$S3_REPO/diana/security/adapters" "$S3_REPO/diana/security/verifiers" "$S3_REPO/diana/security/dynamic"
 git -C "$S3_REPO" init -q
 git -C "$S3_REPO" config user.email test@test.com
 git -C "$S3_REPO" config user.name test
@@ -387,12 +388,20 @@ cp "$SEC_DIR/evidence_model.py" "$S3_REPO/diana/security/evidence_model.py"
 cp "$BUNDLE_PY" "$S3_REPO/diana/security/security_bundle.py"
 cp "$REDUCER_PY" "$S3_REPO/diana/security/security_reducer.py"
 cp "$CI_RUNS_PY" "$S3_REPO/diana/security/ci_verifier_runs.py"
-# Security Track remediation round A: ci_verifier_runs.py now genuinely
-# imports these to run live Semgrep execution -- without them it cannot
-# even be imported, so this scratch trusted-base repo needs them too.
+# Security Track remediation rounds A+B: ci_verifier_runs.py now
+# genuinely imports all of these to run live Semgrep/Gitleaks/
+# deterministic-repo-scan/dynamic-scenario execution -- without them it
+# cannot even be imported, so this scratch trusted-base repo needs them
+# too.
 cp "$SEC_DIR/adapters/adapter_base.py" "$S3_REPO/diana/security/adapters/adapter_base.py"
 cp "$SEC_DIR/adapters/semgrep_adapter.py" "$S3_REPO/diana/security/adapters/semgrep_adapter.py"
+cp "$SEC_DIR/adapters/gitleaks_adapter.py" "$S3_REPO/diana/security/adapters/gitleaks_adapter.py"
+cp "$SEC_DIR/adapters/deterministic_repo_adapter.py" "$S3_REPO/diana/security/adapters/deterministic_repo_adapter.py"
 cp "$SEC_DIR/verifiers/semgrep-rules.yml" "$S3_REPO/diana/security/verifiers/semgrep-rules.yml"
+cp "$SEC_DIR/verifiers/gitleaks-config.toml" "$S3_REPO/diana/security/verifiers/gitleaks-config.toml"
+cp "$SEC_DIR/dynamic/dynamic_base.py" "$S3_REPO/diana/security/dynamic/dynamic_base.py"
+cp "$SEC_DIR/dynamic/dynamic_normalizer.py" "$S3_REPO/diana/security/dynamic/dynamic_normalizer.py"
+cp "$SEC_DIR/dynamic/scenarios.py" "$S3_REPO/diana/security/dynamic/scenarios.py"
 git -C "$S3_REPO" add diana/security
 git -C "$S3_REPO" commit -q -m "trusted base state"
 S3_BASE_SHA="$(git -C "$S3_REPO" rev-parse HEAD)"
