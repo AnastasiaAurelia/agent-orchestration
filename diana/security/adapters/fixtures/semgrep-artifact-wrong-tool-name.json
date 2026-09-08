@@ -1,7 +1,7 @@
 {
   "tool": {
-    "name": "semgrep",
-    "version": "1.78.0"
+    "name": "codeql",
+    "version": "2.15.0"
   },
   "execution": {
     "completed": true
@@ -26,17 +26,13 @@
   },
   "scanned_inputs": [],
   "report": {
-    "results": [
-      {
-        "check_id": "python.lang.security.insecure-random",
-        "path": "app/tokens.py"
-      }
-    ],
+    "results": [],
     "rules_run": [
-      "python.lang.security.insecure-random"
+      "python.lang.security.insecure-random",
+      "python.lang.security.weak-crypto-cipher"
     ]
   },
   "artifact_binding": {
-    "sha256": "b3cf8905ec59923b28caf4d233274ebe11aba450dc859aa0e8adf299911d36fa"
+    "sha256": "3c402f3cb16d8ed4b7e1196231a7ad740beb8821c5b837151e7d8b5eb765af54"
   }
 }

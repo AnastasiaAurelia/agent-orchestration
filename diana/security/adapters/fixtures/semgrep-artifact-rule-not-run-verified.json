@@ -31,7 +31,7 @@
       "some.unrelated.rule.entirely"
     ]
   },
-  "report_binding": {
-    "sha256": "6fab3baf31ea9075aec0cf8b77a5457838115b7141c342ad5f7aad213b7c89e0"
+  "artifact_binding": {
+    "sha256": "833717ddb434df73bc6a5a4984816c1d2c72af2d07fca15f578747c6c69d8ac1"
   }
 }

@@ -13,9 +13,11 @@
     "scope": "full-repo"
   },
   "config": {},
-  "scanned_inputs": [],
+  "scanned_inputs": [
+    "injected-file.txt"
+  ],
   "report": [],
-  "report_binding": {
-    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  "artifact_binding": {
+    "sha256": "30667a85db64a0d2373e484a97520ea3cf3512d0553834097f4e756db73e093b"
   }
 }

@@ -12,16 +12,22 @@
     "root": ".",
     "scope": "full-repo"
   },
-  "config": {},
+  "config": {
+    "rule_map": {
+      "python.lang.security.insecure-random": [
+        "SEC-001",
+        "server-side object ownership/permission check exists on every read/write route"
+      ]
+    }
+  },
   "scanned_inputs": [],
   "report": {
     "results": [],
     "rules_run": [
-      "python.lang.security.insecure-random",
-      "python.lang.security.weak-crypto-cipher"
+      "python.lang.security.insecure-random"
     ]
   },
   "artifact_binding": {
-    "sha256": "936a5d8f3fb97fdeb819ea2cc9782a666f7d8cc954e74828e0589bf7bc39a108"
+    "sha256": "7de982b4bbdb5cd178b447fb879cf4e770d8092df501d8fc0f6a10e618a3a4e1"
   }
 }

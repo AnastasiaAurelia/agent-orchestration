@@ -39,7 +39,7 @@
       }
     ]
   },
-  "report_binding": {
-    "sha256": "5cce83f28595f137c4879585175937bee957054f869e6b1ea958ccf64810ff23"
+  "artifact_binding": {
+    "sha256": "49f070b46e1780ab7c6c330940f000fc368d5f345e898baab8cc8cfd687e517e"
   }
 }

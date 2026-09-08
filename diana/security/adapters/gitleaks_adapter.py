@@ -1,29 +1,26 @@
 #!/usr/bin/env python3
-"""Diana Security static adapter: Gitleaks (Security Phase 2, provenance-
-corrected).
+"""Diana Security static adapter: Gitleaks (Security Phase 2, final
+trust-boundary correction).
 
-Normalizes a **verified scan-evidence artifact** (see
-`adapter_base` module docstring) wrapping a saved/real Gitleaks JSON
-report into evidence_model.py run records. Never installs, invokes, or
-bundles Gitleaks -- this module only parses an already-produced artifact.
+Normalizes a **verified scan-evidence artifact** (see `adapter_base`
+module docstring) wrapping a saved/real Gitleaks JSON report into
+evidence_model.py run records. Never installs, invokes, or bundles
+Gitleaks -- this module only parses an already-produced artifact.
 
-## A clean report is not proof of a clean repository
+## Target identity vs. scan coverage
 
-Human review of the first implementation found that a bare `[]` Gitleaks
-report was treated as sufficient to emit `SATISFIED`, without proving the
-scan actually covered the intended repository, commit, and full source
-tree. An empty findings array from an empty directory, a stale commit, or
-a narrow subdirectory looks identical to a clean scan of the real, current,
-whole repository. This adapter now requires the artifact to declare its
-target (repository, commit, scan root, scope), and the caller to supply
-the *expected* target -- only when they match, and the declared `scope` is
-`"full-repo"` (SEC-007's requirement is inherently repository-wide: "no
-credential ... literal is committed in source", not "in the part we
-happened to look at"), does an empty findings array count as evidence.
+A recognized finding is trusted from PARTIAL coverage (a scan of only
+part of the repository can still legitimately find a real committed
+secret), but it must be attributed to the correct TARGET IDENTITY -- the
+same repository and commit the caller expected
+(`adapter_base.verify_identity()`). A finding from the wrong repository,
+the wrong commit, or an artifact/expectation missing that identity
+entirely is dropped, not counted as violating the *expected* target.
 
-**A recognized finding is trusted even under partial/mismatched scope** --
-finding one real committed secret does not require having scanned the
-whole repository, and is `VIOLATED` regardless of target verification.
+A clean (zero-finding) result requires the stronger
+`adapter_base.verify_target()` check: target identity *and* every other
+expectation the caller supplied, plus `target.scope == "full-repo"`
+(SEC-007's requirement is inherently repository-wide).
 
 ## Authorization (integrity invariant, unchanged)
 
@@ -36,26 +33,17 @@ SEC-007's second requirement ("secrets are loaded from environment/
 secret-manager configuration, not source") -- that needs SEC-007's other
 permitted capability, STATIC_ANALYZER (SEC-007's verification.modes is
 exactly [SECRET_SCANNER, STATIC_ANALYZER] -- SEMANTIC_REVIEW is not
-permitted for this control), contributing separately. A Gitleaks-only
-evidence set for SEC-007 is therefore UNPROVEN by evidence_model.py's own
-aggregation, not PASS -- this is the expected, correct behavior, not a
-bug: see test-adapters.sh CASE G1/G2.
+permitted for this control), contributing separately.
 
-This adapter is also deliberately NOT authorized for SEC-006 (frontend
-secret exposure) or SEC-065 (cloud/service-role key exposure) -- both
-controls' required_evidence makes a claim about a specific SCOPE (a built
-frontend bundle; "only used server-side") this adapter's target model
-does not yet represent. Extending authorization to those controls is left
-to a future, dedicated change.
+This adapter is also deliberately NOT authorized for SEC-006 or SEC-065 --
+both make a claim about a specific SCOPE this adapter's target model does
+not yet represent.
 
 ## Artifact shape
 
-See `adapter_base` for the envelope shape. `report` must be Gitleaks'
-native flat array of finding objects (`[]` for a clean scan):
-
-```jsonc
-{"Description": "AWS Access Key", "File": "config/settings.py", "RuleID": "aws-access-key-id", "Secret": "AKIA..."}
-```
+See `adapter_base` for the envelope shape. This adapter requires
+`tool.name == "gitleaks"`. `report` must be Gitleaks' native flat array of
+finding objects (`[]` for a clean scan).
 """
 
 from __future__ import annotations
@@ -69,6 +57,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import adapter_base  # noqa: E402
 
 CAPABILITY = "SECRET_SCANNER"
+TOOL_NAME = "gitleaks"
 
 SEC007_REQ_NO_LITERAL = "no credential/token/private-key literal is committed in source"
 
@@ -104,38 +93,45 @@ def ingest(
         return []
 
     if artifact_path is None or not Path(artifact_path).exists():
-        # Tool did not run -- emit nothing, letting evidence_model.py's
-        # "no runs submitted" default (UNPROVEN) apply.
-        return []
+        return adapter_base.tool_unavailable_runs(
+            requested_authorized, CAPABILITY, identity, "no artifact provided"
+        )
 
     try:
         with open(artifact_path, "r", encoding="utf-8") as f:
             raw = json.load(f)
         envelope = adapter_base.load_envelope(raw)
+        adapter_base.verify_tool_identity(envelope["tool"], TOOL_NAME)
         findings = parse_report(envelope["report"])
     except (OSError, json.JSONDecodeError, adapter_base.ArtifactError, ReportParseError) as exc:
         return adapter_base.tool_error_runs(
             requested_authorized, CAPABILITY, identity, f"could not verify Gitleaks artifact: {exc}"
         )
 
-    target_verified, mismatch_reason = adapter_base.verify_target(envelope["target"], expected_target)
+    identity_verified, _identity_reason = adapter_base.verify_identity(envelope["target"], expected_target)
+    target_verified, _target_reason = adapter_base.verify_target(envelope["target"], expected_target)
 
     contributions = []
     if "SEC-007" in requested_authorized:
         if findings:
-            # Positive findings are trusted regardless of target verification.
-            for finding in findings:
-                rule = finding.get("RuleID", "unknown-rule")
-                path = finding.get("File", "unknown-file")
-                contributions.append(
-                    (
-                        "SEC-007",
-                        SEC007_REQ_NO_LITERAL,
-                        "VIOLATED",
-                        f"gitleaks finding: rule={rule} file={path}",
-                        None,
+            if identity_verified:
+                # Trusted from partial coverage, but only when attributed
+                # to the correct repository + commit.
+                for finding in findings:
+                    rule = finding.get("RuleID", "unknown-rule")
+                    path = finding.get("File", "unknown-file")
+                    contributions.append(
+                        (
+                            "SEC-007",
+                            SEC007_REQ_NO_LITERAL,
+                            "VIOLATED",
+                            f"gitleaks finding: rule={rule} file={path}",
+                            None,
+                        )
                     )
-                )
+            # else: finding(s) present, but target identity could not be
+            # verified against the caller's expectation -- not attributed
+            # to the expected target, no contribution at all.
         elif target_verified and envelope["target"].get("scope") == "full-repo":
             contributions.append(
                 (
@@ -151,11 +147,12 @@ def ingest(
                 )
             )
         # else: clean result, but target/scope could not be verified as a
-        # complete repository-wide scan -- no contribution at all (stays
-        # UNPROVEN, never silently PASS). mismatch_reason is intentionally
-        # not surfaced as an error here; it just means "not proven."
+        # complete repository-wide scan -- no contribution at all.
 
-    return adapter_base.build_runs(contributions, AUTHORIZED_EVIDENCE, CAPABILITY, identity)
+    try:
+        return adapter_base.build_runs(contributions, AUTHORIZED_EVIDENCE, CAPABILITY, identity, requested_authorized)
+    except adapter_base.NotAuthorized as exc:
+        return adapter_base.tool_error_runs(requested_authorized, CAPABILITY, identity, str(exc))
 
 
 def main(argv: list[str]) -> int:

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Diana Security static adapter: osv-scanner (Security Phase 2,
-provenance-corrected).
+"""Diana Security static adapter: osv-scanner (Security Phase 2, final
+trust-boundary correction).
 
 Normalizes a **verified scan-evidence artifact** (see `adapter_base`
 module docstring) wrapping a saved/real osv-scanner JSON report into
@@ -12,44 +12,38 @@ osv-scanner -- this module only parses an already-produced artifact.
 The first implementation read vulnerabilities via
 `raw.get("results", [])`, so an artifact with no `results` key at all
 (e.g. `{}`) silently fell through to "zero vulnerabilities found" and was
-treated as a clean, PASS-worthy scan. **A missing `results` key means the
-report is not a completed osv-scanner report at all** -- it must never be
-read as "clean." `_iter_vulnerabilities()` now requires `results` to
-actually be present (and a list); its absence is a structural failure
-(`ERROR`), not silence.
+treated as a clean, PASS-worthy scan. `_iter_vulnerabilities()` requires
+`results` to actually be present (and a list); its absence is a
+structural failure (`ERROR`), not silence.
+
+## Target identity vs. scan coverage
+
+A real CRITICAL/HIGH finding is trusted from partial manifest coverage --
+finding one real vulnerable dependency doesn't require having scanned
+every manifest in the repository -- but it must be attributed to the
+correct TARGET IDENTITY (`adapter_base.verify_identity()`: same repository
+and commit the caller expected). A finding from the wrong repository, the
+wrong commit, or an artifact/expectation missing that identity entirely
+is dropped, not counted as violating the *expected* target.
+
+A clean result requires the stronger `adapter_base.verify_target()` check
+(target identity plus every other expectation the caller supplied) *and*
+`scanned_inputs` covering every manifest/lockfile the caller expects --
+SEC-060's requirement is "no unresolved critical/high finding" across the
+*relevant* manifests, which a clean result can only prove if those
+manifests were actually part of the scan.
 
 ## Native vs. normalized report shape -- kept explicit, not blurred
 
 This adapter parses a real osv-scanner-shaped report faithfully: nested
 `results[].packages[].vulnerabilities[]`, each vulnerability requiring an
-explicit `severity` string field (`CRITICAL`/`HIGH`/`MEDIUM`/`LOW`).
-**This is deliberately the boundary of what this adapter does** -- it does
-not invent a normalized severity scale, does not guess severity from a
-CVSS vector or any other derived signal, and does not treat an
-unrecognized/missing `severity` value as anything other than a structural
-problem. A vulnerability entry without a recognized `severity` string
-fails closed to a structural error for the whole artifact (see
-`_iter_vulnerabilities`), rather than silently being excluded from the
-CRITICAL/HIGH check (which would let an adapter bug quietly downgrade a
-real finding to "clean"). If a real deployment's osv-scanner output nests
-severity differently (e.g. only a raw CVSS vector, no flat `severity`
-string), a separate, explicit upstream normalization step -- not this
-adapter -- is responsible for producing the flat `severity` field this
-adapter requires; this adapter is not that normalization step and does
-not pretend to be.
-
-## Manifest/lockfile coverage, not just "clean = pass"
-
-SEC-060's requirement is "dependency manifest/lockfile is scanned against
-a known-vulnerability database with no unresolved critical/high finding."
-A clean result only proves this if the relevant manifests/lockfiles were
-actually part of the scan. The artifact's `scanned_inputs` (paths osv-
-scanner actually processed) is compared against `expected_target["manifests"]`
-(the caller's list of manifests it expects to have been scanned); if any
-expected manifest is missing from `scanned_inputs`, a clean result cannot
-be trusted as complete coverage -- `UNPROVEN`, not `PASS`. A real
-CRITICAL/HIGH finding is still trusted regardless of coverage completeness
-(positive/negative evidence asymmetry, same as the Gitleaks adapter).
+explicit `severity` string field (`CRITICAL`/`HIGH`/`MEDIUM`/`LOW`). A
+vulnerability entry without a recognized `severity` string fails closed
+to a structural error for the whole artifact, rather than silently being
+excluded from the CRITICAL/HIGH check. If a real deployment's osv-scanner
+output nests severity differently, a separate, explicit upstream
+normalization step -- not this adapter -- is responsible for producing
+the flat `severity` field this adapter requires.
 """
 
 from __future__ import annotations
@@ -63,6 +57,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import adapter_base  # noqa: E402
 
 CAPABILITY = "DEPENDENCY_SCANNER"
+TOOL_NAME = "osv-scanner"
 
 SEC060_REQ_NO_CRITICAL_HIGH = (
     "dependency manifest/lockfile is scanned against a known-vulnerability "
@@ -132,24 +127,28 @@ def ingest(
         return []
 
     if artifact_path is None or not Path(artifact_path).exists():
-        return []
+        return adapter_base.tool_unavailable_runs(
+            requested_authorized, CAPABILITY, identity, "no artifact provided"
+        )
 
     try:
         with open(artifact_path, "r", encoding="utf-8") as f:
             raw = json.load(f)
         envelope = adapter_base.load_envelope(raw)
+        adapter_base.verify_tool_identity(envelope["tool"], TOOL_NAME)
         vulns = _iter_vulnerabilities(envelope["report"])
     except (OSError, json.JSONDecodeError, adapter_base.ArtifactError, ReportParseError) as exc:
         return adapter_base.tool_error_runs(
             requested_authorized, CAPABILITY, identity, f"could not verify osv-scanner artifact: {exc}"
         )
 
-    # "manifests" is not a target-identity field (it's this adapter's own
-    # coverage expectation, checked separately below against
-    # scanned_inputs) -- exclude it before the generic target comparison
-    # so it's never compared against envelope["target"] itself.
+    identity_verified, _identity_reason = adapter_base.verify_identity(envelope["target"], expected_target)
+
+    # "manifests" is not a target-identity field -- it's this adapter's
+    # own coverage expectation, checked separately below against
+    # scanned_inputs, not passed to the generic target comparison.
     expected_target_only = {k: v for k, v in (expected_target or {}).items() if k != "manifests"}
-    target_verified, _mismatch_reason = adapter_base.verify_target(envelope["target"], expected_target_only)
+    target_verified, _target_reason = adapter_base.verify_target(envelope["target"], expected_target_only)
 
     expected_manifests = set((expected_target or {}).get("manifests", []))
     scanned_inputs = set(envelope["scanned_inputs"])
@@ -159,17 +158,21 @@ def ingest(
     if "SEC-060" in requested_authorized:
         unresolved = [v for v in vulns if v["vuln"]["severity"] in UNRESOLVED_SEVERITIES]
         if unresolved:
-            # Positive findings are trusted regardless of coverage completeness.
-            names = sorted({v["package"].get("name", "unknown") for v in unresolved})
-            contributions.append(
-                (
-                    "SEC-060",
-                    SEC060_REQ_NO_CRITICAL_HIGH,
-                    "VIOLATED",
-                    f"osv-scanner found {len(unresolved)} unresolved CRITICAL/HIGH finding(s) in: {', '.join(names)}",
-                    None,
+            if identity_verified:
+                # Trusted from partial coverage, but only when attributed
+                # to the correct repository + commit.
+                names = sorted({v["package"].get("name", "unknown") for v in unresolved})
+                contributions.append(
+                    (
+                        "SEC-060",
+                        SEC060_REQ_NO_CRITICAL_HIGH,
+                        "VIOLATED",
+                        f"osv-scanner found {len(unresolved)} unresolved CRITICAL/HIGH finding(s) in: {', '.join(names)}",
+                        None,
+                    )
                 )
-            )
+            # else: finding(s) present, but target identity could not be
+            # verified -- not attributed to the expected target.
         elif target_verified and manifests_covered:
             contributions.append(
                 (
@@ -184,10 +187,12 @@ def ingest(
                 )
             )
         # else: clean result, but target/manifest coverage could not be
-        # verified as complete -- no contribution (stays UNPROVEN, never
-        # silently PASS).
+        # verified as complete -- no contribution.
 
-    return adapter_base.build_runs(contributions, AUTHORIZED_EVIDENCE, CAPABILITY, identity)
+    try:
+        return adapter_base.build_runs(contributions, AUTHORIZED_EVIDENCE, CAPABILITY, identity, requested_authorized)
+    except adapter_base.NotAuthorized as exc:
+        return adapter_base.tool_error_runs(requested_authorized, CAPABILITY, identity, str(exc))
 
 
 def main(argv: list[str]) -> int:

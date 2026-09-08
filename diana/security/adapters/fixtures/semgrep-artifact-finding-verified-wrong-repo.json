@@ -7,7 +7,7 @@
     "completed": true
   },
   "target": {
-    "repository": "AnastasiaAurelia/agent-orchestration",
+    "repository": "someone-else/unrelated-repo",
     "commit": "c51ce15a301df2d7804b36d59e9d508b8653249b",
     "root": ".",
     "scope": "full-repo"
@@ -37,6 +37,6 @@
     ]
   },
   "artifact_binding": {
-    "sha256": "b3cf8905ec59923b28caf4d233274ebe11aba450dc859aa0e8adf299911d36fa"
+    "sha256": "c7f043ba04b6f751396d4e80e104109ddef4a6c16a90ee2115e0e1c17ed0c5e9"
   }
 }

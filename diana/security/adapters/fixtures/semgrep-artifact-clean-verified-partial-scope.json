@@ -32,7 +32,7 @@
       "python.lang.security.weak-crypto-cipher"
     ]
   },
-  "report_binding": {
-    "sha256": "065edc7dffb1c65a3f8afb92ce82f21248a712d80baa9fba6f0029b4d4b92c3d"
+  "artifact_binding": {
+    "sha256": "cf921caa20025ff77df261e438fda41757bbd5e5617f9903fd143fa0f759894a"
   }
 }

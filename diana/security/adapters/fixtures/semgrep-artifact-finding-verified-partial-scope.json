@@ -36,7 +36,7 @@
       "python.lang.security.insecure-random"
     ]
   },
-  "report_binding": {
-    "sha256": "f2b4c978487179132b889714f6df9e446041a2b24269f3eb36d3a75549ff2f9b"
+  "artifact_binding": {
+    "sha256": "459c0a047b652a00c2be8378ad8dde22c1596e5c59ff932be83606ddac225023"
   }
 }

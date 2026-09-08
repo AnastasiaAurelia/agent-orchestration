@@ -22,7 +22,7 @@
       "Secret": "AKIAABCDEFGHIJKLMNOP"
     }
   ],
-  "report_binding": {
-    "sha256": "ca9c7643a54bb566586d528240457fee79cd165c8594a01d9ac54ca58dc7d4b8"
+  "artifact_binding": {
+    "sha256": "89bcf1a85b019ea7590104bada9273aae3488a1df7b4131e29302d92bb2e2e61"
   }
 }

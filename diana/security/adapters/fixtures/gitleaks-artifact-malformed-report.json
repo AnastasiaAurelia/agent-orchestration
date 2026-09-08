@@ -17,7 +17,7 @@
   "report": {
     "this": "should be an array"
   },
-  "report_binding": {
-    "sha256": "e00c6cadcec6de720786e2ff4dbcefbcaedbeb3610092702d2d918c5626caf7d"
+  "artifact_binding": {
+    "sha256": "711090faed5891961a7d3ead0416edde5367f87d2ac6d81225e6109ceef62369"
   }
 }

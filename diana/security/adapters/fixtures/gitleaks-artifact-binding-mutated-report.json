@@ -4,7 +4,7 @@
     "version": "8.18.1"
   },
   "execution": {
-    "completed": false
+    "completed": true
   },
   "target": {
     "repository": "AnastasiaAurelia/agent-orchestration",
@@ -14,8 +14,15 @@
   },
   "config": {},
   "scanned_inputs": [],
-  "report": [],
+  "report": [
+    {
+      "Description": "AWS Access Key",
+      "File": "config/settings.py",
+      "RuleID": "aws-access-key-id",
+      "Secret": "AKIAABCDEFGHIJKLMNOP"
+    }
+  ],
   "artifact_binding": {
-    "sha256": "8e510e82a48ff061e352de979ec765b768484c2e3daea0779a3768cdc204898b"
+    "sha256": "30667a85db64a0d2373e484a97520ea3cf3512d0553834097f4e756db73e093b"
   }
 }

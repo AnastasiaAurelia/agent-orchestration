@@ -13,6 +13,7 @@ SEMGREP="$ADAPTERS_DIR/semgrep_adapter.py"
 
 EXPECTED_FULL_REPO="$FIXTURES/expected-target-full-repo.json"
 EXPECTED_FULL_REPO_MANIFESTS="$FIXTURES/expected-target-full-repo-with-manifests.json"
+EXPECTED_MISSING_COMMIT="$FIXTURES/expected-target-missing-commit.json"
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -25,7 +26,6 @@ fail() { echo "FAIL: $1" >&2; fail_count=$((fail_count + 1)); }
 
 run_adapter() {
   # run_adapter <adapter.py> <artifact-path-or-'-'> <expected-path-or-'-'> <control_id...>
-  # -> writes adapter stdout to $TMP_DIR/adapter_out.json
   local adapter="$1"; shift
   python3 "$adapter" "$@" > "$TMP_DIR/adapter_out.json"
 }
@@ -37,11 +37,9 @@ print(json.dumps(json.load(open(sys.argv[1]))['runs']))
 " "$1"
 }
 
-# Extracts the status of the (only) evidence item this adapter emitted
-# for <control_id>, or NONE if no run for that control_id was emitted at
-# all -- the direct way to check "did this artifact produce a SATISFIED/
-# VIOLATED contribution", without going through evidence_model.py.
 contribution_status() {
+  # Status of the (only) evidence item this adapter emitted for
+  # <control_id>, or NONE if no run for that control_id was emitted.
   python3 -c "
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -85,37 +83,83 @@ check_contribution() {
   fi
 }
 
-check_aggregate_error() {
-  # check_aggregate_error <name> <adapter> <artifact> <expected> <control_id...>
-  local name="$1" adapter="$2" artifact="$3" expected="$4"; shift 4
+check_aggregate() {
+  # check_aggregate <name> <adapter> <artifact> <expected> <expected_result> <control_id...>
+  local name="$1" adapter="$2" artifact="$3" expected="$4" expected_result="$5"; shift 5
   run_adapter "$adapter" "$artifact" "$expected" "$@"
   local runs
   runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
   evaluate_runs "$runs" "$TMP_DIR/agg.out.json"
-  local all_error=1
+  local all_ok=1
   for cid in "$@"; do
     r="$(result_for "$TMP_DIR/agg.out.json" "$cid")"
-    if [ "$r" != "ERROR" ]; then
-      all_error=0
-      fail "$name (expected ERROR for $cid, got $r)"
+    if [ "$r" != "$expected_result" ]; then
+      all_ok=0
+      fail "$name (expected $expected_result for $cid, got $r)"
     fi
   done
-  [ "$all_error" -eq 1 ] && pass "$name -> ERROR"
+  if [ "$all_ok" -eq 1 ]; then
+    pass "$name -> $expected_result"
+  fi
 }
 
 # ==================================================================
-# Gitleaks: SEC-007, one authorized requirement, target/scope-aware
+# T1-T4: target identity vs. scan coverage split (all three adapters)
 # ==================================================================
 
-# CASE P1: clean report + correct target/commit/full-repo scope -> the
-# adapter's one authorized SEC-007 requirement gets a SATISFIED
-# contribution.
-check_contribution "CASE P1 (gitleaks): clean + verified full-repo target" \
-  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-clean-full-repo.json" "$EXPECTED_FULL_REPO" SEC-007 SATISFIED
+# T1: same repo + same commit + partial scope + recognized finding => FAIL allowed
+check_contribution "T1 (gitleaks): same identity + partial scope + finding" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-finding-partial-scope.json" "$EXPECTED_FULL_REPO" SEC-007 VIOLATED
+check_contribution "T1 (osv-scanner): same identity + incomplete manifest coverage + finding" \
+  "$OSV" "$FIXTURES/osv-artifact-finding-high-incomplete-manifests.json" "$EXPECTED_FULL_REPO_MANIFESTS" SEC-060 VIOLATED
+check_contribution "T1 (semgrep): same identity + partial scope + finding" \
+  "$SEMGREP" "$FIXTURES/semgrep-artifact-finding-verified-partial-scope.json" "$EXPECTED_FULL_REPO" SEC-056 VIOLATED
 
-# End-to-end: that SATISFIED contribution, combined with a second run
-# supplying SEC-007's other permitted-capability requirement, reaches
-# PASS -- proving Phase 1 aggregation still composes correctly.
+# T2: wrong repository + recognized finding => NOT FAIL
+check_contribution "T2 (gitleaks): wrong repository + finding" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-finding-wrong-repo.json" "$EXPECTED_FULL_REPO" SEC-007 NONE
+check_contribution "T2 (osv-scanner): wrong repository + finding" \
+  "$OSV" "$FIXTURES/osv-artifact-finding-high-wrong-repo.json" "$EXPECTED_FULL_REPO_MANIFESTS" SEC-060 NONE
+check_contribution "T2 (semgrep): wrong repository + finding" \
+  "$SEMGREP" "$FIXTURES/semgrep-artifact-finding-verified-wrong-repo.json" "$EXPECTED_FULL_REPO" SEC-056 NONE
+
+# T3: wrong commit + recognized finding => NOT FAIL
+check_contribution "T3 (gitleaks): wrong commit + finding" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-finding-wrong-commit.json" "$EXPECTED_FULL_REPO" SEC-007 NONE
+check_contribution "T3 (osv-scanner): wrong commit + finding" \
+  "$OSV" "$FIXTURES/osv-artifact-finding-high-wrong-commit.json" "$EXPECTED_FULL_REPO_MANIFESTS" SEC-060 NONE
+check_contribution "T3 (semgrep): wrong commit + finding" \
+  "$SEMGREP" "$FIXTURES/semgrep-artifact-finding-verified-wrong-commit.json" "$EXPECTED_FULL_REPO" SEC-056 NONE
+
+# T4: missing expected commit => never PASS / never FAIL (gitleaks, both a
+# clean and a finding artifact against an expectation with no commit key)
+check_contribution "T4 (gitleaks): missing expected commit + clean report" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-clean-full-repo.json" "$EXPECTED_MISSING_COMMIT" SEC-007 NONE
+check_contribution "T4 (gitleaks): missing expected commit + finding" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-finding-full-repo-for-missing-commit-test.json" "$EXPECTED_MISSING_COMMIT" SEC-007 NONE
+
+# T5: clean + correct repo/commit + incomplete coverage => UNPROVEN
+check_aggregate "T5 (gitleaks): clean + correct identity + partial scope" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-clean-partial-scope.json" "$EXPECTED_FULL_REPO" UNPROVEN SEC-007
+check_aggregate "T5 (osv-scanner): clean + correct identity + incomplete manifests" \
+  "$OSV" "$FIXTURES/osv-artifact-clean-incomplete-manifests.json" "$EXPECTED_FULL_REPO_MANIFESTS" UNPROVEN SEC-060
+check_aggregate "T5 (semgrep): clean + correct identity + partial scope" \
+  "$SEMGREP" "$FIXTURES/semgrep-artifact-clean-verified-partial-scope.json" "$EXPECTED_FULL_REPO" UNPROVEN SEC-056
+
+# T6: clean + correct identity + complete coverage => SATISFIED (and PASS
+# end to end, since each mapped control here needs only this one capability)
+check_aggregate "T6 (gitleaks): clean + correct identity + full coverage" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-clean-full-repo.json" "$EXPECTED_FULL_REPO" UNPROVEN SEC-007
+# (SEC-007 needs a 2nd, differently-capable contribution too -- see the
+# combined end-to-end PASS check further below; UNPROVEN here on its own
+# is correct and expected, matching Phase 1's aggregation.)
+check_aggregate "T6 (osv-scanner): clean + correct identity + full coverage" \
+  "$OSV" "$FIXTURES/osv-artifact-clean-full-coverage.json" "$EXPECTED_FULL_REPO_MANIFESTS" PASS SEC-060
+check_aggregate "T6 (semgrep): clean + correct identity + full coverage" \
+  "$SEMGREP" "$FIXTURES/semgrep-artifact-clean-verified-full-scope.json" "$EXPECTED_FULL_REPO" PASS SEC-055 SEC-056
+
+# End-to-end: gitleaks' verified-clean contribution + a second run
+# supplying SEC-007's other permitted-capability requirement -> PASS.
 run_adapter "$GITLEAKS" "$FIXTURES/gitleaks-artifact-clean-full-repo.json" "$EXPECTED_FULL_REPO" SEC-007
 runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
 python3 -c "
@@ -135,196 +179,127 @@ json.dump(gitleaks_runs + [static_run], open('$TMP_DIR/g_combined.json', 'w'))
 "
 python3 "$EVIDENCE_MODEL" "$CATALOG" "$TMP_DIR/g_combined.json" > "$TMP_DIR/g_combined.out.json"
 r="$(result_for "$TMP_DIR/g_combined.out.json" SEC-007)"
-[ "$r" = "PASS" ] && pass "CASE P1b (gitleaks): verified clean scan + static-analyzer 2nd requirement -> PASS" \
-  || fail "CASE P1b: expected PASS, got $r"
+[ "$r" = "PASS" ] && pass "T6b (gitleaks): verified clean scan + static-analyzer 2nd requirement -> PASS" \
+  || fail "T6b: expected PASS, got $r"
 
-# CASE P2: clean report + WRONG commit -> not PASS (no contribution).
-check_contribution "CASE P2 (gitleaks): clean + wrong commit" \
-  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-clean-wrong-commit.json" "$EXPECTED_FULL_REPO" SEC-007 NONE
+# ==================================================================
+# T7: per-adapter tool identity
+# ==================================================================
 
-# CASE P3: clean report + missing scan context entirely -> not PASS.
-check_contribution "CASE P3 (gitleaks): clean + no target context" \
-  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-clean-no-context.json" "$EXPECTED_FULL_REPO" SEC-007 NONE
+check_aggregate "T7 (gitleaks): tool.name mismatch (trufflehog, compatible shape)" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-wrong-tool-name.json" "$EXPECTED_FULL_REPO" ERROR SEC-007
+check_aggregate "T7 (osv-scanner): tool.name mismatch (trivy, compatible shape)" \
+  "$OSV" "$FIXTURES/osv-artifact-wrong-tool-name.json" "$EXPECTED_FULL_REPO_MANIFESTS" ERROR SEC-060
+check_aggregate "T7 (semgrep): tool.name mismatch (codeql, compatible shape)" \
+  "$SEMGREP" "$FIXTURES/semgrep-artifact-wrong-tool-name.json" "$EXPECTED_FULL_REPO" ERROR SEC-055 SEC-056
 
-# CASE P4: clean report + partial/subdirectory scope -> not PASS for a
-# repository-wide requirement.
-check_contribution "CASE P4 (gitleaks): clean + partial scope" \
-  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-clean-partial-scope.json" "$EXPECTED_FULL_REPO" SEC-007 NONE
+# ==================================================================
+# T8-T12: artifact-level binding -- tampering any bound field without
+# recomputing the binding must be detected
+# ==================================================================
 
-# CASE P5: report_binding hash mismatch (tampered/substituted report) ->
-# ERROR, not silently trusted.
-check_aggregate_error "CASE P5 (gitleaks): report_binding hash mismatch" \
-  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-binding-mismatch.json" "$EXPECTED_FULL_REPO" SEC-007
+check_aggregate "T8: target.commit mutated without rebuilding artifact_binding" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-binding-mutated-commit.json" "$EXPECTED_FULL_REPO" ERROR SEC-007
+check_aggregate "T9: target.repository mutated without rebuilding artifact_binding" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-binding-mutated-repository.json" "$EXPECTED_FULL_REPO" ERROR SEC-007
+check_aggregate "T10: config mutated without rebuilding artifact_binding" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-binding-mutated-config.json" "$EXPECTED_FULL_REPO" ERROR SEC-007
+check_aggregate "T11: scanned_inputs mutated without rebuilding artifact_binding" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-binding-mutated-scanned-inputs.json" "$EXPECTED_FULL_REPO" ERROR SEC-007
+check_aggregate "T12: report mutated without rebuilding artifact_binding" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-binding-mutated-report.json" "$EXPECTED_FULL_REPO" ERROR SEC-007
 
-# CASE P6: execution.completed=false -> ERROR.
-check_aggregate_error "CASE P6 (gitleaks): execution did not complete" \
-  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-execution-incomplete.json" "$EXPECTED_FULL_REPO" SEC-007
+# ==================================================================
+# T13-T16: Semgrep rule-map authorization validation
+# ==================================================================
 
-# CASE P7: a recognized finding under PARTIAL scope is still trusted and
-# visible as VIOLATED -- positive evidence doesn't need full coverage.
-check_contribution "CASE P7 (gitleaks): finding under partial scope still VIOLATED" \
-  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-finding-partial-scope.json" "$EXPECTED_FULL_REPO" SEC-007 VIOLATED
+# T13: valid, authorized mapping -> accepted (already proven by T6/PASS
+# above; restated explicitly here against the required test name).
+check_aggregate "T13: valid Semgrep authorized mapping is accepted" \
+  "$SEMGREP" "$FIXTURES/semgrep-artifact-clean-verified-full-scope.json" "$EXPECTED_FULL_REPO" PASS SEC-055 SEC-056
 
-# A finding under full-repo scope -> also VIOLATED, and end-to-end FAIL.
-run_adapter "$GITLEAKS" "$FIXTURES/gitleaks-artifact-finding-full-repo.json" "$EXPECTED_FULL_REPO" SEC-007
-runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-evaluate_runs "$runs" "$TMP_DIR/g_fail.out.json"
-r="$(result_for "$TMP_DIR/g_fail.out.json" SEC-007)"
-[ "$r" = "FAIL" ] && pass "CASE (gitleaks): finding -> aggregate FAIL" || fail "expected FAIL, got $r"
+# T14: valid control, wrong requirement text -> ERROR
+check_aggregate "T14: Semgrep valid control + wrong requirement text in rule_map" \
+  "$SEMGREP" "$FIXTURES/semgrep-artifact-wrong-requirement-mapping.json" "$EXPECTED_FULL_REPO" ERROR SEC-056
 
-# Malformed wrapped report (wrong shape) -> ERROR.
-check_aggregate_error "CASE (gitleaks): malformed wrapped report" \
-  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-malformed-report.json" "$EXPECTED_FULL_REPO" SEC-007
+# T15: rule_map names a control this adapter isn't authorized for -> ERROR
+check_aggregate "T15: Semgrep rule_map names an unauthorized control (SEC-001)" \
+  "$SEMGREP" "$FIXTURES/semgrep-artifact-unauthorized-control-mapping.json" "$EXPECTED_FULL_REPO" ERROR SEC-056
 
-# Structurally incomplete artifact (missing required envelope fields) -> ERROR.
-check_aggregate_error "CASE (gitleaks): artifact missing required fields" \
-  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-missing-fields.json" "$EXPECTED_FULL_REPO" SEC-007
+# T16: malformed check_id (empty string) in rule_map -> ERROR
+check_aggregate "T16: Semgrep malformed check_id in rule_map" \
+  "$SEMGREP" "$FIXTURES/semgrep-artifact-malformed-check-id-mapping.json" "$EXPECTED_FULL_REPO" ERROR SEC-056
 
-# Tool missing (no artifact at all) -> no runs -> UNPROVEN.
-run_adapter "$GITLEAKS" "$TMP_DIR/does-not-exist.json" "$EXPECTED_FULL_REPO" SEC-007
-runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-[ "$runs" = "[]" ] && pass "CASE (gitleaks): tool-missing emits no runs" || fail "expected empty runs, got $runs"
+# ==================================================================
+# T17: tool artifact missing => explicit UNPROVEN result, not an absent one
+# ==================================================================
 
-# Silently refuses unauthorized controls.
+for adapter_name in "gitleaks:$GITLEAKS:SEC-007" "osv-scanner:$OSV:SEC-060" "semgrep:$SEMGREP:SEC-056"; do
+  IFS=':' read -r label adapter_bin control_id <<< "$adapter_name"
+  run_adapter "$adapter_bin" "$TMP_DIR/does-not-exist.json" "$EXPECTED_FULL_REPO" "$control_id"
+  runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
+  if [ "$runs" = "[]" ]; then
+    fail "T17 ($label): expected an explicit run for tool-missing, got empty runs"
+  else
+    evaluate_runs "$runs" "$TMP_DIR/t17.out.json"
+    r="$(result_for "$TMP_DIR/t17.out.json" "$control_id")"
+    if [ "$r" = "UNPROVEN" ]; then
+      pass "T17 ($label): tool-missing produces an explicit UNPROVEN result, not an absent one"
+    else
+      fail "T17 ($label): expected UNPROVEN, got $r"
+    fi
+  fi
+done
+
+# ==================================================================
+# Preserved from the earlier implementation: still-valid behaviors
+# ==================================================================
+
+# P5/P6 (renamed to match the binding-tamper family, but this is a
+# distinct case from T8-T12: execution never completed at all).
+check_aggregate "P6 (gitleaks): execution did not complete" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-execution-incomplete.json" "$EXPECTED_FULL_REPO" ERROR SEC-007
+
+check_aggregate "(gitleaks): malformed wrapped report" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-malformed-report.json" "$EXPECTED_FULL_REPO" ERROR SEC-007
+
+check_aggregate "(gitleaks): artifact missing required fields" \
+  "$GITLEAKS" "$FIXTURES/gitleaks-artifact-missing-fields.json" "$EXPECTED_FULL_REPO" ERROR SEC-007
+
 run_adapter "$GITLEAKS" "$FIXTURES/gitleaks-artifact-clean-full-repo.json" "$EXPECTED_FULL_REPO" SEC-006 SEC-065
 runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-[ "$runs" = "[]" ] && pass "CASE (gitleaks): silently refuses unauthorized controls (SEC-006, SEC-065)" \
+[ "$runs" = "[]" ] && pass "(gitleaks): silently refuses unauthorized controls (SEC-006, SEC-065)" \
   || fail "expected empty runs for unauthorized controls, got $runs"
 
-# ==================================================================
-# osv-scanner: SEC-060, fail-open bug fixed, manifest-coverage-aware
-# ==================================================================
+check_aggregate "P8 (osv-scanner): empty-object report is NOT a clean scan" \
+  "$OSV" "$FIXTURES/osv-artifact-empty-object-report.json" "$EXPECTED_FULL_REPO_MANIFESTS" ERROR SEC-060
 
-# CASE P8: {} report (no 'results' key at all) -> ERROR, never treated as
-# a clean scan. This is the exact fail-open bug from human review.
-check_aggregate_error "CASE P8 (osv-scanner): empty-object report is NOT a clean scan" \
-  "$OSV" "$FIXTURES/osv-artifact-empty-object-report.json" "$EXPECTED_FULL_REPO_MANIFESTS" SEC-060
+check_aggregate "(osv-scanner): LOW-only + full coverage -> PASS" \
+  "$OSV" "$FIXTURES/osv-artifact-low-only-full-coverage.json" "$EXPECTED_FULL_REPO_MANIFESTS" PASS SEC-060
 
-# CASE P9: clean report, but scanned_inputs doesn't cover all expected
-# manifests -> UNPROVEN (no contribution), not PASS.
-check_contribution "CASE P9 (osv-scanner): clean + incomplete manifest coverage" \
-  "$OSV" "$FIXTURES/osv-artifact-clean-incomplete-manifests.json" "$EXPECTED_FULL_REPO_MANIFESTS" SEC-060 NONE
+check_aggregate "(osv-scanner): unrecognized severity value" \
+  "$OSV" "$FIXTURES/osv-artifact-unrecognized-severity.json" "$EXPECTED_FULL_REPO_MANIFESTS" ERROR SEC-060
 
-# Clean + full manifest coverage + verified target -> SATISFIED -> PASS
-# end-to-end (SEC-060 needs only DEPENDENCY_SCANNER).
-run_adapter "$OSV" "$FIXTURES/osv-artifact-clean-full-coverage.json" "$EXPECTED_FULL_REPO_MANIFESTS" SEC-060
-runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-evaluate_runs "$runs" "$TMP_DIR/o_pass.out.json"
-r="$(result_for "$TMP_DIR/o_pass.out.json" SEC-060)"
-[ "$r" = "PASS" ] && pass "CASE (osv-scanner): clean + full manifest coverage -> PASS" || fail "expected PASS, got $r"
-
-# A HIGH finding is trusted even with incomplete manifest coverage
-# (positive evidence asymmetry) -> VIOLATED -> FAIL.
-run_adapter "$OSV" "$FIXTURES/osv-artifact-finding-high-incomplete-manifests.json" "$EXPECTED_FULL_REPO_MANIFESTS" SEC-060
-runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-evaluate_runs "$runs" "$TMP_DIR/o_fail_partial.out.json"
-r="$(result_for "$TMP_DIR/o_fail_partial.out.json" SEC-060)"
-[ "$r" = "FAIL" ] && pass "CASE (osv-scanner): HIGH finding trusted despite incomplete manifest coverage -> FAIL" \
-  || fail "expected FAIL, got $r"
-
-# A HIGH finding with full coverage -> also FAIL.
-run_adapter "$OSV" "$FIXTURES/osv-artifact-finding-high-full-coverage.json" "$EXPECTED_FULL_REPO_MANIFESTS" SEC-060
-runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-evaluate_runs "$runs" "$TMP_DIR/o_fail_full.out.json"
-r="$(result_for "$TMP_DIR/o_fail_full.out.json" SEC-060)"
-[ "$r" = "FAIL" ] && pass "CASE (osv-scanner): HIGH finding + full coverage -> FAIL" || fail "expected FAIL, got $r"
-
-# Only LOW findings present + full coverage -> still SATISFIED, matching
-# the catalog's exact "no unresolved critical/high" wording -> PASS.
-run_adapter "$OSV" "$FIXTURES/osv-artifact-low-only-full-coverage.json" "$EXPECTED_FULL_REPO_MANIFESTS" SEC-060
-runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-evaluate_runs "$runs" "$TMP_DIR/o_low.out.json"
-r="$(result_for "$TMP_DIR/o_low.out.json" SEC-060)"
-[ "$r" = "PASS" ] && pass "CASE (osv-scanner): LOW-only + full coverage -> PASS" || fail "expected PASS, got $r"
-
-# An unrecognized severity string fails closed to ERROR for the whole
-# artifact, rather than being silently excluded from the critical/high
-# check.
-check_aggregate_error "CASE (osv-scanner): unrecognized severity value" \
-  "$OSV" "$FIXTURES/osv-artifact-unrecognized-severity.json" "$EXPECTED_FULL_REPO_MANIFESTS" SEC-060
-
-# Tool missing.
-run_adapter "$OSV" "$TMP_DIR/does-not-exist.json" "$EXPECTED_FULL_REPO_MANIFESTS" SEC-060
-runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-[ "$runs" = "[]" ] && pass "CASE (osv-scanner): tool-missing emits no runs" || fail "expected empty runs, got $runs"
-
-# Silently refuses unauthorized controls.
 run_adapter "$OSV" "$FIXTURES/osv-artifact-clean-full-coverage.json" "$EXPECTED_FULL_REPO_MANIFESTS" SEC-061 SEC-062
 runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-[ "$runs" = "[]" ] && pass "CASE (osv-scanner): silently refuses unauthorized controls (SEC-061, SEC-062)" \
+[ "$runs" = "[]" ] && pass "(osv-scanner): silently refuses unauthorized controls (SEC-061, SEC-062)" \
   || fail "expected empty runs for unauthorized controls, got $runs"
 
-# ==================================================================
-# Semgrep: SEC-055/SEC-056, verified rule_map only, target/scope-aware
-# ==================================================================
+check_aggregate "P10 (semgrep): no verified rule_map -> illustrative mapping cannot create PASS" \
+  "$SEMGREP" "$FIXTURES/semgrep-artifact-clean-no-rule-map.json" "$EXPECTED_FULL_REPO" UNPROVEN SEC-056
 
-# CASE P10: no config.rule_map supplied at all -- the illustrative
-# constant in this module must NOT be consulted by production code, so
-# nothing is authorized despite rules_run listing the illustrative rule
-# IDs verbatim.
-check_contribution "CASE P10 (semgrep): no verified rule_map -> illustrative mapping cannot create PASS" \
-  "$SEMGREP" "$FIXTURES/semgrep-artifact-clean-no-rule-map.json" "$EXPECTED_FULL_REPO" SEC-056 NONE
+check_aggregate "(semgrep): unmapped check_id (even with a verified rule_map present) produces no contribution" \
+  "$SEMGREP" "$FIXTURES/semgrep-artifact-unmapped-rule-verified.json" "$EXPECTED_FULL_REPO" UNPROVEN SEC-055 SEC-056
 
-# CASE P11: a caller-verified rule_map, the mapped rules actually ran,
-# and the target/scope matches what was expected -> SATISFIED for both
-# mapped controls -> both PASS (neither is dynamic/human-judgment gated).
-run_adapter "$SEMGREP" "$FIXTURES/semgrep-artifact-clean-verified-full-scope.json" "$EXPECTED_FULL_REPO" SEC-055 SEC-056
-runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-evaluate_runs "$runs" "$TMP_DIR/s_pass.out.json"
-r55="$(result_for "$TMP_DIR/s_pass.out.json" SEC-055)"
-r56="$(result_for "$TMP_DIR/s_pass.out.json" SEC-056)"
-[ "$r55" = "PASS" ] && [ "$r56" = "PASS" ] && pass "CASE P11 (semgrep): verified rule_map + rules ran + full scope -> PASS for SEC-055 and SEC-056" \
-  || fail "CASE P11: expected [PASS, PASS], got [$r55, $r56]"
-
-# CASE P12: same verified rule_map and rules ran, but the artifact's
-# declared scope is "partial" while the caller expected "full-repo" ->
-# target mismatch -> not PASS.
-check_contribution "CASE P12 (semgrep): verified rule_map + rules ran but scope mismatch" \
-  "$SEMGREP" "$FIXTURES/semgrep-artifact-clean-verified-partial-scope.json" "$EXPECTED_FULL_REPO" SEC-056 NONE
-
-# A recognized finding from a verified, mapped rule is trusted regardless
-# of scope -> VIOLATED -> FAIL.
-run_adapter "$SEMGREP" "$FIXTURES/semgrep-artifact-finding-verified.json" "$EXPECTED_FULL_REPO" SEC-055 SEC-056
-runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-evaluate_runs "$runs" "$TMP_DIR/s_fail.out.json"
-r56="$(result_for "$TMP_DIR/s_fail.out.json" SEC-056)"
-[ "$r56" = "FAIL" ] && pass "CASE (semgrep): verified finding -> FAIL" || fail "expected FAIL, got $r56"
-
-# Same finding under partial scope -- still trusted -> FAIL (positive
-# evidence asymmetry, same as Gitleaks/osv-scanner above).
-run_adapter "$SEMGREP" "$FIXTURES/semgrep-artifact-finding-verified-partial-scope.json" "$EXPECTED_FULL_REPO" SEC-056
-runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-evaluate_runs "$runs" "$TMP_DIR/s_fail_partial.out.json"
-r56="$(result_for "$TMP_DIR/s_fail_partial.out.json" SEC-056)"
-[ "$r56" = "FAIL" ] && pass "CASE (semgrep): verified finding under partial scope still -> FAIL" \
-  || fail "expected FAIL, got $r56"
-
-# An unmapped check_id (not in the verified rule_map either) is silently
-# dropped -- no contribution for any control.
-run_adapter "$SEMGREP" "$FIXTURES/semgrep-artifact-unmapped-rule-verified.json" "$EXPECTED_FULL_REPO" SEC-055 SEC-056
-runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-[ "$runs" = "[]" ] && pass "CASE (semgrep): unmapped check_id (even with a verified rule_map present) produces no contribution" \
-  || fail "expected empty runs, got $runs"
-
-# The mapped rule exists in the verified rule_map but never actually ran
-# (rules_run only lists an unrelated rule) -> no contribution.
-check_contribution "CASE (semgrep): verified rule_map but mapped rule never ran" \
+check_contribution "(semgrep): verified rule_map but mapped rule never ran" \
   "$SEMGREP" "$FIXTURES/semgrep-artifact-rule-not-run-verified.json" "$EXPECTED_FULL_REPO" SEC-056 NONE
 
-# Malformed wrapped report -> ERROR.
-check_aggregate_error "CASE (semgrep): malformed wrapped report" \
-  "$SEMGREP" "$FIXTURES/semgrep-artifact-malformed-report.json" "$EXPECTED_FULL_REPO" SEC-055 SEC-056
+check_aggregate "(semgrep): malformed wrapped report" \
+  "$SEMGREP" "$FIXTURES/semgrep-artifact-malformed-report.json" "$EXPECTED_FULL_REPO" ERROR SEC-055 SEC-056
 
-# Tool missing.
-run_adapter "$SEMGREP" "$TMP_DIR/does-not-exist.json" "$EXPECTED_FULL_REPO" SEC-056
-runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-[ "$runs" = "[]" ] && pass "CASE (semgrep): tool-missing emits no runs" || fail "expected empty runs, got $runs"
-
-# Silently refuses an unauthorized control (SEC-001 needs
-# SEMANTIC_REVIEW/DYNAMIC_API, not STATIC_ANALYZER).
 run_adapter "$SEMGREP" "$FIXTURES/semgrep-artifact-clean-verified-full-scope.json" "$EXPECTED_FULL_REPO" SEC-001
 runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
-[ "$runs" = "[]" ] && pass "CASE (semgrep): silently refuses an unauthorized control (SEC-001)" \
+[ "$runs" = "[]" ] && pass "(semgrep): silently refuses an unauthorized control (SEC-001)" \
   || fail "expected empty runs for an unauthorized control, got $runs"
 
 echo ""

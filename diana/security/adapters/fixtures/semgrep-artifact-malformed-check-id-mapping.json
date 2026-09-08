@@ -14,29 +14,18 @@
   },
   "config": {
     "rule_map": {
-      "python.lang.security.insecure-random": [
+      "": [
         "SEC-056",
         "security-relevant random values are generated with a cryptographically secure random source, not a general-purpose PRNG"
-      ],
-      "python.lang.security.weak-crypto-cipher": [
-        "SEC-055",
-        "cryptographic operations use vetted standard-library/well-known algorithms and libraries, not a custom-designed cipher/scheme"
       ]
     }
   },
   "scanned_inputs": [],
   "report": {
-    "results": [
-      {
-        "check_id": "python.lang.security.insecure-random",
-        "path": "app/tokens.py"
-      }
-    ],
-    "rules_run": [
-      "python.lang.security.insecure-random"
-    ]
+    "results": [],
+    "rules_run": []
   },
   "artifact_binding": {
-    "sha256": "b3cf8905ec59923b28caf4d233274ebe11aba450dc859aa0e8adf299911d36fa"
+    "sha256": "065d0203a415911ea7b8175b065143bb0b1c0452978e09f47e2a82d02ff6a776"
   }
 }

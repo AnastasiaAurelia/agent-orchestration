@@ -16,11 +16,7 @@
     "rule_map": {
       "python.lang.security.insecure-random": [
         "SEC-056",
-        "security-relevant random values are generated with a cryptographically secure random source, not a general-purpose PRNG"
-      ],
-      "python.lang.security.weak-crypto-cipher": [
-        "SEC-055",
-        "cryptographic operations use vetted standard-library/well-known algorithms and libraries, not a custom-designed cipher/scheme"
+        "this is not the real SEC-056 requirement text"
       ]
     }
   },
@@ -28,11 +24,10 @@
   "report": {
     "results": [],
     "rules_run": [
-      "python.lang.security.insecure-random",
-      "python.lang.security.weak-crypto-cipher"
+      "python.lang.security.insecure-random"
     ]
   },
   "artifact_binding": {
-    "sha256": "b48d28397c792572ddaded2099f63452170aedc7bf3d4aa4daa54277431ef8ad"
+    "sha256": "a80ce998e8840c1be1b2c03b2c65964a342900d5f7735fc700e4896ee2159081"
   }
 }

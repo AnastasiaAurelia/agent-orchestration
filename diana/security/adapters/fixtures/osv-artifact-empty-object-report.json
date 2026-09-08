@@ -18,7 +18,7 @@
     "package-lock.json"
   ],
   "report": {},
-  "report_binding": {
-    "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+  "artifact_binding": {
+    "sha256": "012fa17b92af5fab92ab9e18b073b3bd19125103f21158e69a5fa3959ee17a33"
   }
 }

@@ -1,44 +1,37 @@
 #!/usr/bin/env python3
-"""Diana Security static adapter: Semgrep (Security Phase 2, provenance-
-corrected).
+"""Diana Security static adapter: Semgrep (Security Phase 2, final
+trust-boundary correction).
 
 Normalizes a **verified scan-evidence artifact** (see `adapter_base`
 module docstring) wrapping a saved/real Semgrep JSON report into
 evidence_model.py run records. Never installs, invokes, or bundles
 Semgrep -- this module only parses an already-produced artifact.
 
-## The illustrative-mapping bug this correction fixes
+## Rule-map authorization, not just shape validation
 
-The first implementation hardcoded a `RULE_MAP` of illustrative example
-Semgrep `check_id` strings directly into this module's production
-`ingest()` path. Those rule IDs were never verified against a real
-Semgrep registry or a real deployment's actual configured ruleset --
-using them to authorize a real `PASS` would let an unverified guess
-manufacture evidence. **`ingest()` now never consults a hardcoded rule
-table.** The only rule mapping it will ever use is
+The only rule mapping `ingest()` will ever use is
 `artifact["config"]["rule_map"]` -- part of the caller-constructed,
-trusted envelope (see `adapter_base`), not this module's own guesswork.
-If an artifact carries no `rule_map` (the default for any artifact a
-caller didn't deliberately populate), no `check_id` is ever authorized,
-and every mapped control this adapter is asked about stays `UNPROVEN`.
+trusted envelope, never the module's own `ILLUSTRATIVE_TEST_ONLY_RULE_MAP`
+(read only by tests, never by production code). Beyond checking the
+mapping's *shape*, every entry is validated against this adapter's own
+`AUTHORIZED_EVIDENCE`: the control_id must be one this adapter is
+authorized for, and the requirement string must exactly equal the
+authorized requirement for that control. A rule_map entry naming an
+unknown control, an unauthorized control, or the wrong requirement text
+is rejected as an artifact integrity problem (`ArtifactError` -> `ERROR`
+for the whole artifact) -- a caller cannot smuggle authorization for a
+control this adapter was never designed to prove by writing it into the
+artifact's own config block. A malformed `check_id` (not a non-empty
+string) is rejected the same way.
 
-`ILLUSTRATIVE_TEST_ONLY_RULE_MAP` below still exists, but strictly as a
-labeled example a *test* can choose to place into an artifact's
-`config.rule_map` when it wants to exercise the "verified mapping"
-pathway (see test-adapters.sh CASE S1/S2/P11). Production code never
-reads it.
+## Target identity vs. scan coverage
 
-## Clean result meaningfulness (unchanged principle, now scope-aware too)
-
-A Semgrep report only proves something about a control if (a) a rule
-mapped to that control actually ran, per the report's `rules_run` list,
-**and** (b) the artifact's declared scan target/scope matches what the
-caller expected (see `adapter_base.verify_target()`) -- a rule running
-against the wrong commit or a narrow subtree proves nothing about the
-requirement's intended scope. Both must hold before a zero-finding result
-for that control counts as `SATISFIED`. **A real finding from a mapped,
-verified rule counts as `VIOLATED` regardless of scope** -- the
-positive/negative evidence asymmetry applies here too.
+A recognized finding from a mapped, verified rule is trusted from partial
+scope, but only when attributed to the correct TARGET IDENTITY
+(`adapter_base.verify_identity()`: same repository and commit the caller
+expected). A clean result additionally requires the mapped rule to have
+actually run (`rules_run`) *and* the stronger `adapter_base.verify_target()`
+check (identity plus scope) before it can count as `SATISFIED`.
 
 ## Mapped controls
 
@@ -60,6 +53,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import adapter_base  # noqa: E402
 
 CAPABILITY = "STATIC_ANALYZER"
+TOOL_NAME = "semgrep"
 
 SEC055_REQ = "cryptographic operations use vetted standard-library/well-known algorithms and libraries, not a custom-designed cipher/scheme"
 SEC056_REQ = "security-relevant random values are generated with a cryptographically secure random source, not a general-purpose PRNG"
@@ -97,8 +91,8 @@ def _parse_report(raw: Any) -> tuple[list[dict[str, Any]], set[str]]:
     if not isinstance(results, list):
         raise ReportParseError("results must be a list")
     for entry in results:
-        if not isinstance(entry, dict) or not isinstance(entry.get("check_id"), str):
-            raise ReportParseError("each result must be an object with a string check_id")
+        if not isinstance(entry, dict) or not isinstance(entry.get("check_id"), str) or not entry.get("check_id", "").strip():
+            raise ReportParseError("each result must be an object with a non-empty string check_id")
     if "rules_run" not in raw:
         raise ReportParseError("report has no 'rules_run' field")
     rules_run = raw["rules_run"]
@@ -109,23 +103,39 @@ def _parse_report(raw: Any) -> tuple[list[dict[str, Any]], set[str]]:
 
 def _parse_rule_map(config: dict[str, Any]) -> dict[str, tuple[str, str]]:
     """Extracts a caller-verified rule map from the artifact's trusted
-    config block. Absent entirely -> empty map (nothing authorized).
-    A malformed rule_map (wrong shape) is a structural artifact problem."""
+    config block, and validates every entry against AUTHORIZED_EVIDENCE --
+    a rule_map cannot authorize a control/requirement this adapter isn't
+    itself capable of proving. Absent config.rule_map entirely -> empty
+    map (nothing authorized). Any malformed shape or unauthorized
+    control/requirement is an ArtifactError (-> ERROR for the artifact)."""
     raw_map = config.get("rule_map", {})
     if not isinstance(raw_map, dict):
         raise adapter_base.ArtifactError("artifact.config.rule_map must be an object if present")
+
     parsed: dict[str, tuple[str, str]] = {}
     for check_id, pair in raw_map.items():
+        if not isinstance(check_id, str) or not check_id.strip():
+            raise adapter_base.ArtifactError(f"artifact.config.rule_map has a malformed check_id: {check_id!r}")
         if (
-            not isinstance(check_id, str)
-            or not isinstance(pair, list)
+            not isinstance(pair, list)
             or len(pair) != 2
             or not all(isinstance(x, str) for x in pair)
         ):
             raise adapter_base.ArtifactError(
                 f"artifact.config.rule_map entry for {check_id!r} must be a 2-element list of strings [control_id, requirement]"
             )
-        parsed[check_id] = (pair[0], pair[1])
+        control_id, requirement = pair[0], pair[1]
+        if control_id not in AUTHORIZED_EVIDENCE:
+            raise adapter_base.ArtifactError(
+                f"artifact.config.rule_map entry for {check_id!r} names {control_id!r}, "
+                f"which this adapter is not authorized for"
+            )
+        if requirement not in AUTHORIZED_EVIDENCE[control_id]:
+            raise adapter_base.ArtifactError(
+                f"artifact.config.rule_map entry for {check_id!r} names an unauthorized requirement for "
+                f"{control_id!r}: {requirement!r}"
+            )
+        parsed[check_id] = (control_id, requirement)
     return parsed
 
 
@@ -140,12 +150,15 @@ def ingest(
         return []
 
     if artifact_path is None or not Path(artifact_path).exists():
-        return []
+        return adapter_base.tool_unavailable_runs(
+            requested_authorized, CAPABILITY, identity, "no artifact provided"
+        )
 
     try:
         with open(artifact_path, "r", encoding="utf-8") as f:
             raw = json.load(f)
         envelope = adapter_base.load_envelope(raw)
+        adapter_base.verify_tool_identity(envelope["tool"], TOOL_NAME)
         results, rules_run = _parse_report(envelope["report"])
         rule_map = _parse_rule_map(envelope["config"])
     except (OSError, json.JSONDecodeError, adapter_base.ArtifactError, ReportParseError) as exc:
@@ -153,34 +166,39 @@ def ingest(
             requested_authorized, CAPABILITY, identity, f"could not verify Semgrep artifact: {exc}"
         )
 
-    target_verified, _mismatch_reason = adapter_base.verify_target(envelope["target"], expected_target)
+    identity_verified, _identity_reason = adapter_base.verify_identity(envelope["target"], expected_target)
+    target_verified, _target_reason = adapter_base.verify_target(envelope["target"], expected_target)
 
-    # Findings: for each mapped rule (per the artifact's OWN verified
-    # rule_map, never the illustrative constant) that actually fired,
-    # that's a VIOLATED contribution -- trusted regardless of target
-    # verification. check_ids not in rule_map are silently dropped.
+    # Findings: for each mapped rule (per the artifact's OWN verified,
+    # AUTHORIZED_EVIDENCE-checked rule_map) that actually fired, that's a
+    # VIOLATED contribution -- trusted from partial scope, but only when
+    # attributed to the correct target identity. check_ids not in
+    # rule_map are silently dropped.
     violated_pairs: set[tuple[str, str]] = set()
     contributions: list[tuple[str, str, str, str, str | None]] = []
-    for entry in results:
-        mapped = rule_map.get(entry["check_id"])
-        if mapped is None:
-            continue
-        control_id, requirement = mapped
-        if control_id not in requested_authorized:
-            continue
-        if (control_id, requirement) in violated_pairs:
-            continue
-        violated_pairs.add((control_id, requirement))
-        path = entry.get("path", "unknown-file")
-        contributions.append(
-            (
-                control_id,
-                requirement,
-                "VIOLATED",
-                f"semgrep finding: rule={entry['check_id']} file={path}",
-                None,
+    if identity_verified:
+        for entry in results:
+            mapped = rule_map.get(entry["check_id"])
+            if mapped is None:
+                continue
+            control_id, requirement = mapped
+            if control_id not in requested_authorized:
+                continue
+            if (control_id, requirement) in violated_pairs:
+                continue
+            violated_pairs.add((control_id, requirement))
+            path = entry.get("path", "unknown-file")
+            contributions.append(
+                (
+                    control_id,
+                    requirement,
+                    "VIOLATED",
+                    f"semgrep finding: rule={entry['check_id']} file={path}",
+                    None,
+                )
             )
-        )
+    # else: any findings present are not attributed to the expected
+    # target at all -- no contribution for them.
 
     # Clean-result meaningfulness: only claim SATISFIED for a control if
     # (a) a rule_map-mapped rule for it actually ran, AND (b) the declared
@@ -205,9 +223,12 @@ def ingest(
                 )
             )
         # else: either the mapped rule never ran, or the scan target/scope
-        # couldn't be verified -- no contribution (stays UNPROVEN).
+        # couldn't be verified -- no contribution.
 
-    return adapter_base.build_runs(contributions, AUTHORIZED_EVIDENCE, CAPABILITY, identity)
+    try:
+        return adapter_base.build_runs(contributions, AUTHORIZED_EVIDENCE, CAPABILITY, identity, requested_authorized)
+    except adapter_base.NotAuthorized as exc:
+        return adapter_base.tool_error_runs(requested_authorized, CAPABILITY, identity, str(exc))
 
 
 def main(argv: list[str]) -> int:

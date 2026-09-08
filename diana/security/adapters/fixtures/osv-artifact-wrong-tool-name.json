@@ -1,10 +1,10 @@
 {
   "tool": {
-    "name": "gitleaks",
-    "version": "8.18.1"
+    "name": "trivy",
+    "version": "0.50.0"
   },
   "execution": {
-    "completed": false
+    "completed": true
   },
   "target": {
     "repository": "AnastasiaAurelia/agent-orchestration",
@@ -13,9 +13,14 @@
     "scope": "full-repo"
   },
   "config": {},
-  "scanned_inputs": [],
-  "report": [],
+  "scanned_inputs": [
+    "requirements.txt",
+    "package-lock.json"
+  ],
+  "report": {
+    "results": []
+  },
   "artifact_binding": {
-    "sha256": "8e510e82a48ff061e352de979ec765b768484c2e3daea0779a3768cdc204898b"
+    "sha256": "960213074cedff5236b199689610dc1c6017e91fa746e792262b291de089a9a4"
   }
 }

@@ -14,8 +14,15 @@
   },
   "config": {},
   "scanned_inputs": [],
-  "report": [],
+  "report": [
+    {
+      "Description": "AWS Access Key",
+      "File": "config/settings.py",
+      "RuleID": "aws-access-key-id",
+      "Secret": "AKIAABCDEFGHIJKLMNOP"
+    }
+  ],
   "artifact_binding": {
-    "sha256": "329a73ebd4cb26211c380a213d8f522ec17b026b85f3f97549dab178022c0352"
+    "sha256": "9ccb62c9b3b935b3fb4da397966c07cb610fcead071a9a820d59ff18f6f9d9b4"
   }
 }

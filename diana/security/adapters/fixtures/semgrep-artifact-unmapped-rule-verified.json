@@ -36,7 +36,7 @@
       "python.lang.security.some-other-rule-not-in-map"
     ]
   },
-  "report_binding": {
-    "sha256": "0ca99e9e29b0d64a8a83f8436a21f78e78b2089b874c8c6abf1cc5b90f247e13"
+  "artifact_binding": {
+    "sha256": "7e298e91185391953d419db79a0f9897fae4a87dc339a513bb4c1007476697af"
   }
 }
