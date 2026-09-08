@@ -93,6 +93,8 @@
 !diana/security/catalog.json
 !diana/security/validate_catalog.py
 !diana/security/test-catalog.sh
+!diana/security/evidence_model.py
+!diana/security/test-evidence-model.sh
 
 # Explicit reminders for common files that must never be published here.
 .env
