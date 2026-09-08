@@ -1,8 +1,13 @@
 # Diana Gate CI
 
-The pull-request workflow reads a strict JSON evidence block from the PR body,
-derives changed files from Git, runs the local Diana Gate, runs the Security
-Gate, combines the two, and writes the result to the GitHub job summary.
+Two separate, independently required GitHub Actions checks. `diana-gate.yml`
+(plain `pull_request`) reads a strict JSON evidence block from the PR body,
+derives changed files from Git, runs the local Diana Gate, and writes the
+result to the GitHub job summary. `diana-security-gate.yml`
+(`pull_request_target` -- see below) independently evaluates the Security
+Track's evidence. Neither workflow's code combines the two: GitHub branch
+protection requiring both checks reproduces the intended combination
+policy (see `diana/gate/README.md`'s "Security Phase 5" section).
 
 `diana-gate.py`'s own exit code (`0` PASS, `1` FAIL, `2` REQUIRE_HUMAN) is
 translated by `map-gate-result.py` into the required-check conclusion:
@@ -19,28 +24,52 @@ translated by `map-gate-result.py` into the required-check conclusion:
 `diana-gate.py`'s decision semantics are never altered to fit CI; only the
 check-status mapping around it changes.
 
-## Security Phase 5: `run-security-gate.py`
+## Security Phase 5: `diana-security-gate.yml` (separate workflow, `pull_request_target`)
 
-After the existing Diana Gate step (unchanged), the workflow runs
-[`run-security-gate.py`](run-security-gate.py) `$GITHUB_WORKSPACE
-$DIANA_BASE_SHA $DIANA_HEAD_SHA "${{ github.repository }}"`. It extracts
-the TRUSTED security policy/evaluator (`diana/security/{catalog.json,
-validate_catalog.py, evidence_model.py, security_bundle.py,
-security_reducer.py, ci_verifier_runs.py}`) from the pull request's
-protected base SHA (`git archive`, never the PR head's working tree) and
-runs the whole trusted pipeline from that isolated extraction, so a PR
-modifying any of those files cannot weaken its own current evaluation.
-When those files don't exist yet at the base (the Security Phase 5 PR's
-own bootstrap case), it emits `{"decision": "SKIPPED_BOOTSTRAP", ...}`
-instead of erroring. See `diana/security/README.md`'s "Security Phase 5"
-section for the full design.
+`.github/workflows/diana-security-gate.yml` is a **separate workflow
+file** from `diana-gate.yml`, triggered by `pull_request_target` instead
+of `pull_request`. This is the actual trust root, not an implementation
+detail: for `pull_request_target`, GitHub resolves and runs the
+**workflow file itself** from the repository's default branch, never
+from the PR head -- a PR that edits this workflow file (e.g. to remove
+or neuter the Security Gate step) has zero effect on what actually runs
+against it. Its `actions/checkout` step deliberately specifies no `ref:`
+override, so it also resolves to the base branch's tip by default (never
+the PR head or a merge commit) -- the entire checked-out tree, including
+`diana/security/{ci_verifier_runs.py, security_bundle.py,
+security_reducer.py}`, is already the protected base. No extraction step
+is needed; those scripts are invoked directly from that checkout. The
+workflow declares `permissions: contents: read` (no write scopes) and
+references no `secrets.*` anywhere.
 
-The result is combined with the existing Diana Gate's result via
-`diana-gate.py combine GATE_RESULT.json SECURITY_RESULT.json` (a second,
-additive CLI mode on the existing, otherwise-unmodified `diana-gate.py`)
-before `write-summary.py` and `map-gate-result.py` run -- both of those
-scripts are completely unchanged, they are simply fed the combined result
-instead of the Gate-only result.
+The job's own exit code (via the same `map-gate-result.py` convention
+as the ordinary Gate) determines whether this check succeeds; branch
+protection requiring both this check and the ordinary "Diana Gate" check
+reproduces the combination policy without any shared runtime code.
+
+An earlier design ran a git-archive-based extraction
+([`run-security-gate.py`](run-security-gate.py)) *inside* a step of the
+plain-`pull_request`-triggered `diana-gate.yml` -- that protected the
+evaluator *scripts* from PR-head tampering but not the *workflow
+orchestration itself* (a malicious PR could simply have deleted the step
+that called it), so it was not a sound trust root. `run-security-gate.py`
+remains in the repository as a local/offline dry-run tool and as the
+reference implementation `test-security-gate.sh`'s S2+S3 test uses to
+prove the underlying "protected base beats PR head" property against a
+real git repository -- see its own module docstring for the full
+explanation of why it is no longer what live CI invokes.
+
+**Post-merge activation, and why Phase 6 is blocked until it's
+confirmed**: `pull_request_target` workflows only run when the workflow
+file already exists on the default branch -- this means `diana-security-
+gate.yml` does **not** execute at all against the very PR that first
+introduces it (there is nothing on the base branch to trigger from yet).
+The Security Gate check therefore does not protect its own introducing
+PR (see "bootstrap" in `diana/security/README.md`); after that PR
+merges, the NEXT pull request against this repository is the first real
+opportunity to confirm the workflow actually fires and produces a
+sensible result. Security Phase 6 must not begin until that activation
+has been observed.
 
 The synthetic matrix (`test-advisory.py`) covers safe, missing evidence,
 blocker, human-only, non-applicable stack, malformed evidence, sensitive-

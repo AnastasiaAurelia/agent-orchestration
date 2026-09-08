@@ -410,52 +410,115 @@ check_reducer_cli "S4: bundle for head A cannot prove head B" \
   "$TMP_DIR/s4-bundle.json" "$REPO" "$BASE_SHA" "$OTHER_SHA" FAIL 1
 
 # ==================================================================
-# C1-C6: combination with the existing (unmodified) Diana Gate
+# C1-C4: Diana Gate and Security Gate are separate, independently
+# required checks (no in-process combination) -- their effective
+# combination is GitHub branch protection's own AND-of-required-checks
+# semantics, not code in this repository. What IS code, and what is
+# tested here, is that each check maps its OWN decision through the same
+# unmodified map-gate-result.py convention, so both checks compose
+# correctly under branch protection: either FAILing blocks merge; either
+# being REQUIRE_HUMAN still leaves the check itself green (so it doesn't
+# deadlock against being a required check) while the SEPARATE required-
+# review rule still blocks merge; both clean allows merge. diana-gate.py
+# itself has NO combine mode -- its evaluate(), CLI, and every
+# pre-existing behavior are byte-for-byte unchanged from before Security
+# Phase 5 (verified by the untouched test-gate.sh, test-gate-integration.sh,
+# and test-ship.sh suites, not by anything in this file).
 # ==================================================================
 
-python3 -c "import json; json.dump({'decision':'PASS','checks':[],'reasons':[]}, open('$TMP_DIR/c-gate-pass.json','w'))"
-python3 -c "import json; json.dump({'decision':'FAIL','checks':[],'reasons':['gate fail']}, open('$TMP_DIR/c-gate-fail.json','w'))"
-python3 -c "import json; json.dump({'decision':'REQUIRE_HUMAN','checks':[],'reasons':['gate rh']}, open('$TMP_DIR/c-gate-rh.json','w'))"
 python3 -c "import json; json.dump({'decision':'PASS','reasons':[]}, open('$TMP_DIR/c-sec-pass.json','w'))"
 python3 -c "import json; json.dump({'decision':'FAIL','reasons':['sec fail']}, open('$TMP_DIR/c-sec-fail.json','w'))"
 python3 -c "import json; json.dump({'decision':'REQUIRE_HUMAN','reasons':['sec rh']}, open('$TMP_DIR/c-sec-rh.json','w'))"
 
-check_combine() {
-  local name="$1" gate_file="$2" sec_file="$3" expected="$4" expected_exit="$5"
-  local out_file="$TMP_DIR/combine_out.json"
-  local actual_exit=0
-  python3 "$GATE_PY" combine "$gate_file" "$sec_file" > "$out_file" || actual_exit=$?
-  local actual
-  actual="$(get_decision "$out_file")"
-  if [ "$actual" = "$expected" ] && [ "$actual_exit" = "$expected_exit" ]; then
-    pass "$name -> $expected (exit $expected_exit)"
+check_map_gate_result() {
+  # check_map_gate_result <name> <decision_file> <expected_map_exit>
+  local name="$1" decision_file="$2" expected_map_exit="$3"
+  local decision exit_code
+  decision="$(get_decision "$decision_file")"
+  case "$decision" in
+    PASS) exit_code=0 ;;
+    REQUIRE_HUMAN) exit_code=2 ;;
+    FAIL) exit_code=1 ;;
+    *) fail "$name (unrecognized decision $decision)"; return ;;
+  esac
+  local map_exit=0
+  python3 "$REPO_ROOT/diana/ci/map-gate-result.py" "$exit_code" > "$TMP_DIR/map-out.txt" 2>&1 || map_exit=$?
+  if [ "$map_exit" = "$expected_map_exit" ]; then
+    pass "$name: security decision $decision -> map-gate-result.py exit $expected_map_exit"
   else
-    fail "$name (expected $expected/exit $expected_exit, got $actual/exit $actual_exit)"
+    fail "$name (expected map-gate-result.py exit $expected_map_exit for $decision, got $map_exit)"
   fi
 }
 
-check_combine "C1: existing PASS + security PASS -> PASS" \
-  "$TMP_DIR/c-gate-pass.json" "$TMP_DIR/c-sec-pass.json" PASS 0
-check_combine "C2: existing FAIL still wins" \
-  "$TMP_DIR/c-gate-fail.json" "$TMP_DIR/c-sec-pass.json" FAIL 1
-check_combine "C3: existing REQUIRE_HUMAN still wins" \
-  "$TMP_DIR/c-gate-rh.json" "$TMP_DIR/c-sec-pass.json" REQUIRE_HUMAN 2
-check_combine "C4: security REQUIRE_HUMAN combines correctly" \
-  "$TMP_DIR/c-gate-pass.json" "$TMP_DIR/c-sec-rh.json" REQUIRE_HUMAN 2
-check_combine "C5: security FAIL combines correctly (wins over existing REQUIRE_HUMAN too)" \
-  "$TMP_DIR/c-gate-rh.json" "$TMP_DIR/c-sec-fail.json" FAIL 1
+check_map_gate_result "C1: security PASS check succeeds" "$TMP_DIR/c-sec-pass.json" 0
+check_map_gate_result "C2: security FAIL check fails (blocks merge as its own required check)" "$TMP_DIR/c-sec-fail.json" 1
+check_map_gate_result "C3: security REQUIRE_HUMAN check succeeds (human merge floor stays separate)" "$TMP_DIR/c-sec-rh.json" 0
 
-# C6: human merge floor is independent of the new combine step -- the
-# combined REQUIRE_HUMAN exit code (2) still flows through the completely
-# UNCHANGED map-gate-result.py exactly as an original gate REQUIRE_HUMAN
-# would (check succeeds, merge stays blocked by required review only).
-python3 "$GATE_PY" combine "$TMP_DIR/c-gate-pass.json" "$TMP_DIR/c-sec-rh.json" > "$TMP_DIR/c6-out.json" || true
-c6_map_exit=0
-python3 "$REPO_ROOT/diana/ci/map-gate-result.py" 2 > "$TMP_DIR/c6-map-out.txt" 2>&1 || c6_map_exit=$?
-if [ "$c6_map_exit" = "0" ] && grep -q "REQUIRE_HUMAN" "$TMP_DIR/c6-map-out.txt"; then
-  pass "C6: human merge floor (map-gate-result.py) unaffected by the new combine step"
+# C4: the existing (untouched) Diana Gate and the new Security Gate use
+# the exact same map-gate-result.py convention, so as two independently
+# required checks they compose correctly: this is proven structurally by
+# both diana-gate.yml and diana-security-gate.yml invoking the identical,
+# unmodified diana/ci/map-gate-result.py (checked in the W-series below),
+# not by any shared runtime code path.
+if grep -q "diana/ci/map-gate-result.py" "$REPO_ROOT/.github/workflows/diana-gate.yml" \
+   && grep -q "diana/ci/map-gate-result.py" "$REPO_ROOT/.github/workflows/diana-security-gate.yml"; then
+  pass "C4: both Diana Gate and Security Gate map through the identical, unmodified map-gate-result.py"
 else
-  fail "C6: expected map-gate-result.py exit 0 with a REQUIRE_HUMAN notice for a combined REQUIRE_HUMAN"
+  fail "C4: expected both workflows to invoke diana/ci/map-gate-result.py"
+fi
+
+# ==================================================================
+# W1-W6: diana-security-gate.yml's trust-root properties (structural,
+# text-based checks -- a full GitHub Actions run can't be simulated
+# locally, so these assert the properties the trust-root design depends
+# on are actually present in the committed workflow file).
+# ==================================================================
+
+SEC_WORKFLOW="$REPO_ROOT/.github/workflows/diana-security-gate.yml"
+
+if grep -q "pull_request_target:" "$SEC_WORKFLOW"; then
+  pass "W1: diana-security-gate.yml uses pull_request_target (workflow definition itself is base-rooted)"
+else
+  fail "W1: expected diana-security-gate.yml to use the pull_request_target trigger"
+fi
+
+if ! grep -qE "^\s*ref:\s*\\\$\{\{\s*github\.event\.pull_request\.head" "$SEC_WORKFLOW" \
+   && ! grep -q "actions/checkout.*head.ref" "$SEC_WORKFLOW"; then
+  pass "W2: no checkout step references the PR head ref (protected-base checkout only)"
+else
+  fail "W2: found a checkout step referencing the PR head ref -- would defeat the trust root"
+fi
+
+if ! grep -q "secrets\." "$SEC_WORKFLOW"; then
+  pass "W3: diana-security-gate.yml references no secrets"
+else
+  fail "W3: diana-security-gate.yml unexpectedly references a secret"
+fi
+
+if grep -qE "^permissions:" "$SEC_WORKFLOW" && grep -qE "contents:\s*read" "$SEC_WORKFLOW" \
+   && ! grep -qE "(contents|pull-requests|checks|issues|actions|packages|id-token):\s*write" "$SEC_WORKFLOW"; then
+  pass "W4: diana-security-gate.yml declares read-only permissions (contents: read, no write scopes)"
+else
+  fail "W4: expected exactly contents: read and no write-scoped permissions"
+fi
+
+# W5: ordinary Diana Gate and Security Gate are genuinely separate
+# workflow files (not one workflow doing both), and the ordinary
+# diana-gate.yml is untouched by this phase (git diff against the
+# Phase-4 merge tip, if this repo clone has that history available).
+if [ -f "$REPO_ROOT/.github/workflows/diana-gate.yml" ] && [ -f "$SEC_WORKFLOW" ] \
+   && ! grep -q "pull_request_target" "$REPO_ROOT/.github/workflows/diana-gate.yml"; then
+  pass "W5: ordinary Diana Gate (plain pull_request) and Security Gate (pull_request_target) are separate workflow files"
+else
+  fail "W5: expected two separate workflow files with distinct trigger types"
+fi
+
+if grep -q "diana/security/ci_verifier_runs.py" "$SEC_WORKFLOW" \
+   && grep -q "diana/security/security_bundle.py" "$SEC_WORKFLOW" \
+   && grep -q "diana/security/security_reducer.py" "$SEC_WORKFLOW"; then
+  pass "W6: diana-security-gate.yml runs the trusted evaluator directly from its own (base-rooted) checkout"
+else
+  fail "W6: expected diana-security-gate.yml to invoke ci_verifier_runs.py/security_bundle.py/security_reducer.py"
 fi
 
 # ==================================================================
@@ -482,18 +545,10 @@ BOOT_HEAD_SHA="$(git -C "$BOOT_REPO" rev-parse HEAD)"
 python3 "$RUN_SECURITY_GATE_PY" "$BOOT_REPO" "$BOOT_BASE_SHA" "$BOOT_HEAD_SHA" "$REPO" > "$TMP_DIR/boot-out.json"
 boot_decision="$(get_decision "$TMP_DIR/boot-out.json")"
 if [ "$boot_decision" = "SKIPPED_BOOTSTRAP" ]; then
-  pass "bootstrap: base predating Phase 5's trusted files -> SKIPPED_BOOTSTRAP"
+  pass "bootstrap: base predating Phase 5's trusted files -> SKIPPED_BOOTSTRAP (reference tool; the live diana-security-gate.yml simply does not exist/fire on such a PR at all until this code is on the default branch)"
 else
   fail "bootstrap: expected SKIPPED_BOOTSTRAP, got $boot_decision"
 fi
-
-# Bootstrap must contribute zero penalty when combined with the existing
-# Gate decision (this PR's protection stays with existing Gate + review).
-python3 -c "import json; json.dump({'decision':'SKIPPED_BOOTSTRAP','reasons':['bootstrap']}, open('$TMP_DIR/c-sec-bootstrap.json','w'))"
-check_combine "bootstrap: SKIPPED_BOOTSTRAP is a pure pass-through (existing PASS unaffected)" \
-  "$TMP_DIR/c-gate-pass.json" "$TMP_DIR/c-sec-bootstrap.json" PASS 0
-check_combine "bootstrap: SKIPPED_BOOTSTRAP does not suppress an existing REQUIRE_HUMAN" \
-  "$TMP_DIR/c-gate-rh.json" "$TMP_DIR/c-sec-bootstrap.json" REQUIRE_HUMAN 2
 
 echo ""
 echo "diana/security/test-security-gate.sh: $pass_count passed, $fail_count failed"

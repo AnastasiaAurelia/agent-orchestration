@@ -43,9 +43,9 @@ running gitleaks/osv-scanner/semgrep in CI and piping their output
 through the Phase 2 adapters, a genuine dynamic-scenario runner for
 Phase 3, or a real reviewer-orchestration channel for Phase 4 -- it is
 added HERE, and only here. `security_bundle.py`, `security_reducer.py`,
-and the Gate integration (`diana/ci/run-security-gate.py`,
-`diana-gate.py`'s `combine_with_security()`) do not need to change: they
-already consume whatever `collect_trusted_runs()` returns.
+and the Gate integration (`.github/workflows/diana-security-gate.yml`)
+do not need to change: they already consume whatever
+`collect_trusted_runs()` returns.
 """
 
 from __future__ import annotations

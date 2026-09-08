@@ -42,22 +42,20 @@ the Security Track's own enforcement surface as of Security Phase 5 (see
 the catalog, evidence model, bundle/reducer policy, and the Gate/CI wiring
 that runs them.
 
-## Security Phase 5: `combine` mode
+## Security Phase 5: a separate check, not a code change here
 
-`diana-gate.py combine GATE_RESULT.json SECURITY_RESULT.json` is a
-second, purely additive CLI mode -- `evaluate()` and the input schema
-above are completely unchanged. It combines an already-computed Gate
-decision with an independently-computed Security decision
-(`{"decision": "PASS"|"REQUIRE_HUMAN"|"FAIL"|"SKIPPED_BOOTSTRAP",
-"reasons": [...]}`, produced by
-[`diana/ci/run-security-gate.py`](../ci/run-security-gate.py)) via
-`combine_with_security()`:
-
-    existing FAIL or security FAIL              -> final FAIL
-    otherwise existing or security REQUIRE_HUMAN -> final REQUIRE_HUMAN
-    otherwise                                    -> final PASS
-
-`"SKIPPED_BOOTSTRAP"` (the Security Phase 5 PR's own bootstrap case) is a
-pure pass-through: the existing Gate decision is returned unchanged. Same
-exit-code convention as above. See `diana/security/README.md`'s "Security
-Phase 5" section for the full trust-boundary design.
+`evaluate()`, this file's input schema, and its whole CLI behavior are
+**completely unchanged** by Security Phase 5 -- there is no "combine"
+mode and no Security-specific branching in this file beyond the
+`REVIEW_PATHS` addition above. Security evidence is evaluated by an
+entirely separate required CI check
+(`.github/workflows/diana-security-gate.yml`, see
+[`diana/ci/README.md`](../ci/README.md)) running independent, separate
+code (`diana/security/security_bundle.py`/`security_reducer.py`).
+GitHub branch protection requiring BOTH checks reproduces the intended
+"existing FAIL or security FAIL blocks merge; either check being
+REQUIRE_HUMAN still leaves the required-review rule blocking merge;
+both clean allows merge" combination without any code here needing to
+know the Security Gate exists at all. See `diana/security/README.md`'s
+"Security Phase 5" section for the full trust-boundary design and why
+this separation (rather than one workflow computing both) is the point.

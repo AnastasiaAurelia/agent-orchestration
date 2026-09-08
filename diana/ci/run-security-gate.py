@@ -1,14 +1,38 @@
 #!/usr/bin/env python3
-"""CI-controlled Security Gate orchestrator (Security Phase 5).
+"""Local/offline Security Gate orchestrator, git-archive edition (Security
+Phase 5 -- reference implementation, NOT the live CI trust root).
+
+**This script is not what `.github/workflows/diana-security-gate.yml`
+(the real, live CI check) runs.** That workflow uses `pull_request_target`,
+whose own DEFINITION is resolved from the repository's default branch (not
+the PR head) and whose default `actions/checkout` behavior already checks
+out the protected base tree directly -- so it can invoke
+`diana/security/{ci_verifier_runs.py, security_bundle.py,
+security_reducer.py}` straight from that checkout with no extraction step
+needed at all. See that workflow file's own header comment for the full
+trust-root rationale (an earlier, corrected design ran this exact
+git-archive-extraction technique from INSIDE a plain `pull_request`-
+triggered workflow, whose own file was still PR-head-controlled -- a
+malicious PR could simply have deleted the step that called this script;
+`pull_request_target` closes that gap at the platform level instead).
+
+This script remains here for two reasons: it is the concrete reference
+implementation `diana/security/test-security-gate.sh`'s **S2+S3** test
+uses to prove the underlying "protected base beats PR head" trust
+property against a real, ephemeral git repository (a general, reusable
+technique -- useful for any trigger type that does NOT hand you a
+base-rooted checkout for free); and it remains available as a local,
+offline dry-run tool for a human or another script to manually ask "what
+would the Security Gate say for this exact base/target pair?" without
+needing a live `pull_request_target` context.
 
 Runs the TRUSTED security policy/evaluator implementation -- catalog.json,
 validate_catalog.py, evidence_model.py, security_bundle.py,
-security_reducer.py, ci_verifier_runs.py -- extracted from the pull
-request's PROTECTED BASE SHA, never the PR head. This is the whole point
-of "prevent security self-certification" (Security Phase 5, section 3): a
-PR that modifies any of those files must not be able to use ITS OWN
-modified version to judge itself. The trusted evaluator always comes from
-whatever was already merged to the base branch before this PR existed.
+security_reducer.py, ci_verifier_runs.py -- extracted via `git archive`
+from a caller-supplied PROTECTED BASE SHA, never from the PR head's
+working tree. A PR that modifies any of those files must not be able to
+use ITS OWN modified version to judge itself; the trusted evaluator here
+always comes from whatever was already committed at the given base SHA.
 
     PR HEAD                         PROTECTED BASE SHA
       |                                    |
@@ -24,15 +48,13 @@ The Security Phase 5 PR that first introduces these six files has, by
 definition, no such files at its OWN base commit -- there is nothing yet
 to extract. That is expected and explicitly detected here, not silently
 papered over: this script emits `{"decision": "SKIPPED_BOOTSTRAP", ...}`
-when any TRUSTED_FILES path is missing from the base extraction. Security
-Phase 5's own PR does NOT claim this integration retroactively protects
-itself -- that PR remains protected only by the pre-existing Diana Gate
-(DoD/verification/Preflight/diff-risk/human_only_conditions) plus the
-required human/code-owner review, exactly as before this phase existed
-(`diana-gate.py`'s `combine_with_security()` treats "SKIPPED_BOOTSTRAP"
-as a pure pass-through: zero penalty, zero escalation). After this PR
-merges, every subsequent PR's base includes these files, so the bootstrap
-branch is never taken again under ordinary operation.
+when any TRUSTED_FILES path is missing from the base extraction. It does
+not (and, as a local/offline tool, has no way to) combine this with any
+other decision -- a caller wanting the actual Security Gate outcome for a
+given base/target pair should treat `SKIPPED_BOOTSTRAP` as "not evaluable
+yet at this base," exactly as the real `diana-security-gate.yml` workflow
+would also see no evaluable PR at all until this code first exists on the
+default branch.
 """
 
 from __future__ import annotations
