@@ -1,7 +1,7 @@
-# Diana Security Track -- Phase 0: Canonical Control Catalog
+# Diana Security Track
 
 The Security Track is an **optional** track that starts only after the main
-Diana roadmap (Phases 0-10, plus the AO-approval-boundary repair) is
+Diana roadmap (Phases 0-11, plus the AO-approval-boundary repair) is
 complete. It is not a phase of that roadmap and does not redesign Diana's
 existing architecture. Diana remains a thin, provider-neutral owner of
 policy, workflow, Definition of Done, memory, governance/risk, and
@@ -9,11 +9,19 @@ deterministic quality/security orchestration -- not a security scanner
 implementation, browser engine, model router, worktree manager, hosted
 cloud service, provider SDK, or pentesting engine.
 
-**Security Phase 0 is catalog/specification only.** It answers "what
+**Security Phase 0 was catalog/specification only.** It answered "what
 security controls may Diana need to prove?", not "does this repository pass
 those controls?". No scanner integration, no Diana Gate schema change, no
-dynamic testing, and no external security tool installation happens in this
+dynamic testing, and no external security tool installation happened in that
 phase.
+
+**Security Phase 1 adds the result/evidence model.** It defines *how* a
+control's `required_evidence` contract maps to an actual result, and
+computes that result deterministically from a caller-supplied verification
+run. It still does not run, install, or call any scanner, static analyzer,
+dynamic test, or LLM reviewer -- those are later phases. Phase 1 only
+defines and computes the contract that those future verifiers will produce
+evidence against.
 
 ## What's here
 
@@ -25,6 +33,17 @@ phase.
 - `test-catalog.sh` -- a fixture-free regression suite (CASE A-J) that
   proves the validator both accepts the real catalog and fails closed on
   mutated copies of it.
+- `evidence_model.py` -- a deterministic, Python-stdlib-only evaluator that
+  takes the catalog plus a JSON array of "verification run" records and
+  computes one `PASS`/`FAIL`/`NOT_APPLICABLE`/`UNPROVEN`/`ERROR` result per
+  run against that control's `required_evidence` contract. No network, no
+  LLM, no security-tool invocation, no wall-clock reads.
+- `test-evidence-model.sh` -- a fixture-free regression suite (CASE 1-13,
+  with CASE 6 split into three malformed-evidence sub-cases: invalid
+  status enum, unknown control id, and an evidence item whose requirement
+  text isn't part of that control's contract) proving every result state
+  and that a malformed run inside a batch fails closed to `ERROR` without
+  blocking reporting on the other, well-formed runs in that same batch.
 
 ## Source-derived vs. Diana-designed fields
 
@@ -78,18 +97,67 @@ unrelated) check catalog.
 
 ## "No finding" is not PASS
 
-This catalog does not implement or claim any result semantics yet. A
-future result model is expected to distinguish:
+`evidence_model.py` implements exactly five result states:
 
 ```
 PASS | FAIL | NOT_APPLICABLE | UNPROVEN | ERROR
 ```
 
-A control can only eventually become `PASS` once its `required_evidence`
-contract is actually satisfied and checked. Until that result/evidence
-model exists (Security Phase 1), the absence of a finding for a given
-control means nothing -- it is not a substitute for `PASS`, and nothing in
-this repository should be read as claiming otherwise.
+A control becomes `PASS` **only** when every one of its catalog
+`required_evidence` items is present in the run and marked `SATISFIED`.
+Anything short of that -- no evidence at all, some but not all items
+present, an unrecognized control, a malformed run, applicability that
+hasn't been established -- fails closed to `UNPROVEN` or `ERROR`, never
+`PASS`. `FAIL` requires positive evidence: at least one required item
+explicitly marked `VIOLATED`. This is enforced in code
+(`evaluate_run()`), not just documented, and `test-evidence-model.sh`
+proves it for every state plus three distinct malformed-input shapes.
+
+### What Phase 1 does not do
+
+- It does not run, install, or invoke any static analyzer, dependency
+  scanner, secret scanner, dynamic tester, or LLM reviewer. There is
+  nothing yet that *produces* a verification run for a real repository --
+  `evidence_model.py` only evaluates one once it exists.
+- It does not touch `diana/gate` or `diana/preflight`. Security evidence
+  does not yet feed into any merge decision -- that is Security Phase 5.
+- It does not compute or store applicability automatically. A run's
+  `applicability` (`APPLICABLE`/`NOT_APPLICABLE`/`UNKNOWN`) is still an
+  input the caller supplies, not something this phase derives from a
+  control's `applicability.signals`.
+- It does not read the clock, network, or filesystem beyond the two input
+  files it is given. An optional `observed_at` string on a run is passed
+  through unchanged for future storage/display use; it plays no role in
+  computing the result, which keeps the whole model deterministic and
+  testable without freezing time.
+
+### Evidence-run schema (informal)
+
+```jsonc
+{
+  "control_id": "SEC-001",                 // must be a real SEC-NNN id
+  "applicability": "APPLICABLE",            // APPLICABLE | NOT_APPLICABLE | UNKNOWN
+  "verifier": {
+    "type": "DYNAMIC_API",                  // must be in catalog.json's verifier_types enum
+    "identity": "pytest::test_bola_cross_account"
+  },
+  "evidence": [
+    {
+      "requirement": "<must exactly match one of the control's catalog required_evidence strings>",
+      "status": "SATISFIED",                // SATISFIED | VIOLATED
+      "provenance": "negative test tests/test_bola.py::test_cross_account_denied",
+      "detail": "optional free text"
+    }
+  ],
+  "tool_error": null,                       // or {"message": "..."} -> forces result ERROR
+  "observed_at": null                       // optional opaque string, never read by the logic
+}
+```
+
+An evidence item's `requirement` must be one of the exact strings in that
+control's `catalog.json` `required_evidence` array -- this deliberately
+ties every PASS/FAIL determination back to the Phase 0 catalog contract
+rather than to free-form claims a verifier could invent.
 
 ## Conservative evidence mapping
 
@@ -124,28 +192,48 @@ also marked `human_judgment_required: true`, because defining "abuse",
 "excessive", or "malicious intent" for a given product is not something a
 scanner or a fixed rule can fully settle on its own.
 
-## What this phase does not claim
+## What this track does not yet claim
 
-- Diana cannot yet detect or prove any of these 75 controls end to end.
-  This is a catalog, not an implementation.
-- No security tools were installed in this phase.
+- Diana cannot yet detect or prove any of these 75 controls against a real
+  repository end to end. Phase 0 is a catalog; Phase 1 is a result
+  calculator that something else must feed. Neither is an implementation
+  that inspects real code.
+- No security tools have been installed in either phase.
 - `diana/gate` and `diana/preflight` are completely unchanged -- their
-  schemas, behavior, and test suites are untouched by this phase.
+  schemas, behavior, and test suites are untouched by this track so far.
 
 ## Future phases (not started here)
 
-- **Security Phase 1 -- Result/Evidence Model**: define how a control's
-  `required_evidence` maps to an actual `PASS`/`FAIL`/`NOT_APPLICABLE`/
-  `UNPROVEN`/`ERROR` result, and how evidence is captured and stored.
-- Later phases are expected to add static-verifier adapters, dynamic
-  verification, a semantic reviewer, and eventual Gate/CI integration --
-  but this README does not promise the exact shape of that work.
+- **Security Phase 2 -- Static Security Adapters**: thin adapters that
+  normalize real static analyzer/secret-scanner/dependency-scanner output
+  into Phase 1 evidence runs.
+- **Security Phase 3 -- Dynamic Verification**: bounded runtime tests
+  (authorization, injection, webhook, race-condition, payment-sandbox,
+  etc.) that also produce Phase 1 evidence runs.
+- **Security Phase 4 -- Semantic Security Reviewer**: a fresh, read-only
+  reviewer for controls that can't be settled by static/dynamic tooling
+  alone.
+- **Security Phase 5 -- Security Gate + CI**: feed Phase 1 results into
+  Diana's merge decision without collapsing the existing Preflight/Gate
+  separation.
+- **Security Phase 6 -- Prove 75/75 Coverage**: an executable coverage
+  matrix showing every catalog control has a defined, testable
+  verification path.
+- This README does not promise the exact shape of that work ahead of each
+  phase actually landing.
 
 ## Running the validator and tests
 
 ```
 python3 diana/security/validate_catalog.py diana/security/catalog.json
 bash diana/security/test-catalog.sh
+bash diana/security/test-evidence-model.sh
 ```
 
-Both are deterministic, offline, and make no changes to this repository.
+All of the above are deterministic, offline, and make no changes to this
+repository. `evidence_model.py` itself takes two arguments (a catalog path
+and a runs-file path) and is normally invoked directly for ad hoc checks:
+
+```
+python3 diana/security/evidence_model.py diana/security/catalog.json <runs.json>
+```
