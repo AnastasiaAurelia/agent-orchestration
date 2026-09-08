@@ -183,6 +183,20 @@ def build_matrix(
                     paths.append({"kind": "dynamic_scenario", "module": scenario_id})
             if control_id in reviewer_authorized:
                 paths.append({"kind": "semantic_reviewer", "module": "reviewer_normalizer"})
+                # Security Track remediation round C, Priority 3:
+                # github_review_adapter.py independently authorizes the
+                # EXACT SAME catalog-derived control set (verified via
+                # its own _authorized_control_ids(), not assumed) via a
+                # genuinely different evidence source -- a real,
+                # independent GitHub PR review, bound to the exact
+                # reviewed commit, rather than an AI-session artifact.
+                # Listed as a second implemented_paths entry, not a new
+                # coverage category: it does not change FULLY_COVERED/
+                # PARTIALLY_COVERED/NOT_COVERED totals for these
+                # controls (they were already reviewer-covered), it only
+                # makes visible that TWO independent judgment sources
+                # exist for them.
+                paths.append({"kind": "github_review", "module": "github_review_adapter"})
             per_requirement.append({"requirement": requirement, "implemented_paths": paths})
 
         all_items_covered = all(item["implemented_paths"] for item in per_requirement)
