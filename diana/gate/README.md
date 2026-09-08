@@ -34,3 +34,30 @@ The `preflight` array is normally produced by
 `diana/preflight/reduce_for_gate.py`. Preflight detects quality/safety
 conditions; this gate decides whether the supplied evidence is allowed to
 proceed. The two stay separate components on purpose.
+
+`REVIEW_PATHS`/`REVIEW_PREFIXES` (deterministic sensitive-path escalation
+to `REQUIRE_HUMAN` regardless of self-declared `risk`) additionally cover
+the Security Track's own enforcement surface as of Security Phase 5 (see
+[`diana/security/README.md`](../security/README.md#security-phase-5----security-gate--ci-integration)):
+the catalog, evidence model, bundle/reducer policy, and the Gate/CI wiring
+that runs them.
+
+## Security Phase 5: `combine` mode
+
+`diana-gate.py combine GATE_RESULT.json SECURITY_RESULT.json` is a
+second, purely additive CLI mode -- `evaluate()` and the input schema
+above are completely unchanged. It combines an already-computed Gate
+decision with an independently-computed Security decision
+(`{"decision": "PASS"|"REQUIRE_HUMAN"|"FAIL"|"SKIPPED_BOOTSTRAP",
+"reasons": [...]}`, produced by
+[`diana/ci/run-security-gate.py`](../ci/run-security-gate.py)) via
+`combine_with_security()`:
+
+    existing FAIL or security FAIL              -> final FAIL
+    otherwise existing or security REQUIRE_HUMAN -> final REQUIRE_HUMAN
+    otherwise                                    -> final PASS
+
+`"SKIPPED_BOOTSTRAP"` (the Security Phase 5 PR's own bootstrap case) is a
+pure pass-through: the existing Gate decision is returned unchanged. Same
+exit-code convention as above. See `diana/security/README.md`'s "Security
+Phase 5" section for the full trust-boundary design.

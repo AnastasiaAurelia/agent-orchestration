@@ -31,8 +31,27 @@ jobs:
         run: |
           set +e
           python3 diana/gate/diana-gate.py "$RUNNER_TEMP/diana-gate-input.json" > "$RUNNER_TEMP/diana-gate-result.json"
-          gate_exit=$?
           set -e
           cat "$RUNNER_TEMP/diana-gate-result.json"
-          python3 diana/ci/write-summary.py "$RUNNER_TEMP/diana-gate-result.json" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Evaluate Security Gate (protected-base evaluator, Security Phase 5)
+        env:
+          DIANA_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          DIANA_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 diana/ci/run-security-gate.py \
+            "$GITHUB_WORKSPACE" "$DIANA_BASE_SHA" "$DIANA_HEAD_SHA" "${{ github.repository }}" \
+            > "$RUNNER_TEMP/security-gate-result.json"
+          cat "$RUNNER_TEMP/security-gate-result.json"
+
+      - name: Combine Diana Gate + Security Gate
+        run: |
+          set +e
+          python3 diana/gate/diana-gate.py combine \
+            "$RUNNER_TEMP/diana-gate-result.json" "$RUNNER_TEMP/security-gate-result.json" \
+            > "$RUNNER_TEMP/combined-gate-result.json"
+          gate_exit=$?
+          set -e
+          cat "$RUNNER_TEMP/combined-gate-result.json"
+          python3 diana/ci/write-summary.py "$RUNNER_TEMP/combined-gate-result.json" >> "$GITHUB_STEP_SUMMARY"
           python3 diana/ci/map-gate-result.py "$gate_exit"

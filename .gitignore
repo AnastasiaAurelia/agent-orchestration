@@ -95,6 +95,10 @@
 !diana/security/test-catalog.sh
 !diana/security/evidence_model.py
 !diana/security/test-evidence-model.sh
+!diana/security/security_bundle.py
+!diana/security/security_reducer.py
+!diana/security/ci_verifier_runs.py
+!diana/security/test-security-gate.sh
 !diana/security/adapters/
 !diana/security/adapters/README.md
 !diana/security/adapters/adapter_base.py

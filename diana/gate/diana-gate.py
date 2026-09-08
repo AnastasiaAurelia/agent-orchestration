@@ -26,9 +26,25 @@ HUMAN_ONLY_CONDITIONS = {
 
 # Exact repository paths/prefixes that deserve human review. Substring matching
 # is deliberately avoided so nearby fixture/test names do not false-positive.
+#
+# Security Phase 5 addition: the Security Track's own enforcement surface
+# (catalog, evidence model, bundle/reducer policy, and the Gate/CI wiring
+# that runs them) is deterministically sensitive -- a change to any of
+# these paths always requires human review, regardless of the PR author's
+# self-declared diff.risk or human_only_conditions (Security Phase 5,
+# section 10: "do not rely only on a PR author's self-declared risk=SAFE").
 REVIEW_PATHS = {
     ".github/CODEOWNERS",
     ".github/dependabot.yml",
+    "diana/security/catalog.json",
+    "diana/security/evidence_model.py",
+    "diana/security/security_bundle.py",
+    "diana/security/security_reducer.py",
+    "diana/security/ci_verifier_runs.py",
+    "diana/gate/diana-gate.py",
+    "diana/ci/build-gate-input.py",
+    "diana/ci/run-security-gate.py",
+    "diana/ci/map-gate-result.py",
 }
 REVIEW_PREFIXES = (
     ".github/workflows/",
@@ -139,7 +155,70 @@ def evaluate(data: Any) -> dict[str, Any]:
     return {"decision": decision, "checks": checks, "reasons": reasons}
 
 
+def combine_with_security(gate_decision: str, security_decision: str) -> str:
+    """Security Phase 5: combine the EXISTING (unmodified) Diana Gate
+    decision with an independently-computed Security decision,
+    conservatively -- this function never changes what evaluate() itself
+    computes, only how its result composes with a separately-computed
+    security decision:
+
+        existing FAIL           -> final FAIL
+        security FAIL           -> final FAIL
+        otherwise existing REQUIRE_HUMAN or security REQUIRE_HUMAN
+                                 -> final REQUIRE_HUMAN
+        otherwise                -> final PASS
+
+    A security decision of "SKIPPED_BOOTSTRAP" (the Security Phase 5 PR's
+    own bootstrap case -- see diana/ci/run-security-gate.py) contributes
+    NO penalty and NO escalation: the existing gate_decision passes
+    through unchanged. That PR remains protected only by the pre-existing
+    Diana Gate + required human/code-owner review, exactly as before this
+    phase existed -- Security Phase 5 does not claim to retroactively
+    protect itself.
+    """
+    if gate_decision not in EXIT:
+        raise InvalidInput(f"unknown gate decision state: {gate_decision!r}")
+    if security_decision == "SKIPPED_BOOTSTRAP":
+        return gate_decision
+    if security_decision not in EXIT:
+        raise InvalidInput(f"unknown security decision state: {security_decision!r}")
+    if gate_decision == "FAIL" or security_decision == "FAIL":
+        return "FAIL"
+    if gate_decision == "REQUIRE_HUMAN" or security_decision == "REQUIRE_HUMAN":
+        return "REQUIRE_HUMAN"
+    return "PASS"
+
+
+def _main_combine(argv: list[str]) -> int:
+    if len(argv) != 2:
+        result = {
+            "decision": "FAIL",
+            "reasons": ["usage: diana-gate.py combine GATE_RESULT.json SECURITY_RESULT.json"],
+        }
+        print(json.dumps(result, sort_keys=True))
+        return EXIT["FAIL"]
+    try:
+        with open(argv[0], encoding="utf-8") as handle:
+            gate_result = require_dict(json.load(handle), "gate result")
+        with open(argv[1], encoding="utf-8") as handle:
+            security_result = require_dict(json.load(handle), "security result")
+        gate_decision = gate_result["decision"]
+        security_decision = security_result["decision"]
+        final = combine_with_security(gate_decision, security_decision)
+    except (OSError, json.JSONDecodeError, InvalidInput, KeyError) as exc:
+        result = {"decision": "FAIL", "reasons": [f"could not combine gate/security results: {exc}"]}
+        print(json.dumps(result, sort_keys=True))
+        return EXIT["FAIL"]
+
+    reasons = list(gate_result.get("reasons", [])) + list(security_result.get("reasons", []))
+    result = {"decision": final, "reasons": reasons}
+    print(json.dumps(result, sort_keys=True))
+    return EXIT[final]
+
+
 def main() -> int:
+    if len(sys.argv) >= 2 and sys.argv[1] == "combine":
+        return _main_combine(sys.argv[2:])
     if len(sys.argv) != 2:
         result = {"decision": "FAIL", "checks": [], "reasons": ["usage: diana-gate.py INPUT.json"]}
         print(json.dumps(result, sort_keys=True))
