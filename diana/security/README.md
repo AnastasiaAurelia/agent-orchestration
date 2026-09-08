@@ -1338,6 +1338,265 @@ deliverable.
   found by Priority 5 -- flagged precisely for a future round, not
   silently accepted or hidden.
 
+## Security Track remediation round D
+
+Round C found 0 PASS and produced an executable proof of why, plus a
+capability-only GitHub-review normalizer with no live path. Round D's
+goal was closing the remaining OPERATIONAL trust gaps Round C surfaced --
+not increasing PASS count, not fabricating applicability, not weakening
+the evidence model or catalog.
+
+### Priority 1 -- live GitHub-backed human review evidence
+
+Built the minimum safe live integration end to end. `ci_verifier_runs.py`
+gained `collect_github_review_runs()`: it reads the PR number from a
+`DIANA_PR_NUMBER` environment variable the WORKFLOW itself sets from
+GitHub's own `github.event.pull_request.number` (never PR content),
+fetches the PR's metadata and reviews via `gh api` (read-only), and for
+every review whose `commit_id` exactly matches the commit currently being
+evaluated and whose state is a real terminal judgment (`APPROVED`/
+`CHANGES_REQUESTED` -- `COMMENTED`/`DISMISSED`/`PENDING` are skipped, not
+a judgment), parses the review body for `<!-- DIANA:HUMAN-REVIEW
+{"control_id": ..., "rationale": ...} DIANA:HUMAN-REVIEW -->` blocks and
+builds one `github_review_adapter.py` artifact per (block, control's own
+required_evidence item). Independence
+(`reviewer_is_pr_author`/`reviewer_is_diana_agent`) is computed by this
+trusted code from the real fetched PR author login and the fixed,
+verified `DIANA_AGENT_LOGIN = "DIANA-AGENT"` constant (`gh api user
+--jq .login`) -- never self-declared. A bare "LGTM" (no structured block)
+parses to zero blocks, by construction, never becoming evidence for any
+control.
+
+**Verified against genuine data, not just mocks**: fetched PR #35's real,
+merged review (`gh api repos/.../pulls/35/reviews`) -- one real `APPROVED`
+review by `AnastasiaAurelia`, `commit_id` exactly matching round C's real
+head SHA, correctly independent of the PR's real author (`DIANA-AGENT`).
+Its body is empty (no structured block), so it correctly produces zero
+contributions -- proving the pipeline handles real GitHub API responses
+correctly, and that a real historical blanket approval never silently
+became evidence. A full mechanism proof (mocked `_gh_api`, real
+orchestration and real `evidence_model.py`) shows a genuine, independent,
+substantiated review reaching PASS end to end; companion tests prove
+DIANA-AGENT self-review, PR-author self-review, stale-commit review, bare
+LGTM, and `COMMENTED` state are all correctly rejected or ignored.
+
+**Wired into `collect_trusted_runs()` already** -- the code is complete
+and tested, and will activate automatically the moment the workflow gains
+the one permission it needs; no further code deployment will be required.
+
+**Blocked exactly where expected**: `diana-security-gate.yml`'s
+`permissions:` block grants only `contents: read`; `gh api` calls need
+`pull-requests: read`, and the workflow needs to pass
+`DIANA_PR_NUMBER`/`GH_TOKEN` into the evaluation step's env. Both are a
+`.github/workflows/diana-security-gate.yml` edit, which
+`DIANA-AGENT`'s credential cannot push (no `workflow` OAuth scope) --
+per this round's explicit instruction, this session did NOT attempt to
+widen that credential's scope or work around the boundary. The exact
+patch is prepared and verified to apply cleanly (see this round's final
+report / PR description for the full diff and commands); this session
+reports `STATUS = BLOCKED_PENDING_HUMAN_WORKFLOW_PATCH` for that one file
+and stops there.
+
+### Priority 2 -- Gitleaks CI reliability: diagnostics added, root cause not retroactively determinable
+
+PR #34's CI run (before this round) produced no Gitleaks run for SEC-007
+at all, with no diagnostic output to explain why -- these diagnostics did
+not exist yet. **The exact failure point on PR #34 specifically cannot be
+retroactively determined** -- there is no log to inspect. What this round
+does instead: added ten fixed, safe, non-secret diagnostic checkpoints
+(`GITLEAKS_DIAG_STAGES`) emitted to STDERR ONLY (never stdout, which
+stays pure JSON) at every stage from "is gitleaks already on PATH" through
+"did a specific control receive an accepted contribution": `ON_PATH_CHECK`,
+`DOWNLOAD_ATTEMPTED`, `DOWNLOAD_SUCCEEDED`, `CHECKSUM_VERIFIED`,
+`BINARY_EXECUTABLE`, `SCAN_LAUNCHED`, `SCAN_EXITED_SUCCESSFULLY`,
+`ARTIFACT_PARSED`, `NORMALIZED_RUN_PRODUCED`, `EVIDENCE_MODEL_ACCEPTED`,
+`CONTROL_CONTRIBUTION_ACCEPTED`. Diagnostics are restricted by every call
+site to booleans, counts, exit codes, and exception TYPE names -- never
+file contents, finding VALUES, tokens, or any other secret-shaped data
+(a finding count is logged; finding content never is).
+
+Ran the full pipeline in this session's own sandbox: all ten checkpoints
+report success (binary downloaded, checksum verified, scan ran, 0
+findings, SEC-007 accepted). This round's own PR is therefore the first
+real opportunity to observe these checkpoints against an actual GitHub
+Actions runner -- this session watched that CI run (see the final report)
+to see, for the first time, exactly which checkpoint a real runner
+reaches. Unavailable/error still never becomes PASS at any stage -- every
+failure path already degraded to the explicit `UNKNOWN`/`UNPROVEN`
+path before this round; this round only makes WHERE it degrades visible.
+
+### Priority 3 -- the security evaluation target: **C, both, via different entry points**
+
+Traced the actual, as-implemented behavior of both the live CI path and
+the offline reference tool, rather than assuming either was already
+target-general.
+
+- **Target A (Diana's own repository) is what is LIVE today.**
+  `diana-security-gate.yml` + `ci_verifier_runs.py` are self-referential
+  by design: `git_repository_identity(repo_root=".")` derives
+  `{repository, commit}` from whatever checkout the workflow is running
+  in, which -- because the workflow file lives in Diana's own
+  `.github/workflows/` -- is always Diana's own repository. This is
+  correct and intentional for CI that protects Diana's own PRs, not a
+  bug to fix.
+- **Target B (an external project Diana operates on) is architecturally
+  supported at the primitive level, but has NO live orchestration entry
+  point today.** Every `collect_*_runs(repo_root=".")` function in
+  `ci_verifier_runs.py` already accepts an explicit `repo_root`
+  parameter -- built this way since round A/B without a caller ever
+  overriding the default. Nothing currently calls these functions with
+  anything but `"."`.
+- **`diana/ci/run-security-gate.py` (the offline reference tool) is NOT
+  actually target-general in current practice either**, despite argument
+  names (`repo_root`, `base_sha`, `target_sha`, `repository`) that read
+  that way. Traced precisely: `run_trusted_pipeline()` invokes the
+  extracted, trusted `ci_verifier_runs.py` via `subprocess.run` with NO
+  explicit `cwd=` override -- it inherits whatever directory the CALLING
+  process itself was already running in. `repo_root` is used ONLY to
+  `git archive`-extract the trusted evaluator's code at `base_sha`;
+  `base_sha`/`target_sha`/`repository` are LABELS threaded through into
+  `security_bundle.py`/`security_reducer.py` for identity-binding
+  metadata, not commands that check out a different tree to scan. This
+  script is, today, exactly as self-referential as the live path -- just
+  reusable across two different commits of the SAME repository (proving
+  the "protected base beats PR head" property `test-security-gate.sh`'s
+  S2+S3 cases exercise), not across two different repositories.
+
+**Decision, precise and complete:**
+
+- **Canonical target identity** is `{repository, commit}`, always derived
+  from REAL git state (`git rev-parse HEAD`, `git remote get-url
+  origin`) of whatever checkout is actually being evaluated -- never an
+  argument a caller could spoof. For target A this is Diana's own
+  checkout; for a hypothetical target B it would be the EXTERNAL
+  project's own checkout.
+- **Base SHA** always identifies the TRUSTED EVALUATOR's commit -- always
+  Diana's OWN repository history, regardless of what is being evaluated,
+  since Diana's own code is the trust anchor in every mode.
+- **Head/target SHA** identifies the CONTENT BEING SCANNED -- Diana's own
+  PR head for target A; the external project's commit for a hypothetical
+  target B.
+- **Target workspace/path**: for target A, the workflow's own checkout
+  (`.`). For a hypothetical target B, an explicit path to a SEPARATE,
+  already-checked-out external project tree, passed through to every
+  `collect_*_runs(repo_root=<that path>)` call -- the parameter already
+  exists; only the orchestration layer choosing to pass it does not yet.
+- **Diana code and target-project code ARE separate trust domains,
+  already, structurally** -- even for target A today (Diana's evaluator
+  code, extracted/resolved from the protected base via
+  `pull_request_target`, is a DIFFERENT trust tier than the PR content
+  under evaluation, even though both live in the same git repository).
+  For a hypothetical target B this separation becomes physical as well
+  as logical: Diana's evaluator would run from DIANA's own trusted
+  checkout/environment, never from the target project's own CI (which
+  would hand trust to the target), while the target's source is read
+  purely as DATA.
+- **Verifier code stays protected while target source is data** -- this
+  property is IDENTICAL regardless of target A or B: Semgrep/Gitleaks/
+  the deterministic-repo-scan pattern-match or traverse target files as
+  bytes/text, never execute/import/evaluate them (see Priority 5).
+- **How evidence would bind to an external target rather than Diana
+  itself**: unchanged mechanism -- `expected_target = {repository,
+  commit}` derived from that target's own real git state, exactly as it
+  already is for Diana itself today. No change to `adapter_base.py`'s
+  `verify_identity()`/`verify_target()` is needed.
+- **No source-binding loosening anywhere in this decision** -- target
+  identity is still always derived from real git state, never a
+  caller-supplied label alone.
+
+**Smallest missing abstraction, explicitly not built this round** (out of
+scope per "do not redesign unless strictly necessary"): a new
+orchestration entry point that checks out an external target project,
+derives ITS OWN `{repository, commit}`, and invokes the SAME
+`collect_*_runs(repo_root=<target path>)` functions already built. No
+change to `evidence_model.py`, `catalog.json`, or any adapter's trust
+model would be required -- this is purely an orchestration gap, now
+precisely identified for a future round.
+
+### Priority 4 -- NOT_APPLICABLE vs UNPROVEN semantics
+
+**NOT_APPLICABLE is legitimate ONLY via a structurally-substantiated
+`SEMANTIC_REVIEW`/`HUMAN` contribution** -- the mechanism
+`reviewer_normalizer.py` already built in Phase 4 ("NOT_APPLICABLE must
+be proven, not assumed": non-trivial reasoning, at least one cited file,
+not composed solely of vague/uncertainty-hedge phrases -- the identical
+structural bar `PASS`/`FAIL` already clear). This mechanism already
+exists and needed no changes this round. **UNPROVEN is REQUIRED** as the
+default whenever feature-absence has not been affirmatively,
+evidencedly established this way -- a static/dynamic tool's "no finding"
+is never sufficient for `NOT_APPLICABLE`, mirroring "no finding != PASS"
+exactly. Round C's own exhaustive repo-wide `grep` searches (zero
+shell-injection-shaped code, zero JWT code, etc.) correctly stayed as
+PROSE ANALYSIS in a human-facing report, never submitted as a trusted
+`NOT_APPLICABLE` claim through any adapter -- confirming the system
+behaved correctly by construction throughout this whole track, not by
+accident.
+
+**One small, precisely-scoped gap identified, not fixed this round**:
+`github_review_adapter.py`'s `judgment` field is restricted to GitHub's
+own real review states (`APPROVE`/`REQUEST_CHANGES`) -- GitHub's review
+UI has no third "N/A" state, so a reviewer cannot assert
+`NOT_APPLICABLE` for a control through the live GitHub-review path today
+(they still can through the older, AI-session-shaped
+`reviewer_normalizer.py` path, which already supports it). Flagged for a
+future round; not a blocker for anything in round D.
+
+No existing machinery needed to change to represent legitimate feature
+absence -- the bar was already appropriately conservative, for the same
+reason `PASS` is: a lexical non-match is not proof of global absence, and
+this track has consistently rejected weaker claims to that effect for
+`PASS`, so the same standard correctly applies to `NOT_APPLICABLE`.
+
+### Priority 5 -- trusted-base / untrusted-target boundary
+
+Audited every currently live verifier family directly against its own
+source: **Semgrep and Gitleaks pattern-match target files as DATA (text/
+AST), never execute/import/evaluate anything found**; **the
+deterministic-repo-scan is a pure filesystem traversal, no execution
+anywhere**; **the `sensitive-file-paths-not-fetchable` dynamic scenario
+serves files as static BYTES via `http.server.SimpleHTTPRequestHandler`
+specifically (confirmed NOT `CGIHTTPRequestHandler` or any handler that
+executes served content)**; **`github_review_adapter.py`'s live wiring
+parses JSON review data only, executes nothing**. Tool INSTALLATION
+itself (Semgrep via `pip install` into an ephemeral venv; Gitleaks via a
+version-pinned, checksum-verified binary download) is Diana's OWN
+trusted-dependency choice, not target-controlled -- ordinary,
+already-accepted supply-chain trust, a different risk category from
+"executing target-controlled content."
+
+**Confirmed: zero verifiers in this track execute target-controlled
+scripts, package hooks, plugins, config loaders, or interpreters.** This
+holds in part BECAUSE only target A (self-evaluation) is live today --
+Diana only ever scans its own code, so there has never yet been a
+genuinely adversarial, foreign target for this property to be tested
+against for real.
+
+**Explicit, forward-looking invariant for any future verifier mode or
+Target B implementation**: any new verifier mode that would require
+genuinely EXECUTING target-controlled content (e.g. "install the
+target's dependencies and run its test suite") MUST be heavily
+sandboxed (ephemeral, network-isolated, resource-bounded) and explicitly
+reviewed before being trusted -- or rejected as a verifier mode entirely.
+This is out of scope until Target B is actually built (Priority 3), since
+that is the context where a genuinely foreign, adversarial target first
+becomes real.
+
+### What this round does not do
+
+- Does not widen `DIANA-AGENT`'s credential scope, or work around the
+  `.github/workflows/*` push boundary -- the exact patch is prepared and
+  verified to apply cleanly; this session stops there.
+- Does not retroactively determine PR #34's exact Gitleaks failure point
+  -- no diagnostic existed at the time; this round adds the diagnostics
+  for future runs instead of guessing.
+- Does not build Target B's orchestration entry point -- identified as
+  the smallest missing abstraction, explicitly deferred.
+- Does not add a `NOT_APPLICABLE` path to `github_review_adapter.py` --
+  identified, explicitly deferred.
+- Does not change `catalog.json`, `evidence_model.py`'s aggregation
+  semantics, or loosen any target/source binding.
+- Does not fabricate applicability to make this repository score better.
+
 ## Future phases (not started here)
 
 - This README does not promise the exact shape of future work ahead of

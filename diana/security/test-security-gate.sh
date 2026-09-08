@@ -270,12 +270,22 @@ except json.JSONDecodeError:
     print('False')
 else:
     control_ids = {r.get('control_id') for r in runs if isinstance(r, dict)}
-    no_fake_sec074 = 'SEC-074' not in control_ids
+    # Security Track remediation round D: collect_github_review_runs()
+    # is now legitimately authorized for SEC-074 (SEMANTIC_REVIEW is one
+    # of its real catalog modes) and correctly emits an honest,
+    # tool-unavailable UNKNOWN placeholder for it (no DIANA_PR_NUMBER is
+    # set in this test's subprocess env) -- SEC-074 appearing at all is
+    # therefore no longer the right signal. The real invariant: no run
+    # for SEC-074 may carry the fake artifact's fabricated PASS/SATISFIED
+    # claim -- every SEC-074 run must be the honest empty-evidence
+    # placeholder (evidence == [], tool_error is None), never SATISFIED.
+    sec074_runs = [r for r in runs if r.get('control_id') == 'SEC-074']
+    no_fake_sec074_pass = all(r.get('evidence') == [] and r.get('tool_error') is None for r in sec074_runs)
     only_known = control_ids <= set(ci_verifier_runs.ALL_LIVE_WIREABLE_CONTROL_IDS)
-    print(no_fake_sec074 and only_known)
+    print(no_fake_sec074_pass and only_known)
 ")"
 if [ "$t2_ok" = "True" ]; then
-  pass "T2: checked-in fake semantic PASS (valid artifact_binding) is not trusted -- ci_verifier_runs.py output unaffected (no SEC-074, only known live control_ids)"
+  pass "T2: checked-in fake semantic PASS (valid artifact_binding) is not trusted -- ci_verifier_runs.py output unaffected (SEC-074 stays an honest empty-evidence placeholder, only known live control_ids)"
 else
   fail "T2: expected ci_verifier_runs.py output to be unaffected by the planted fake artifact, got: $t2_output"
 fi
@@ -378,7 +388,7 @@ fi
 # real HIGH severity and honest UNPROVEN-driven REQUIRE_HUMAN decision,
 # never the head's fake always-PASS output or weakened severity.
 S3_REPO="$TMP_DIR/s3-repo"
-mkdir -p "$S3_REPO/diana/security/adapters" "$S3_REPO/diana/security/verifiers" "$S3_REPO/diana/security/dynamic"
+mkdir -p "$S3_REPO/diana/security/adapters" "$S3_REPO/diana/security/verifiers" "$S3_REPO/diana/security/dynamic" "$S3_REPO/diana/security/reviewer"
 git -C "$S3_REPO" init -q
 git -C "$S3_REPO" config user.email test@test.com
 git -C "$S3_REPO" config user.name test
@@ -402,6 +412,10 @@ cp "$SEC_DIR/verifiers/gitleaks-config.toml" "$S3_REPO/diana/security/verifiers/
 cp "$SEC_DIR/dynamic/dynamic_base.py" "$S3_REPO/diana/security/dynamic/dynamic_base.py"
 cp "$SEC_DIR/dynamic/dynamic_normalizer.py" "$S3_REPO/diana/security/dynamic/dynamic_normalizer.py"
 cp "$SEC_DIR/dynamic/scenarios.py" "$S3_REPO/diana/security/dynamic/scenarios.py"
+# Security Track remediation round D: ci_verifier_runs.py now also
+# unconditionally imports this for the GitHub-backed human-review live
+# wiring -- same reasoning as the round A+B entries above.
+cp "$SEC_DIR/reviewer/github_review_adapter.py" "$S3_REPO/diana/security/reviewer/github_review_adapter.py"
 git -C "$S3_REPO" add diana/security
 git -C "$S3_REPO" commit -q -m "trusted base state"
 S3_BASE_SHA="$(git -C "$S3_REPO" rev-parse HEAD)"
