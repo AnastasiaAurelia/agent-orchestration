@@ -1050,6 +1050,294 @@ PASS" has meant since Phase 1.
   dynamic scenario), each using this repository's own pinned
   rules/config/candidate lists, not a configurable multi-tool framework.
 
+## Security Track remediation round C
+
+Round B's goal was capability breadth (27/27/21 `FULLY/PARTIALLY/NOT_
+COVERED`, zero `CRITICAL` `NOT_COVERED`, 6 controls with live execution
+wired). Its `resulting_state_counts` were still `{PASS:0, ..., UNPROVEN:
+75}` for every control on this repository. Round C's goal was different:
+attack the causes of `UNPROVEN` directly, and find out whether this
+repository can honestly reach a real `PASS` anywhere -- not just increase
+capability percentages.
+
+### Priority 1 -- the first genuine PASS: an executable proof of why none exists today
+
+Ran the real, unmodified pipeline end to end (`ci_verifier_runs.
+collect_trusted_runs()` -> `evidence_model.evaluate()`, zero synthetic
+input) against this repository's actual current state. Result: **0 PASS**,
+7 runs collected, 5 controls with at least one item satisfied (SEC-007,
+010, 011, 021, 058), none complete.
+
+For each of those 5 near-misses, the SPECIFIC missing item was
+identified precisely -- not "capability missing," but the exact
+`required_evidence` string still unproven:
+
+| Control | Item satisfied | Item still UNPROVEN |
+|---|---|---|
+| SEC-007 | no credential literal committed (Gitleaks, live) | secrets loaded from environment/secret-manager config (a SEMANTIC claim -- see Priority 3) |
+| SEC-010 | no shell command built via string concat (Semgrep, live) | negative test proving a metacharacter payload is inert |
+| SEC-011 | request input never rendered as template syntax (Semgrep, live) | negative test proving a template-expression payload is inert |
+| SEC-021 | JWT verification enforces a fixed algorithm (Semgrep, live) | negative test proving a forged/none-alg token is rejected |
+| SEC-058 | deserialization uses a safe/restricted format (Semgrep, live) | negative test proving a crafted payload achieves nothing |
+
+The four dynamic-negative-test items (SEC-010/011/021/058) all need a
+REAL code path performing the underlying operation (building a shell
+command from input, rendering a template, verifying a JWT, deserializing
+untrusted data) to test against -- a negative test against a mechanism
+that doesn't exist would be either impossible (nothing to invoke) or
+vacuous (testing nothing), and this round's instructions explicitly
+forbid synthetic/fabricated evidence. An exhaustive code search across
+this entire repository (`grep -rn` for `shell=True`/string-built shell
+commands, `jwt`/`JWT`, `jinja2`/`Template(`, `pickle.loads`/`yaml.load`/
+`eval(`, outbound `requests.get`/`urlopen` on caller-supplied URLs, any
+dependency manifest/lockfile, any frontend/client build tooling, any
+database access library, any real webhook receiver, any auth/session/
+login code, any HTTP server framework) found **zero matches for every
+one of these**, plus zero matches for the mechanisms behind every other
+near-candidate control checked (SEC-035 SSRF, SEC-060 dependency
+scanning, SEC-065 combined-scope secret exposure, SEC-074/075 AI tool
+authorization against Diana's own `diana/adapters/ao.py`, which is a CLI
+subprocess wrapper with no model-facing authorization boundary of its
+own).
+
+**Root cause, stated plainly: this repository (Diana's own security-
+tooling/CLI-orchestration codebase) has none of the application features
+the "vibe coder security" catalog assumes** -- no HTTP server, no
+frontend, no database, no dependency manifest, no user accounts, no
+webhook receiver. This is an architectural fact about THIS repository,
+not a live-wiring gap in Diana. **No canonical SEC control can honestly
+reach PASS in this repository today** -- verified by exhaustive search,
+not asserted. (Priority 3 below independently produces a genuine,
+mechanism-level PASS proof using synthetic test fixtures -- clearly
+distinguished there from a real-repository claim.)
+
+### Priority 2 -- expand live dynamic verification: same root cause, same conclusion
+
+The round's suggested targets (SEC-010, 011, 021, 035, 058, 064) were
+evaluated individually. SEC-010/011/021/058 have no real subject (see
+above). SEC-035 (SSRF) needs outbound-fetch-of-caller-supplied-URL code --
+zero matches found. SEC-064's dynamic half is ALREADY genuinely live
+(round B) and correctly blocked by the same real, verified absence: this
+repository has no directory matching any conventional public-deployment
+web-root name (`dist`/`build`/`out`/`.next`/`public/build`), confirmed
+again this round (`ls -d */` shows only `diana/`; no `docs/`/`site/`/
+GitHub Pages config exists either). Building a new dynamic scenario
+against a nonexistent target would require fabricating a toy vulnerable
+code sample purely to have something to test -- explicitly forbidden
+("no synthetic production evidence"). **No additional dynamic family can
+be brought genuinely live against a real subject in this repository as
+it exists today.** This is not a capacity limit of the scenario registry
+(23 scenarios already exist, capability-only) -- it is the same
+architectural fact from Priority 1.
+
+### Priority 3 -- trusted human/semantic evidence: architecture decision
+
+**Decision: GitHub-backed human review is preferred over wiring an LLM,
+exactly as the round's investigation instruction anticipated it might
+be.** Built as a genuinely new, capability-only normalizer --
+`diana/security/reviewer/github_review_adapter.py` -- deliberately
+NOT layered onto `reviewer_normalizer.py`/`reviewer_base.py` (Phase 4),
+because that contract is shaped for an AI/agent review SESSION
+specifically (`session_type` is a closed one-value enum,
+`"fresh_read_only"`; `files_inspected`/`architecture_reasoning`/
+`call_chain` read as a structured session log a human clicking "Approve"
+does not naturally produce). Forcing GitHub review data into that shape
+would mean either requiring reviewers to hand-author an AI-review-level
+document, or silently relaxing a bar that module was never designed to
+relax. `github_review_adapter.py` is a parallel, independently-scoped
+module with its own honestly-different structural checks, following the
+exact same architecture (parse an already-produced artifact; reuse
+`adapter_base.verify_identity/verify_target/build_runs/tool_error_runs/
+tool_unavailable_runs/NotAuthorized` directly; never call the GitHub API
+itself) every prior Phase 2-4 normalizer already established.
+
+Trust properties (mapped onto every one of Round C's explicit
+requirements):
+
+- **Reviewer identity from GitHub, never the PR body**: `reviewer.login`/
+  `reviewer.review_id` are expected to be copied verbatim from a real
+  `gh api .../pulls/<n>/reviews` response by whatever trusted script
+  produces the artifact (see live-wiring status below) -- never typed
+  into a PR-body evidence block.
+- **Independence is a structural gate, not a self-declared courtesy**:
+  `independence.reviewer_is_pr_author`/`reviewer_is_diana_agent` must
+  BOTH be `false` or the module raises `ArtifactError` -> an explicit
+  `ERROR` run, never a silent downgrade -- a non-independent "review" can
+  never become authorization evidence.
+- **Judgment bound to the exact reviewed commit SHA; staleness handled by
+  the SAME exact-match binding every adapter already uses** --
+  `adapter_base.verify_identity()`/`verify_target()` compare
+  `target.commit` against the currently-evaluated commit; a review
+  against a superseded commit contributes nothing. No new staleness
+  mechanism was invented.
+- **Evidence records control_id, reviewer identity, target commit SHA,
+  judgment, rationale, timestamp** -- every one is a required, checked
+  envelope field.
+- **Repository governance decides reviewer eligibility** -- this module
+  enforces only the two independence facts any design needs regardless
+  (not the author, not the Diana worker account); a live-wiring script
+  MAY apply a stricter eligibility filter (e.g. CODEOWNERS membership)
+  before ever producing an artifact -- a deployment/governance choice,
+  not this normalizer's to make.
+- **Judgment is per-control, not a blanket PR approval** -- `rationale`
+  must literally name the `control_id` it judges, be non-trivial length,
+  and not be composed solely of a small vague-reassurance blocklist
+  (`VAGUE_RATIONALE_PHRASES`) -- a generic "LGTM" cannot become evidence
+  for any specific control.
+- **No PR-body self-certification, no worker self-approval** -- enforced
+  structurally, proven by test (`reviewer_is_diana_agent=true` ->
+  `ERROR`).
+
+**Mechanism proof (not a real-repository claim)**: `test-github-review-
+adapter.sh` feeds two independent, substantiated `APPROVE` artifacts
+(different reviewer logins, one per SEC-016 `required_evidence` item)
+through this module and `evidence_model.evaluate()` UNCHANGED, and gets a
+genuine `PASS` back -- proving the mechanism is real and correctly wired
+to the existing aggregation, not asserted in prose. A companion test
+proves one `REQUEST_CHANGES` item keeps the whole control from `PASS`
+even when the other item is cleanly satisfied (never averaged away).
+
+**AI/semantic review remains available as a documented, provider-neutral,
+BYOK-only fallback** for judgment calls that genuinely exceed what a
+structural human sign-off can determine -- never a Diana-owned or shared
+provider key, never Diana Cloud, never a secret introduced into the
+Security Gate trust root, and AI judgment can never become trusted
+authorization merely because a model said so (the EXISTING
+`reviewer_normalizer.py`/`reviewer_base.py` structural-substantiation
+gates already enforce this, unchanged, for whenever that path is used).
+This round did not need to build or change that fallback path -- GitHub-
+backed human review satisfies the catalog and evidence model without it.
+
+**Live-wiring status: capability-only, not yet wired into
+`ci_verifier_runs.py`, for one precise, verified reason.** Unlike
+Semgrep/Gitleaks/the deterministic-repo-scan/the one live dynamic
+scenario (all wired with zero `.github/workflows/*.yml` changes),
+fetching real PR review data via `gh api` from inside
+`diana-security-gate.yml` needs a `pull-requests: read` permission that
+workflow's `permissions:` block does not currently grant -- verified
+directly against the live file (`permissions: {contents: read}` only;
+GitHub Actions treats any explicit `permissions:` block as authoritative,
+so an unlisted scope is `none`). Adding that scope is a
+`.github/workflows/diana-security-gate.yml` edit, which this session's
+`DIANA-AGENT` credential cannot push (missing the `workflow` OAuth
+scope -- the same constraint documented since Security Phase 5). This is
+a precisely-scoped, ready-to-implement follow-up requiring one human-
+pushed permission change, not attempted or half-built this round.
+
+### Priority 4 -- classification of the 21 remaining NOT_COVERED controls
+
+Recomputed from source (`coverage_matrix.py`, unchanged capability
+totals: this priority is classification, not new implementation --
+"do not implement all remaining controls just to inflate coverage" was
+followed literally). Every remaining `NOT_COVERED` control's TWO
+`required_evidence` items were independently checked against this
+repository's actual code (same exhaustive search as Priority 1) and
+against the existing scenario registry.
+
+**Zero fall into category B** (an existing dynamic scenario already
+sufficient) -- none of the 23 registered scenarios target any of these
+21 controls. **Zero fall into category D** (trusted human judgment
+needed) -- all 21 have `human_judgment_required=false`; every control
+that DOES need judgment was already `FULLY_COVERED`/`PARTIALLY_COVERED`
+via the reviewer path (Phase 4 + Priority 3 above). The real split is
+between **A** (a new Semgrep-style static rule is genuinely feasible) for
+most static halves, and **E/F** for both dynamic halves and a handful of
+INFRA_CONFIG-heavy static halves -- because this repository has neither
+the underlying code pattern (F) nor a deployed environment to inspect (E).
+
+| Control | Sev | Static item | Dynamic item | Primary blocker |
+|---|---|---|---|---|
+| SEC-009 nosql-injection | HIGH | A -- Semgrep-feasible (operator-dict built from request input) | C, needs a real DB | F -- no database access code exists in this repo |
+| SEC-013 reflected-xss | HIGH | A -- Semgrep-feasible (unescaped output of request input) | C, needs DYNAMIC_BROWSER + running app | F -- no web server/render surface |
+| SEC-014 dom-based-xss | HIGH | A -- Semgrep-feasible (unsafe DOM sink from URL-derived value) | C, needs a browser + app | F -- no frontend code at all |
+| SEC-030 insecure-cookie-attributes | HIGH | A -- Semgrep-feasible (Set-Cookie flags) | E, needs live response inspection | F -- no cookie-setting code exists |
+| SEC-031 cors-misconfiguration | HIGH | A -- Semgrep-feasible (wildcard ACAO + credentials) | E/C, needs a live cross-origin request | F -- no CORS config code exists |
+| SEC-036 path-traversal | HIGH | A -- Semgrep-feasible (unvalidated path join from request input) | C -- same negative-fetch pattern as SEC-064's live scenario | F -- no file-serving-from-request-path code exists |
+| SEC-037 local-file-inclusion | HIGH | A -- Semgrep-feasible (dynamic import/include from request input) | C | F -- no dynamic file-inclusion code exists |
+| SEC-039 upload-content-type-confusion | HIGH | A -- Semgrep-feasible (trusting client Content-Type alone) | C, needs a file-upload endpoint | F -- no file-upload code exists |
+| SEC-040 insecure-file-permissions | HIGH | E -- real cloud storage config | E, needs a real deployed bucket | E -- no cloud storage deployment in this repo |
+| SEC-041 mass-assignment | HIGH | A -- Semgrep-feasible (bulk-assign from request body) | C, needs a mutation endpoint | F -- no request-body-binding code exists |
+| SEC-052 debug-mode-in-production | HIGH | A/E -- needs a web framework or deployment config | n/a (`dynamic_required=false`) | F -- no web framework/production deployment config exists |
+| SEC-054 tls-https-misconfiguration | HIGH | E -- real deployment TLS config | E, live TLS handshake inspection | E -- no deployed endpoint to inspect |
+| SEC-057 improper-certificate-validation | HIGH | A -- Semgrep-feasible (`verify=False`/`rejectUnauthorized:false`) | C, needs an outbound TLS client + bad-cert endpoint | F -- no outbound TLS client code exists |
+| SEC-059 prototype-pollution | HIGH | A -- Semgrep-feasible (unguarded object merge) | C, needs a JS object-merge endpoint | F -- no JS object-merge code (repo is Python/shell) |
+| SEC-062 dependency-confusion | HIGH | E -- real registry config | n/a (`dynamic_required=false`) | E/F -- no packages published from this repo |
+| SEC-072 insecure-api-key-authentication | HIGH | F -- needs an API-key-issuing backend | C, needs a live API | F -- no API-key auth system exists |
+| SEC-032 missing-or-weak-csp | MEDIUM | A -- Semgrep-feasible if a framework existed | E, live header inspection | E -- no deployed web server to inspect |
+| SEC-033 clickjacking | MEDIUM | A | E | E -- no deployed web server to inspect |
+| SEC-034 open-redirect | MEDIUM | A -- Semgrep-feasible (redirect target from request input) | C -- negative-fetch style scenario | F -- no redirect-issuing code exists |
+| SEC-053 security-misconfigured-http-headers | MEDIUM | A | E | E -- no deployed web server to inspect |
+| SEC-063 exposed-source-maps | MEDIUM | A/E -- needs a real build/frontend surface | C -- same pattern as SEC-064's live scenario | E/F -- no build/frontend surface exists |
+
+Deliberately not implemented: building Semgrep rules for 12+ controls
+whose only real subject in THIS repository would be hypothetical code,
+or new dynamic scenarios with no real endpoint to point them at, is
+exactly the "implement to inflate coverage" this priority explicitly
+says not to do. The classification itself -- precise, per-item, sourced
+from real code search rather than guessed -- is the deliverable.
+
+### Priority 5 -- live-verifier reliability, checked empirically this round
+
+| Family | AVAILABLE | EXECUTED | RUN PRODUCED | EVIDENCE ACCEPTED | CONTROL CONTRIBUTION ACCEPTED |
+|---|---|---|---|---|---|
+| Semgrep | yes (venv-installed, v1.176.1) | yes (0 findings) | 4 runs | yes | SEC-010/011/021/058 SATISFIED |
+| Gitleaks | yes (binary downloaded, checksum-verified) | yes (0 findings) | 1 run | yes | SEC-007 SATISFIED |
+| deterministic-repo-scan | no (`_detect_frontend_bundle_dir` finds nothing) | n/a | 1 run (explicit UNKNOWN) | n/a | none (honest, not fabricated) |
+| `sensitive-file-paths-not-fetchable` | no (same reason) | n/a | 1 run (explicit UNKNOWN) | n/a | none (honest, not fabricated) |
+
+Downloaded-tool integrity, verified directly against source: Semgrep is
+installed from PyPI into an ephemeral venv on demand (no pinned exact
+version string enforced beyond whatever PyPI currently resolves --
+this is a real, narrower reliability gap worth a future round's
+attention: unlike Gitleaks, Semgrep's install is not yet version-pinned/
+checksum-verified). Gitleaks is a fixed, version-pinned (`8.30.1`)
+release binary with a SHA256 checksum PINNED IN SOURCE, verified before
+extraction -- no mutable `@latest` URL. Both degrade to explicit
+`UNKNOWN`/`UNPROVEN` (never `PASS`) on any unavailability, exactly as
+designed. **A real, observed environment-dependent reliability gap**:
+PR #34's live CI run showed Gitleaks producing NO run at all for SEC-007
+(`"no verification runs submitted for this control"`), while this same
+code produces a clean SATISFIED run in this session's sandbox -- the
+degradation worked correctly (no crash, no fabrication) in both places,
+but the GitHub Actions runner environment apparently could not complete
+a Gitleaks install/run that succeeds locally. Root cause not yet
+diagnosed (candidate causes: runner network egress restrictions,
+transient GitHub releases rate-limiting) -- flagged here as a concrete
+reliability item for a future round, not silently glossed over.
+
+### New totals after this round
+
+Capability coverage is UNCHANGED from round B (27/27/21) -- this round's
+new capability (`github_review_adapter.py`) authorizes the exact same
+36-control set `reviewer_normalizer.py` already covered, so it adds a
+second `implemented_paths` entry (visible in `coverage_matrix.py`'s
+`"kind": "github_review"` rows) without moving any control between
+`FULLY_COVERED`/`PARTIALLY_COVERED`/`NOT_COVERED`. `resulting_state_
+counts` remains `{PASS:0, FAIL:0, NOT_APPLICABLE:0, UNPROVEN:75,
+ERROR:0}` on this repository -- Priority 1's executable proof is exactly
+why, and that proof, not a capability number, is this round's real
+deliverable.
+
+### What this round does not do
+
+- Does not fabricate a PASS, a NOT_APPLICABLE, or evidence for any
+  control -- the near-miss analysis and the 21-control classification
+  are both sourced from real, exhaustive code search, not asserted.
+- Does not build new Semgrep rules or dynamic scenarios for controls with
+  no real subject in this repository -- doing so was explicitly weighed
+  and explicitly rejected as either impossible or vacuous.
+- Does not wire `github_review_adapter.py` into live CI -- blocked on a
+  verified, human-pushable `.github/workflows/diana-security-gate.yml`
+  permission change (`pull-requests: read`), not attempted this round.
+- Does not introduce an AI/LLM reviewer, a Diana-owned provider key, or
+  Diana Cloud -- GitHub-backed human review satisfied the catalog and
+  evidence model without needing to.
+- Does not change `catalog.json`, `evidence_model.py`'s aggregation
+  semantics, or any existing adapter's `AUTHORIZED_EVIDENCE` mapping.
+- Does not diagnose the Gitleaks CI-vs-local reliability discrepancy
+  found by Priority 5 -- flagged precisely for a future round, not
+  silently accepted or hidden.
+
 ## Future phases (not started here)
 
 - This README does not promise the exact shape of future work ahead of

@@ -128,7 +128,9 @@
 !diana/security/reviewer/README.md
 !diana/security/reviewer/reviewer_base.py
 !diana/security/reviewer/reviewer_normalizer.py
+!diana/security/reviewer/github_review_adapter.py
 !diana/security/reviewer/test-reviewer.sh
+!diana/security/reviewer/test-github-review-adapter.sh
 !diana/security/reviewer/fixtures/
 !diana/security/reviewer/fixtures/*.json
 
