@@ -100,6 +100,8 @@
 !diana/security/security_reducer.py
 !diana/security/ci_verifier_runs.py
 !diana/security/test-security-gate.sh
+!diana/security/coverage_matrix.py
+!diana/security/test-coverage-matrix.sh
 !diana/security/adapters/
 !diana/security/adapters/README.md
 !diana/security/adapters/adapter_base.py

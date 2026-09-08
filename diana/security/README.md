@@ -113,6 +113,16 @@ multi-verifier aggregation" below for the exact rules.
   reproduces the intended combination policy. See "Security Phase 5"
   below for the full trust-boundary design, the PR-body-is-untrusted-
   for-security rule, and the post-merge activation requirement.
+- **Security Phase 6 -- Prove 75/75 Coverage**: `coverage_matrix.py`
+  computes, for every canonical control, two never-conflated facts: the
+  REAL live `resulting_state` (today: `UNPROVEN` for all 75, proven by
+  actually running the real pipeline, not asserted) and a static
+  `capability_coverage` classification (`FULLY_COVERED`/
+  `PARTIALLY_COVERED`/`NOT_COVERED`, read directly from Phase 2-4's real
+  authorization tables). Current honest finding: 21 `FULLY_COVERED`, 25
+  `PARTIALLY_COVERED`, 29 `NOT_COVERED` (including 8 `CRITICAL`-severity
+  controls with zero implemented capability). See "Security Phase 6"
+  below for the full breakdown and what remains.
 
 ## Source-derived vs. Diana-designed fields
 
@@ -669,17 +679,89 @@ correctly (proven C1-C4).
 - Does not claim Security Phase 6 can begin before the post-merge
   activation probe above has been observed.
 
+## Security Phase 6 -- Prove 75/75 Coverage
+
+Answers, executably rather than in prose, one honest question for every
+canonical control: **"Can Diana truthfully and reproducibly evaluate
+this control today?"** `coverage_matrix.py` computes a deterministic
+matrix over all 75 controls; `test-coverage-matrix.sh` proves its core
+invariants hold.
+
+### Two axes, never conflated
+
+- **`resulting_state`** -- the REAL, LIVE result. Computed by actually
+  running `security_bundle.build_bundle()` with the real, unmodified
+  `ci_verifier_runs.py` output (today: `[]`) against the real catalog.
+  As of this phase, `UNPROVEN` for **all 75 controls, uniformly** -- not
+  asserted, but proven by literally invoking the same pipeline
+  `diana-security-gate.yml` runs in CI (`test-coverage-matrix.sh` M12
+  cross-checks this against an independent, direct
+  `security_bundle.py` invocation).
+- **`capability_coverage`** -- a static, code-level fact: for each
+  required_evidence item, is there an implemented normalizer/adapter
+  path that COULD produce that evidence if a human/operator supplied a
+  real artifact? Computed by importing and reading the REAL,
+  already-shipped authorization tables directly (never re-typed):
+  Phase 2's three adapters' `AUTHORIZED_EVIDENCE` dicts, Phase 3's
+  `dynamic/scenarios.py` `SCENARIO_REGISTRY`, and Phase 4's
+  catalog-derived reviewer authorization rule (mirrors
+  `reviewer_normalizer._authorized_control_ids()` exactly). One of
+  `FULLY_COVERED` (every required_evidence item plus `dynamic_required`/
+  `human_judgment_required` gate has an implemented path),
+  `PARTIALLY_COVERED`, or `NOT_COVERED`.
+
+A control can be `FULLY_COVERED` and still show `resulting_state:
+UNPROVEN` -- that is not a bug, it is the honest state of a track that
+has built normalizers but has not yet wired live verifier execution into
+CI (`test-coverage-matrix.sh` M8 proves this explicitly for `SEC-001`).
+**`capability_coverage` is never substituted for `resulting_state`, and
+`resulting_state` is never upgraded because coverage looks good** --
+"no finding" is never treated as PASS, anywhere in this matrix.
+
+### Current honest coverage (this phase's actual finding)
+
+As of this phase, against the real catalog and the real Phase 2-4
+implementation:
+
+| capability_coverage | count |
+|---|---|
+| `FULLY_COVERED` | 21 |
+| `PARTIALLY_COVERED` | 25 |
+| `NOT_COVERED` | 29 |
+
+| resulting_state | count |
+|---|---|
+| `UNPROVEN` | 75 |
+| `PASS` / `FAIL` / `NOT_APPLICABLE` / `ERROR` | 0 |
+
+29 controls (including 8 `CRITICAL`-severity ones) have **zero**
+implemented capability today -- no adapter, no dynamic scenario, and no
+`SEMANTIC_REVIEW`/`HUMAN` mode permitted by the catalog. These are
+explicit, named gaps (`remaining_gap` per row), not silently absent.
+Even the 21 `FULLY_COVERED` controls are `UNPROVEN` live, because
+`ci_verifier_runs.py` still returns `[]` -- Security Phase 5's own
+documented, honest limitation, unchanged by this phase.
+
+### What this phase does not do
+
+- Does not fabricate a PASS, FAIL, or NOT_APPLICABLE for any control.
+  Every `resulting_state` is computed by the real, unmodified pipeline.
+- Does not wire any live verifier execution into CI --
+  `ci_verifier_runs.py` is untouched; that remains explicitly future
+  work, confined to that one file.
+- Does not change `catalog.json`, `evidence_model.py`,
+  `validate_catalog.py`, `security_bundle.py`, `security_reducer.py`, or
+  any Phase 2-5 adapter/scenario/reviewer file -- it only reads their
+  real, already-shipped authorization tables.
+- Does not claim `NOT_COVERED` controls are `NOT_APPLICABLE` -- capability
+  absence and applicability are different questions; every `NOT_COVERED`
+  control's `resulting_state` is `UNPROVEN`, exactly like every other
+  control with zero trusted runs.
+
 ## Future phases (not started here)
 
-- **Security Phase 6 -- Prove 75/75 Coverage**: an executable coverage
-  matrix showing every catalog control has a defined, testable
-  verification path. **Blocked until the Security Phase 5 post-merge
-  activation probe has been observed** (see "Bootstrap limitation" above)
-  -- `diana-security-gate.yml` cannot be confirmed to actually fire and
-  behave correctly until it exists on the default branch and a real
-  subsequent PR triggers it.
-- This README does not promise the exact shape of that work ahead of each
-  phase actually landing.
+- This README does not promise the exact shape of future work ahead of
+  each phase actually landing.
 
 ## Running the validator and tests
 
@@ -691,15 +773,25 @@ bash diana/security/adapters/test-adapters.sh
 bash diana/security/dynamic/test-dynamic.sh
 bash diana/security/reviewer/test-reviewer.sh
 bash diana/security/test-security-gate.sh
+bash diana/security/test-coverage-matrix.sh
 ```
 
 All of the above are deterministic, offline, and make no changes to this
 repository. `test-security-gate.sh` additionally creates and destroys
 small, ephemeral, local-only `git init` scratch repositories under a
 `mktemp -d` directory (to prove the protected-base extraction end to end,
-S2+S3) -- no network access and no changes to this repository. `evidence_model.py` itself takes two arguments (a catalog path
+S2+S3) -- no network access and no changes to this repository.
+
+`evidence_model.py` itself takes two arguments (a catalog path
 and a runs-file path) and is normally invoked directly for ad hoc checks:
 
 ```
 python3 diana/security/evidence_model.py diana/security/catalog.json <runs.json>
+```
+
+`coverage_matrix.py` (Security Phase 6) takes a catalog path plus the
+target-identity triple and prints the full 75-control matrix:
+
+```
+python3 diana/security/coverage_matrix.py diana/security/catalog.json <repository> <base_sha> <target_sha>
 ```
