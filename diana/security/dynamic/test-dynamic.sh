@@ -7,7 +7,11 @@ CATALOG="$SEC_DIR/catalog.json"
 EVIDENCE_MODEL="$SEC_DIR/evidence_model.py"
 FIXTURES="$DYNAMIC_DIR/fixtures"
 NORMALIZER="$DYNAMIC_DIR/dynamic_normalizer.py"
-EXPECTED="$FIXTURES/expected-target.json"
+
+EXPECTED_TEST="$FIXTURES/expected-context-test.json"
+EXPECTED_LOCAL="$FIXTURES/expected-context-local.json"
+EXPECTED_SANDBOX="$FIXTURES/expected-context-sandbox.json"
+EXPECTED_NO_ENV="$FIXTURES/expected-context-no-environment.json"
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -45,6 +49,20 @@ for r in d['results']:
         print(r['result'])
         sys.exit(0)
 print('MISSING')
+" "$1" "$2"
+}
+
+run_verifier_type() {
+  # verifier.type of the (only) run for <control_id> in the normalizer's
+  # raw output, or NONE if absent.
+  python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+for r in d['runs']:
+    if r['control_id'] == sys.argv[2]:
+        print(r['verifier']['type'])
+        sys.exit(0)
+print('NONE')
 " "$1" "$2"
 }
 
@@ -109,128 +127,204 @@ json.dump(dynamic_runs + [companion], open('$TMP_DIR/combined.json', 'w'))
 }
 
 # ==================================================================
-# CASE A-Y (required), plus Z1-Z4 bonus safety-invariant coverage
+# CASE A-Y (required), plus Z1-Z5 and E1-E11 correction-round coverage
 # ==================================================================
 
 check_aggregate "CASE A: production environment refused" \
-  "$FIXTURES/case-a-prod-refused.json" "$EXPECTED" ERROR SEC-003
+  "$FIXTURES/case-a-prod-refused.json" "$EXPECTED_TEST" ERROR SEC-003
 
 check_aggregate "CASE B: unknown external environment refused" \
-  "$FIXTURES/case-b-unknown-env-refused.json" "$EXPECTED" ERROR SEC-003
+  "$FIXTURES/case-b-unknown-env-refused.json" "$EXPECTED_TEST" ERROR SEC-003
 
 SEC003_OTHER_REQ="every sensitive endpoint requires a valid authenticated session/token"
-for env_name in local test sandbox; do
-  check_aggregate_with_companion "CASE C ($env_name): LOCAL/TEST/SANDBOX accepted" \
-    "$FIXTURES/case-c-env-${env_name}-accepted.json" "$EXPECTED" SEC-003 "$SEC003_OTHER_REQ" SEMANTIC_REVIEW
-done
+check_aggregate_with_companion "CASE C (local): LOCAL/TEST/SANDBOX accepted" \
+  "$FIXTURES/case-c-env-local-accepted.json" "$EXPECTED_LOCAL" SEC-003 "$SEC003_OTHER_REQ" SEMANTIC_REVIEW
+check_aggregate_with_companion "CASE C (test): LOCAL/TEST/SANDBOX accepted" \
+  "$FIXTURES/case-c-env-test-accepted.json" "$EXPECTED_TEST" SEC-003 "$SEC003_OTHER_REQ" SEMANTIC_REVIEW
+check_aggregate_with_companion "CASE C (sandbox): LOCAL/TEST/SANDBOX accepted" \
+  "$FIXTURES/case-c-env-sandbox-accepted.json" "$EXPECTED_SANDBOX" SEC-003 "$SEC003_OTHER_REQ" SEMANTIC_REVIEW
 
 check_aggregate "CASE D: wrong target/build cannot PASS" \
-  "$FIXTURES/case-d-wrong-target.json" "$EXPECTED" UNPROVEN SEC-003
+  "$FIXTURES/case-d-wrong-target.json" "$EXPECTED_TEST" UNPROVEN SEC-003
 
 check_aggregate "CASE E: skipped assertion -> UNPROVEN" \
-  "$FIXTURES/case-e-skipped-assertion.json" "$EXPECTED" UNPROVEN SEC-003
+  "$FIXTURES/case-e-skipped-assertion.json" "$EXPECTED_TEST" UNPROVEN SEC-003
 
 check_aggregate "CASE F: execution crash -> ERROR" \
-  "$FIXTURES/case-f-execution-crash.json" "$EXPECTED" ERROR SEC-003
+  "$FIXTURES/case-f-execution-crash.json" "$EXPECTED_TEST" ERROR SEC-003
 
 SEC001_OTHER_REQ="server-side object ownership/permission check exists on every read/write route"
 check_aggregate_with_companion "CASE G: authorization denied + state unchanged -> PASS" \
-  "$FIXTURES/case-g-bola-denied-state-unchanged.json" "$EXPECTED" SEC-001 "$SEC001_OTHER_REQ" SEMANTIC_REVIEW
+  "$FIXTURES/case-g-bola-denied-state-unchanged.json" "$EXPECTED_TEST" SEC-001 "$SEC001_OTHER_REQ" SEMANTIC_REVIEW
 
 check_aggregate "CASE H: unauthorized action succeeds -> FAIL" \
-  "$FIXTURES/case-h-privileged-action-allowed.json" "$EXPECTED" FAIL SEC-002
+  "$FIXTURES/case-h-privileged-action-allowed.json" "$EXPECTED_TEST" FAIL SEC-002
 
 check_aggregate "CASE I: cross-account test requires distinct identities" \
-  "$FIXTURES/case-i-missing-distinct-identity.json" "$EXPECTED" ERROR SEC-001
+  "$FIXTURES/case-i-missing-distinct-identity.json" "$EXPECTED_TEST" ERROR SEC-001
 
 check_aggregate_with_companion "CASE J: anonymous protected endpoint test" \
-  "$FIXTURES/case-j-anonymous-endpoint-denied.json" "$EXPECTED" SEC-003 "$SEC003_OTHER_REQ" SEMANTIC_REVIEW
+  "$FIXTURES/case-j-anonymous-endpoint-denied.json" "$EXPECTED_TEST" SEC-003 "$SEC003_OTHER_REQ" SEMANTIC_REVIEW
 
 SEC012_OTHER_REQ="stored user content is output-encoded or sanitized at render time"
 check_aggregate_with_companion "CASE K: safe browser hostile input -> PASS" \
-  "$FIXTURES/case-k-stored-xss-inert.json" "$EXPECTED" SEC-012 "$SEC012_OTHER_REQ" STATIC_ANALYZER
+  "$FIXTURES/case-k-stored-xss-inert.json" "$EXPECTED_TEST" SEC-012 "$SEC012_OTHER_REQ" STATIC_ANALYZER
 
 check_aggregate "CASE L: browser code execution detected -> FAIL" \
-  "$FIXTURES/case-l-stored-xss-executed.json" "$EXPECTED" FAIL SEC-012
+  "$FIXTURES/case-l-stored-xss-executed.json" "$EXPECTED_TEST" FAIL SEC-012
 
 SEC067_OTHER_REQ="every data access path filters by the caller's tenant, enforced server-side or at the database layer"
 check_aggregate_with_companion "CASE M: DB cross-tenant denied -> PASS" \
-  "$FIXTURES/case-m-cross-tenant-denied.json" "$EXPECTED" SEC-067 "$SEC067_OTHER_REQ" DYNAMIC_API
+  "$FIXTURES/case-m-cross-tenant-denied.json" "$EXPECTED_TEST" SEC-067 "$SEC067_OTHER_REQ" DYNAMIC_API
 
 check_aggregate "CASE N: cross-tenant succeeds -> FAIL" \
-  "$FIXTURES/case-n-cross-tenant-allowed.json" "$EXPECTED" FAIL SEC-067
+  "$FIXTURES/case-n-cross-tenant-allowed.json" "$EXPECTED_TEST" FAIL SEC-067
 
 SEC068_OTHER_REQ="inbound webhook handler verifies the provider's signature before processing the payload"
 check_aggregate_with_companion "CASE O: invalid webhook signature rejected -> PASS" \
-  "$FIXTURES/case-o-webhook-signature-rejected.json" "$EXPECTED" SEC-068 "$SEC068_OTHER_REQ" SEMANTIC_REVIEW
+  "$FIXTURES/case-o-webhook-signature-rejected.json" "$EXPECTED_TEST" SEC-068 "$SEC068_OTHER_REQ" SEMANTIC_REVIEW
 
 check_aggregate "CASE P: duplicate webhook creates duplicate side effect -> FAIL" \
-  "$FIXTURES/case-p-webhook-replay-duplicated.json" "$EXPECTED" FAIL SEC-069
+  "$FIXTURES/case-p-webhook-replay-duplicated.json" "$EXPECTED_TEST" FAIL SEC-069
 
 SEC070_OTHER_REQ="the charged amount/price is computed and verified server-side from trusted data, never trusted from a client-supplied value"
 check_aggregate_with_companion "CASE Q: price tampering rejected/recalculated -> PASS" \
-  "$FIXTURES/case-q-price-tampering-rejected.json" "$EXPECTED" SEC-070 "$SEC070_OTHER_REQ" DYNAMIC_API
+  "$FIXTURES/case-q-price-tampering-rejected.json" "$EXPECTED_TEST" SEC-070 "$SEC070_OTHER_REQ" DYNAMIC_API
 
 SEC071_OTHER_REQ="entitlement is granted only after the provider webhook signature and event state are verified server-side"
 check_aggregate_with_companion "CASE R: client-only entitlement cannot grant privilege" \
-  "$FIXTURES/case-r-forged-event-no-entitlement.json" "$EXPECTED" SEC-071 "$SEC071_OTHER_REQ" DYNAMIC_API
+  "$FIXTURES/case-r-forged-event-no-entitlement.json" "$EXPECTED_TEST" SEC-071 "$SEC071_OTHER_REQ" DYNAMIC_API
 
 check_aggregate "CASE S: bounded concurrency invariant -> PASS" \
-  "$FIXTURES/case-s-concurrency-invariant-held.json" "$EXPECTED" PASS SEC-044
+  "$FIXTURES/case-s-concurrency-invariant-held.json" "$EXPECTED_TEST" PASS SEC-044
 
 check_aggregate "CASE T: race violation -> FAIL" \
-  "$FIXTURES/case-t-concurrency-invariant-violated.json" "$EXPECTED" FAIL SEC-044
+  "$FIXTURES/case-t-concurrency-invariant-violated.json" "$EXPECTED_TEST" FAIL SEC-044
 
 # CASE U: sandbox fixture unavailable -> UNPROVEN
 check_aggregate "CASE U: sandbox fixture unavailable -> UNPROVEN" \
-  "$TMP_DIR/does-not-exist.json" "$EXPECTED" UNPROVEN SEC-070
+  "$TMP_DIR/does-not-exist.json" "$EXPECTED_TEST" UNPROVEN SEC-070
 
 check_aggregate "CASE V: artifact corruption -> ERROR" \
-  "$FIXTURES/case-v-artifact-corrupted.json" "$EXPECTED" ERROR SEC-003
-
-# CASE W: cleanup failure visible. The dynamic contribution alone stays
-# UNPROVEN (SEC-001 needs a 2nd, complementary requirement too -- same as
-# every other multi-item control here), but the cleanup failure must be
-# visible in its evidence provenance regardless of aggregate result --
-# "do not hide it" is checked directly against the normalizer's own
-# output, independent of whatever the rest of the contract ends up doing.
-run_normalizer "$FIXTURES/case-w-cleanup-failure-visible.json" "$EXPECTED" SEC-001
-runs="$(normalizer_runs "$TMP_DIR/norm_out.json")"
-if echo "$runs" | grep -q '"status": "SATISFIED"' && echo "$runs" | grep -q "cleanup visibility" && echo "$runs" | grep -q "success=False"; then
-  pass "CASE W: cleanup failure visible in evidence, scenario contribution still SATISFIED"
-else
-  fail "CASE W: expected SATISFIED contribution with cleanup failure visible in provenance, got: $runs"
-fi
+  "$FIXTURES/case-v-artifact-corrupted.json" "$EXPECTED_TEST" ERROR SEC-003
 
 SEC074_OTHER_REQ="tool-call authorization is enforced by code outside the model, using the caller's real permissions, not the model's own output"
 check_aggregate_with_companion "CASE X: AI forbidden action rejected outside model -> PASS" \
-  "$FIXTURES/case-x-ai-tool-call-rejected.json" "$EXPECTED" SEC-074 "$SEC074_OTHER_REQ" SEMANTIC_REVIEW
+  "$FIXTURES/case-x-ai-tool-call-rejected.json" "$EXPECTED_TEST" SEC-074 "$SEC074_OTHER_REQ" SEMANTIC_REVIEW
 
 SEC075_OTHER_REQ="untrusted content is isolated from trusted instructions and cannot itself grant tool permissions"
 check_aggregate_with_companion "CASE Y: prompt injection cannot bypass external authorization -> PASS" \
-  "$FIXTURES/case-y-prompt-injection-blocked.json" "$EXPECTED" SEC-075 "$SEC075_OTHER_REQ" SEMANTIC_REVIEW
+  "$FIXTURES/case-y-prompt-injection-blocked.json" "$EXPECTED_TEST" SEC-075 "$SEC075_OTHER_REQ" SEMANTIC_REVIEW
 
 # ==================================================================
-# Bonus: safety invariants this framework enforces, each proven once
+# Bonus: safety invariants proven since the first Phase 3 implementation
 # ==================================================================
 
 check_aggregate "CASE Z1: AI model-refusal-alone is not sufficient evidence" \
-  "$FIXTURES/case-z1-ai-model-refusal-alone-not-proof.json" "$EXPECTED" ERROR SEC-074
+  "$FIXTURES/case-z1-ai-model-refusal-alone-not-proof.json" "$EXPECTED_TEST" ERROR SEC-074
 
 check_aggregate "CASE Z2: DB scenario forbids privileged/admin bypass credentials" \
-  "$FIXTURES/case-z2-db-privileged-bypass-forbidden.json" "$EXPECTED" ERROR SEC-066
+  "$FIXTURES/case-z2-db-privileged-bypass-forbidden.json" "$EXPECTED_TEST" ERROR SEC-066
 
 check_aggregate "CASE Z3: concurrency ceiling enforced (never load testing)" \
-  "$FIXTURES/case-z3-concurrency-ceiling-exceeded.json" "$EXPECTED" ERROR SEC-044
+  "$FIXTURES/case-z3-concurrency-ceiling-exceeded.json" "$EXPECTED_TEST" ERROR SEC-044
 
 check_aggregate "CASE Z4: unknown scenario.id fails closed" \
-  "$FIXTURES/case-z4-unknown-scenario-id.json" "$EXPECTED" ERROR SEC-003
+  "$FIXTURES/case-z4-unknown-scenario-id.json" "$EXPECTED_TEST" ERROR SEC-003
 
 # Not authorized / not requested control -> silently no contribution.
-run_normalizer "$FIXTURES/case-j-anonymous-endpoint-denied.json" "$EXPECTED" SEC-999
+run_normalizer "$FIXTURES/case-j-anonymous-endpoint-denied.json" "$EXPECTED_TEST" SEC-999
 runs="$(normalizer_runs "$TMP_DIR/norm_out.json")"
 [ "$runs" = "[]" ] && pass "CASE Z5: unregistered control_id produces no contribution" \
   || fail "CASE Z5: expected empty runs, got $runs"
+
+# ==================================================================
+# Final dynamic trust-boundary correction (human review): E1-E11
+# ==================================================================
+
+# E1: expected environment TEST + artifact environment SANDBOX, with a
+# real observed violation -> never PASS AND never FAIL. Environment
+# mismatch blocks attribution exactly like a repo/commit mismatch does.
+check_aggregate "E1: environment mismatch with a real violation -> never FAIL" \
+  "$FIXTURES/case-e1-env-mismatch-with-violation.json" "$EXPECTED_TEST" UNPROVEN SEC-002
+
+# E2: expected SANDBOX + artifact SANDBOX + matching repo/commit -> normal
+# evidence path (SATISFIED reachable via companion, same as CASE C).
+check_aggregate_with_companion "E2: matching SANDBOX expectation -> normal evidence path" \
+  "$FIXTURES/case-c-env-sandbox-accepted.json" "$EXPECTED_SANDBOX" SEC-003 "$SEC003_OTHER_REQ" SEMANTIC_REVIEW
+
+# E3: missing expected environment -> never PASS.
+check_aggregate "E3: missing expected environment -> never PASS" \
+  "$FIXTURES/case-j-anonymous-endpoint-denied.json" "$EXPECTED_NO_ENV" UNPROVEN SEC-003
+
+# E4: SEC-012 artifact unavailable -> explicit UNPROVEN using the
+# permitted DYNAMIC_BROWSER capability, never a fabricated DYNAMIC_API.
+run_normalizer "$TMP_DIR/does-not-exist.json" "$EXPECTED_TEST" SEC-012
+vt="$(run_verifier_type "$TMP_DIR/norm_out.json" SEC-012)"
+runs="$(normalizer_runs "$TMP_DIR/norm_out.json")"
+evaluate_runs "$runs" "$TMP_DIR/e4.out.json"
+r="$(result_for "$TMP_DIR/e4.out.json" SEC-012)"
+if [ "$vt" = "DYNAMIC_BROWSER" ] && [ "$r" = "UNPROVEN" ]; then
+  pass "E4: SEC-012 unavailable -> UNPROVEN via DYNAMIC_BROWSER (not DYNAMIC_API)"
+else
+  fail "E4: expected verifier_type=DYNAMIC_BROWSER and result=UNPROVEN, got verifier_type=$vt result=$r"
+fi
+
+# E5: SEC-044 artifact unavailable -> DYNAMIC_CONCURRENCY.
+run_normalizer "$TMP_DIR/does-not-exist.json" "$EXPECTED_TEST" SEC-044
+vt="$(run_verifier_type "$TMP_DIR/norm_out.json" SEC-044)"
+[ "$vt" = "DYNAMIC_CONCURRENCY" ] && pass "E5: SEC-044 unavailable -> UNPROVEN via DYNAMIC_CONCURRENCY (not DYNAMIC_API)" \
+  || fail "E5: expected verifier_type=DYNAMIC_CONCURRENCY, got $vt"
+
+# E6: SEC-066 artifact unavailable -> DYNAMIC_DB.
+run_normalizer "$TMP_DIR/does-not-exist.json" "$EXPECTED_TEST" SEC-066
+vt="$(run_verifier_type "$TMP_DIR/norm_out.json" SEC-066)"
+[ "$vt" = "DYNAMIC_DB" ] && pass "E6: SEC-066 unavailable -> UNPROVEN via DYNAMIC_DB (not DYNAMIC_API)" \
+  || fail "E6: expected verifier_type=DYNAMIC_DB, got $vt"
+
+# E7: malformed artifact (fails structural validation before scenario
+# identity is known), requested for SEC-012 (a non-DYNAMIC_API-only
+# control) -> deterministic ERROR using SEC-012's own permitted
+# capability, never a fabricated DYNAMIC_API.
+run_normalizer "$FIXTURES/case-e7-malformed-non-dynamic-api-control.json" "$EXPECTED_TEST" SEC-012
+vt="$(run_verifier_type "$TMP_DIR/norm_out.json" SEC-012)"
+runs="$(normalizer_runs "$TMP_DIR/norm_out.json")"
+evaluate_runs "$runs" "$TMP_DIR/e7.out.json"
+r="$(result_for "$TMP_DIR/e7.out.json" SEC-012)"
+if [ "$vt" = "DYNAMIC_BROWSER" ] && [ "$r" = "ERROR" ]; then
+  pass "E7: malformed artifact for SEC-012 -> ERROR via DYNAMIC_BROWSER (no fabricated capability)"
+else
+  fail "E7: expected verifier_type=DYNAMIC_BROWSER and result=ERROR, got verifier_type=$vt result=$r"
+fi
+
+# E8: cleanup.required=true, performed=false -> ERROR / non-PASS.
+check_aggregate "E8: cleanup required but not performed -> ERROR" \
+  "$FIXTURES/case-e8-cleanup-required-not-performed.json" "$EXPECTED_TEST" ERROR SEC-001
+
+# E9: cleanup.required=true, performed=true, success=false -> ERROR /
+# non-PASS. Supersedes the original implementation's CASE W, which
+# incorrectly allowed SATISFIED here; the cleanup failure must still be
+# visible in the provenance text even though the result is now ERROR, not
+# SATISFIED.
+run_normalizer "$FIXTURES/case-e9-cleanup-performed-but-failed.json" "$EXPECTED_TEST" SEC-001
+runs="$(normalizer_runs "$TMP_DIR/norm_out.json")"
+evaluate_runs "$runs" "$TMP_DIR/e9.out.json"
+r="$(result_for "$TMP_DIR/e9.out.json" SEC-001)"
+if [ "$r" = "ERROR" ] && echo "$runs" | grep -q "cleanup" && echo "$runs" | grep -q "success=False"; then
+  pass "E9: cleanup performed but failed -> ERROR, cleanup failure still visible in provenance"
+else
+  fail "E9: expected ERROR with cleanup failure visible in provenance, got result=$r runs=$runs"
+fi
+
+# E10: cleanup.required=true, performed=true, success=true -> normal
+# result path (SATISFIED reachable, cleanup resolved).
+check_aggregate_with_companion "E10: cleanup required and successfully resolved -> normal PASS path" \
+  "$FIXTURES/case-e10-cleanup-required-and-resolved.json" "$EXPECTED_TEST" SEC-001 "$SEC001_OTHER_REQ" SEMANTIC_REVIEW
+
+# E11: cleanup.required=false -> cleanup performed/success values are
+# irrelevant; PASS still reachable.
+check_aggregate_with_companion "E11: cleanup not required -> no cleanup failure regardless of performed/success" \
+  "$FIXTURES/case-e11-cleanup-not-required.json" "$EXPECTED_TEST" SEC-001 "$SEC001_OTHER_REQ" SEMANTIC_REVIEW
 
 echo ""
 echo "diana/security/dynamic/test-dynamic.sh: $pass_count passed, $fail_count failed"

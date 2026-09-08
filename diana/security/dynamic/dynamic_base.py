@@ -18,18 +18,34 @@ an already-produced static tool report:
             |
     evidence_model.py
 
-## Carrying the Phase 2 lesson forward
+## Carrying the Phase 2 lesson forward -- and extending it to environment
 
-"Evidence for one target/build must not prove another." Every artifact
-declares a target (repository, commit, base_url) and an environment class;
-callers supply an *expected* target the same way Phase 2 adapters do, and
-`verify_scenario_identity()`/`verify_scenario_target()` mirror Phase 2's
-`verify_identity()`/`verify_target()` split exactly: a scenario that
-observed a real security violation (a FAILED required assertion) is
-trusted from partial coverage but must still be attributed to the correct
-repository+commit; a scenario that observed everything working correctly
-(all required assertions PASSED) additionally needs the full target/scope
-proof before it can count as SATISFIED.
+"Evidence for one target/build must not prove another." Phase 2 bound
+findings to a repository+commit identity. A second review round found
+this was not enough for dynamic evidence specifically: environment class
+(`LOCAL`/`TEST`/`SANDBOX`) was validated as *structurally allowed*, but
+never checked against what the caller actually intended to verify --
+evidence from `SANDBOX` could silently be accepted as proof about `TEST`.
+**Environment is now part of the execution identity, not a separate,
+looser check.**
+
+`build_execution_context(envelope)` combines the artifact's top-level
+`environment` field with its `target` (repository, commit, base_url) into
+one `execution_context` dict. Callers supply an *expected* execution
+context the same shape. `verify_scenario_identity()`/
+`verify_scenario_target()` mirror Phase 2's `verify_identity()`/
+`verify_target()` split, now over `{environment, repository, commit}` (not
+just repository+commit): a scenario that observed a real security
+violation (a `FAILED` required assertion) is trusted from partial
+coverage but must still be attributed to the correct environment +
+repository + commit; a scenario that observed everything working
+correctly (all required assertions `PASSED`) additionally needs the full
+execution-context match (identity plus any other key the caller supplied,
+e.g. `base_url`) before it can count as `SATISFIED`. A caller that omits
+`environment` from its expectation can never obtain `PASS` or `FAIL` --
+the expected execution context must be explicit and complete, never
+partially specified. Environment is never inferred from a URL or
+hostname; it is only ever compared as a declared, exact string.
 
 ## Environment classification is explicit, never inferred
 
@@ -69,20 +85,49 @@ conclusion; it can only report what actually happened.
 - Any `required_assertions` entry with outcome `FAILED` -> the security
   property under test did not hold. Trusted (`VIOLATED`) as long as
   `verify_scenario_identity()` passes -- partial coverage is fine for a
-  real, observed violation.
-- All `required_assertions` `PASSED` -> `SATISFIED` only if
-  `verify_scenario_target()` (identity + environment + build) passes.
-- Any FAILED assertion, or any PASSED-but-unverified-target case, that
-  cannot be attributed to the expected target -> no contribution at all
-  (deterministically `UNPROVEN` once combined with `build_runs()`'s
-  requested-control fill-in, exactly as in Phase 2).
+  real, observed violation, but the execution context (environment +
+  repository + commit) must still match what was expected.
+- All `required_assertions` `PASSED`, but `cleanup.required` is true and
+  `cleanup.performed`/`cleanup.success` is not fully true -> `ERROR`,
+  never `SATISFIED`. A mutating verification run that did not clean up
+  successfully did not complete safely/reliably, so its result cannot be
+  trusted as a clean PASS -- see "Cleanup and PASS" below.
+- All `required_assertions` `PASSED` and cleanup resolved (or not
+  required) -> `SATISFIED` only if `verify_scenario_target()` (full
+  execution context: environment + repository + commit + any other
+  caller-supplied expectation) passes.
+- Any FAILED assertion, or any PASSED-but-unverified-context case, that
+  cannot be attributed to the expected execution context -> no
+  contribution at all (deterministically `UNPROVEN` once combined with
+  `build_runs()`'s requested-control fill-in, exactly as in Phase 2).
 
-## Cleanup visibility
+## Cleanup and PASS
 
-A mutating scenario's `cleanup.success == false` never changes the
-computed result, but is always appended to the emitted evidence item's
-`provenance` text -- "do not hide it" is implemented as "always say it,"
-not as a separate silent failure mode.
+A mutating scenario's `cleanup.success == false` (or `cleanup.performed
+== false`) while `cleanup.required == true` is always visible in the
+emitted evidence item's `provenance` text -- "do not hide it" is
+implemented as "always say it." But unlike the first Phase 3
+implementation, an unresolved required cleanup now also **prevents**
+`SATISFIED`: the scenario's contribution becomes `ERROR` instead, because
+PASS requires no unresolved execution error, and a mutating run whose
+cleanup did not complete is exactly that. A `FAILED` required assertion
+(a real observed violation) is unaffected by cleanup state -- the
+security finding is never suppressed by a housekeeping failure.
+`cleanup.required == false` is unaffected regardless of `performed`/
+`success`.
+
+## Unavailable-verifier capability is never guessed
+
+When no artifact is available to ingest, or an artifact fails to parse
+before its scenario identity is even known, `dynamic_normalizer.py` must
+still report on every requested, registered control -- but it must not
+invent a verifier capability that control doesn't actually permit (e.g.
+claiming `DYNAMIC_API` for `SEC-012`, which only permits
+`DYNAMIC_BROWSER`). `dynamic_normalizer._capability_for_control()` looks
+up each requested control's own registered `allowed_verifier_modes` and
+deterministically picks one (alphabetically first, documented and
+tested) -- never a shared placeholder applied to every control in a
+batch regardless of what it actually supports.
 """
 
 from __future__ import annotations
@@ -279,46 +324,62 @@ def load_scenario_envelope(raw: Any) -> dict[str, Any]:
     return raw
 
 
-def verify_scenario_identity(target: dict[str, Any], expected_target: dict[str, Any] | None) -> tuple[bool, str | None]:
-    """TARGET IDENTITY ONLY: repository + commit. Gates whether a FAILED
-    (violation) assertion can be attributed to the expected target."""
-    if not target:
-        return False, "artifact declares no target context"
-    if not expected_target:
-        return False, "caller supplied no expected target"
+EXECUTION_IDENTITY_FIELDS = ("environment", "repository", "commit")
 
-    expected_repo = expected_target.get("repository")
-    expected_commit = expected_target.get("commit")
-    if not expected_repo or not expected_commit:
-        return False, "expected_target must specify non-empty repository and commit"
 
-    actual_repo = target.get("repository")
-    actual_commit = target.get("commit")
-    if not actual_repo or not actual_commit:
-        return False, "artifact target must specify non-empty repository and commit"
+def build_execution_context(envelope: dict[str, Any]) -> dict[str, Any]:
+    """Combines the artifact's top-level environment with its target into
+    one execution-context dict, the unit callers express expectations
+    against. Environment is never inferred from a URL/hostname -- it is
+    only ever the artifact's own declared, exact `environment` string."""
+    return {"environment": envelope["environment"], **envelope["target"]}
 
-    if actual_repo != expected_repo:
-        return False, f"target.repository mismatch: expected {expected_repo!r}, artifact declares {actual_repo!r}"
-    if actual_commit != expected_commit:
-        return False, f"target.commit mismatch: expected {expected_commit!r}, artifact declares {actual_commit!r}"
+
+def verify_scenario_identity(
+    execution_context: dict[str, Any], expected_context: dict[str, Any] | None
+) -> tuple[bool, str | None]:
+    """EXECUTION IDENTITY ONLY: environment + repository + commit. Gates
+    whether a FAILED (violation) assertion can be attributed to the
+    expected execution context. Evidence observed under one environment
+    (e.g. SANDBOX) must never silently be accepted as proof about a
+    different expected environment (e.g. TEST) -- environment is checked
+    with exactly the same strictness as repository/commit, not as a
+    separate, looser structural-only check."""
+    if not execution_context:
+        return False, "artifact declares no execution context"
+    if not expected_context:
+        return False, "caller supplied no expected execution context"
+
+    for field in EXECUTION_IDENTITY_FIELDS:
+        expected_value = expected_context.get(field)
+        if not expected_value:
+            return False, f"expected execution context must specify non-empty {field}"
+        actual_value = execution_context.get(field)
+        if not actual_value:
+            return False, f"artifact execution context must specify non-empty {field}"
+        if actual_value != expected_value:
+            return False, f"{field} mismatch: expected {expected_value!r}, artifact declares {actual_value!r}"
 
     return True, None
 
 
-def verify_scenario_target(target: dict[str, Any], expected_target: dict[str, Any] | None) -> tuple[bool, str | None]:
-    """FULL verification: identity plus every other key the caller
-    supplied (e.g. base_url). Gates whether a clean (all-PASSED) scenario
-    can count as SATISFIED."""
-    identity_ok, reason = verify_scenario_identity(target, expected_target)
+def verify_scenario_target(
+    execution_context: dict[str, Any], expected_context: dict[str, Any] | None
+) -> tuple[bool, str | None]:
+    """FULL verification: execution identity (environment + repository +
+    commit) plus every other key the caller supplied (e.g. base_url).
+    Gates whether a clean (all-PASSED, cleanup-resolved) scenario can
+    count as SATISFIED."""
+    identity_ok, reason = verify_scenario_identity(execution_context, expected_context)
     if not identity_ok:
         return False, reason
 
-    for key, value in (expected_target or {}).items():
-        if key in ("repository", "commit"):
+    for key, value in (expected_context or {}).items():
+        if key in EXECUTION_IDENTITY_FIELDS:
             continue
-        actual = target.get(key)
+        actual = execution_context.get(key)
         if actual != value:
-            return False, f"target.{key} mismatch: expected {value!r}, artifact declares {actual!r}"
+            return False, f"{key} mismatch: expected {value!r}, artifact declares {actual!r}"
 
     return True, None
 
