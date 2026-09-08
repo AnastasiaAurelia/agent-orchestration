@@ -35,11 +35,42 @@ check (identity plus scope) before it can count as `SATISFIED`.
 
 ## Mapped controls
 
-Both fully satisfiable by STATIC_ANALYZER alone (dynamic_required=False,
+Fully satisfiable by STATIC_ANALYZER alone (dynamic_required=False,
 human_judgment_required=False):
 
 - `SEC-055` Weak Cryptography / Custom Crypto
 - `SEC-056` Insecure Randomness
+
+Security Track remediation round A additions -- each of these controls
+also has `dynamic_required=True`, so this adapter covers only ONE of the
+two `required_evidence` items; a companion `DYNAMIC_API` contribution
+(see `diana/security/dynamic/scenarios.py`) is still required to reach
+PASS, exactly the same composition discipline as every other
+`dynamic_required` control in this catalog:
+
+- `SEC-010` OS Command Injection -- the static ("no shell command built
+  via string concatenation of request-influenced input") half only.
+- `SEC-011` Server-Side Template Injection -- the static ("request-
+  influenced input never rendered as template syntax") half only.
+- `SEC-021` JWT Signature Verification Errors -- the static ("fixed,
+  expected signing algorithm enforced") half only.
+- `SEC-058` Insecure Deserialization -- the static ("safe/restricted
+  deserialization format, not an unrestricted native deserializer") half
+  only.
+
+`SEC-035` (Server-Side Request Forgery) was deliberately NOT added here:
+its static required_evidence item ("outbound request targets are
+validated/allow-listed and internal/metadata address ranges are
+blocked") is a claim about actual network-egress *behavior*, not a
+lexical/structural code pattern -- a static pattern match can flag "a
+URL is built from request input near an HTTP call," but cannot establish
+that destinations are genuinely allow-listed and that private/link-local/
+loopback ranges are blocked after DNS resolution (redirect-following,
+DNS rebinding, and allow-list completeness are runtime properties). Only
+`SEC-035`'s dynamic negative-test item is covered (by a new scenario);
+its static item remains an explicit, documented gap -- see
+`diana/security/README.md`'s "Security Track remediation round A"
+section.
 """
 
 from __future__ import annotations
@@ -57,10 +88,18 @@ TOOL_NAME = "semgrep"
 
 SEC055_REQ = "cryptographic operations use vetted standard-library/well-known algorithms and libraries, not a custom-designed cipher/scheme"
 SEC056_REQ = "security-relevant random values are generated with a cryptographically secure random source, not a general-purpose PRNG"
+SEC010_REQ = "no shell command is built via string concatenation/interpolation of request-influenced input"
+SEC011_REQ = "request-influenced input is never rendered as template syntax (only as template data)"
+SEC021_REQ = "JWT verification enforces a fixed, expected signing algorithm (no algorithm confusion, no 'none' algorithm accepted)"
+SEC058_REQ = "deserialization of untrusted input uses a safe/restricted format or schema, not an unrestricted native object deserializer"
 
 AUTHORIZED_EVIDENCE = {
     "SEC-055": [SEC055_REQ],
     "SEC-056": [SEC056_REQ],
+    "SEC-010": [SEC010_REQ],
+    "SEC-011": [SEC011_REQ],
+    "SEC-021": [SEC021_REQ],
+    "SEC-058": [SEC058_REQ],
 }
 
 # TEST-ONLY. Never read by ingest(). Illustrative example rule-ID strings,
@@ -75,6 +114,10 @@ ILLUSTRATIVE_TEST_ONLY_RULE_MAP: dict[str, list[str]] = {
     "python.lang.security.weak-crypto-cipher": ["SEC-055", SEC055_REQ],
     "javascript.lang.security.weak-crypto-cipher": ["SEC-055", SEC055_REQ],
     "generic.crypto.security.custom-crypto-implementation": ["SEC-055", SEC055_REQ],
+    "diana.shell-injection-via-concatenation": ["SEC-010", SEC010_REQ],
+    "diana.template-injection-via-render": ["SEC-011", SEC011_REQ],
+    "diana.jwt-unsafe-verification": ["SEC-021", SEC021_REQ],
+    "diana.insecure-deserialization": ["SEC-058", SEC058_REQ],
 }
 
 

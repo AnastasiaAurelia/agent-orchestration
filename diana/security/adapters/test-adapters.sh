@@ -302,6 +302,119 @@ runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
 [ "$runs" = "[]" ] && pass "(semgrep): silently refuses an unauthorized control (SEC-001)" \
   || fail "expected empty runs for an unauthorized control, got $runs"
 
+# ==================================================================
+# R1-R6: Security Track remediation round A -- new semgrep_adapter
+# controls (SEC-010/011/021/058) and the new deterministic_repo_adapter
+# (SEC-064)
+# ==================================================================
+
+DETREPO="$ADAPTERS_DIR/deterministic_repo_adapter.py"
+
+build_semgrep_round_a_artifact() {
+  # build_semgrep_round_a_artifact <out_file> <finding_check_id_or_empty>
+  local out_file="$1" finding_check_id="${2:-}"
+  python3 -c "
+import hashlib, json
+
+check_ids = [
+    'diana.shell-injection-via-concatenation',
+    'diana.template-injection-via-render',
+    'diana.jwt-unsafe-verification',
+    'diana.insecure-deserialization',
+]
+rule_map = {
+    'diana.shell-injection-via-concatenation': ['SEC-010', 'no shell command is built via string concatenation/interpolation of request-influenced input'],
+    'diana.template-injection-via-render': ['SEC-011', 'request-influenced input is never rendered as template syntax (only as template data)'],
+    'diana.jwt-unsafe-verification': ['SEC-021', \"JWT verification enforces a fixed, expected signing algorithm (no algorithm confusion, no 'none' algorithm accepted)\"],
+    'diana.insecure-deserialization': ['SEC-058', 'deserialization of untrusted input uses a safe/restricted format or schema, not an unrestricted native object deserializer'],
+}
+finding_check_id = '$finding_check_id'
+results = [{'check_id': finding_check_id, 'path': 'app/handler.py'}] if finding_check_id else []
+
+env = {
+    'tool': {'name': 'semgrep', 'version': '1.176.1'},
+    'execution': {'completed': True},
+    'target': {'repository': 'AnastasiaAurelia/agent-orchestration', 'commit': '912004328edd9d67671eb216f90b5697a6660350', 'root': '.', 'scope': 'full-repo'},
+    'config': {'rule_map': rule_map},
+    'scanned_inputs': ['app/handler.py'],
+    'report': {'results': results, 'rules_run': check_ids},
+}
+bound = {k: env[k] for k in ('tool', 'execution', 'target', 'config', 'scanned_inputs', 'report')}
+canonical = json.dumps(bound, sort_keys=True, separators=(',', ':'))
+env['artifact_binding'] = {'sha256': hashlib.sha256(canonical.encode()).hexdigest()}
+json.dump(env, open('$out_file', 'w'))
+"
+}
+
+python3 -c "
+import json
+json.dump({'repository': 'AnastasiaAurelia/agent-orchestration', 'commit': '912004328edd9d67671eb216f90b5697a6660350', 'scope': 'full-repo'}, open('$TMP_DIR/expected-target-round-a.json', 'w'))
+"
+EXPECTED_ROUND_A="$TMP_DIR/expected-target-round-a.json"
+
+build_semgrep_round_a_artifact "$TMP_DIR/semgrep-round-a-clean.json"
+check_contribution "R1: semgrep SEC-010 (shell injection) clean scan -> SATISFIED" \
+  "$SEMGREP" "$TMP_DIR/semgrep-round-a-clean.json" "$EXPECTED_ROUND_A" SEC-010 SATISFIED
+check_contribution "R1: semgrep SEC-011 (template injection) clean scan -> SATISFIED" \
+  "$SEMGREP" "$TMP_DIR/semgrep-round-a-clean.json" "$EXPECTED_ROUND_A" SEC-011 SATISFIED
+check_contribution "R1: semgrep SEC-021 (JWT verification) clean scan -> SATISFIED" \
+  "$SEMGREP" "$TMP_DIR/semgrep-round-a-clean.json" "$EXPECTED_ROUND_A" SEC-021 SATISFIED
+check_contribution "R1: semgrep SEC-058 (insecure deserialization) clean scan -> SATISFIED" \
+  "$SEMGREP" "$TMP_DIR/semgrep-round-a-clean.json" "$EXPECTED_ROUND_A" SEC-058 SATISFIED
+
+build_semgrep_round_a_artifact "$TMP_DIR/semgrep-round-a-finding.json" "diana.insecure-deserialization"
+check_contribution "R2: semgrep SEC-058 real finding -> VIOLATED" \
+  "$SEMGREP" "$TMP_DIR/semgrep-round-a-finding.json" "$EXPECTED_ROUND_A" SEC-058 VIOLATED
+check_contribution "R2: semgrep SEC-010 unaffected by an unrelated finding -> still SATISFIED" \
+  "$SEMGREP" "$TMP_DIR/semgrep-round-a-finding.json" "$EXPECTED_ROUND_A" SEC-010 SATISFIED
+
+# R3: since SEC-010/011/021/058 are all dynamic_required=true, the static
+# contribution alone -> UNPROVEN (matches every other dynamic_required
+# control's composition discipline), never PASS on its own.
+check_aggregate "R3: semgrep-only static contribution for a dynamic_required control -> UNPROVEN, never PASS" \
+  "$SEMGREP" "$TMP_DIR/semgrep-round-a-clean.json" "$EXPECTED_ROUND_A" UNPROVEN SEC-010
+
+build_detrepo_artifact() {
+  # build_detrepo_artifact <out_file> <served_paths_json_array>
+  local out_file="$1" paths_json="$2"
+  python3 -c "
+import hashlib, json
+env = {
+    'tool': {'name': 'diana-deterministic-repo-scan', 'version': '1'},
+    'execution': {'completed': True},
+    'target': {'repository': 'AnastasiaAurelia/agent-orchestration', 'commit': '912004328edd9d67671eb216f90b5697a6660350'},
+    'config': {},
+    'scanned_inputs': [],
+    'report': {'served_paths': json.loads('''$paths_json''')},
+}
+bound = {k: env[k] for k in ('tool', 'execution', 'target', 'config', 'scanned_inputs', 'report')}
+canonical = json.dumps(bound, sort_keys=True, separators=(',', ':'))
+env['artifact_binding'] = {'sha256': hashlib.sha256(canonical.encode()).hexdigest()}
+json.dump(env, open('$out_file', 'w'))
+"
+}
+
+python3 -c "
+import json
+json.dump({'repository': 'AnastasiaAurelia/agent-orchestration', 'commit': '912004328edd9d67671eb216f90b5697a6660350'}, open('$TMP_DIR/expected-target-detrepo.json', 'w'))
+"
+EXPECTED_DETREPO="$TMP_DIR/expected-target-detrepo.json"
+
+build_detrepo_artifact "$TMP_DIR/detrepo-clean.json" '["index.html", "app.js", "styles.css"]'
+check_contribution "R4: deterministic-repo-scan clean served-path listing -> SATISFIED" \
+  "$DETREPO" "$TMP_DIR/detrepo-clean.json" "$EXPECTED_DETREPO" SEC-064 SATISFIED
+
+build_detrepo_artifact "$TMP_DIR/detrepo-env-exposed.json" '["index.html", ".env", "app.js"]'
+check_contribution "R5: deterministic-repo-scan finds .env publicly served -> VIOLATED" \
+  "$DETREPO" "$TMP_DIR/detrepo-env-exposed.json" "$EXPECTED_DETREPO" SEC-064 VIOLATED
+
+run_adapter "$DETREPO" "$TMP_DIR/does-not-exist.json" "$EXPECTED_FULL_REPO" SEC-064
+runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
+evaluate_runs "$runs" "$TMP_DIR/r6.out.json"
+r="$(result_for "$TMP_DIR/r6.out.json" SEC-064)"
+[ "$r" = "UNPROVEN" ] && pass "R6: deterministic-repo-scan tool-missing -> explicit UNPROVEN" \
+  || fail "R6: expected UNPROVEN, got $r"
+
 echo ""
 echo "diana/security/adapters/test-adapters.sh: $pass_count passed, $fail_count failed"
 

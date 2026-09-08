@@ -62,6 +62,7 @@ sys.path.insert(0, str(SEC_DIR / "adapters"))
 import gitleaks_adapter  # noqa: E402
 import osv_scanner_adapter  # noqa: E402
 import semgrep_adapter  # noqa: E402
+import deterministic_repo_adapter  # noqa: E402
 
 sys.path.insert(0, str(SEC_DIR / "dynamic"))
 import scenarios as dynamic_scenarios  # noqa: E402
@@ -81,6 +82,7 @@ STATIC_ADAPTERS = {
     "gitleaks_adapter": gitleaks_adapter,
     "osv_scanner_adapter": osv_scanner_adapter,
     "semgrep_adapter": semgrep_adapter,
+    "deterministic_repo_adapter": deterministic_repo_adapter,
 }
 
 
@@ -124,7 +126,20 @@ def _reviewer_authorized_controls(controls: dict[str, dict[str, Any]]) -> set[st
     }
 
 
-def build_matrix(catalog: dict[str, Any], repository: str, base_sha: str, target_sha: str) -> dict[str, Any]:
+def build_matrix(
+    catalog: dict[str, Any],
+    repository: str,
+    base_sha: str,
+    target_sha: str,
+    runs: list[Any] | None = None,
+) -> dict[str, Any]:
+    """`runs`, when given, is used verbatim instead of calling the real
+    (network-dependent, since Security Track remediation round A)
+    `ci_verifier_runs.collect_trusted_runs()`. This exists so tests can
+    exercise this function deterministically and offline with a FIXED
+    runs list -- the CLI (`main()` below) never passes `runs`, so the
+    real command-line tool always uses genuine, live-collected evidence,
+    exactly as `diana-security-gate.yml` does."""
     errors = validate_catalog.validate(catalog)
     if errors:
         raise ValueError(f"catalog is not structurally valid: {errors}")
@@ -135,11 +150,19 @@ def build_matrix(catalog: dict[str, Any], repository: str, base_sha: str, target
     reviewer_authorized = _reviewer_authorized_controls(controls)
 
     # The REAL, live resulting state -- computed by actually running the
-    # real, unmodified, already-shipped pipeline with the real (today:
-    # empty) trusted verifier runs. Never fabricated, never simulated.
-    real_runs = ci_verifier_runs.collect_trusted_runs()
+    # real, unmodified, already-shipped pipeline with the real trusted
+    # verifier runs (unless a fixed `runs` list was injected for testing).
+    # Never fabricated, never simulated.
+    real_runs = runs if runs is not None else ci_verifier_runs.collect_trusted_runs()
     real_bundle = security_bundle.build_bundle(catalog, real_runs, repository, base_sha, target_sha)
     real_results = {r["control_id"]: r for r in real_bundle["results"]}
+    # Distinct from real_results: build_bundle() fills an UNPROVEN
+    # placeholder into its OWN "results" for every canonical control, so
+    # every control_id always appears there regardless of whether a real
+    # run was submitted. live_execution_exists must instead reflect the
+    # RAW `real_runs` input actually received -- the set of control_ids
+    # that genuinely got a submitted run this invocation.
+    controls_with_real_runs = {r.get("control_id") for r in real_runs if isinstance(r, dict)}
 
     rows = []
     for control_id in sorted(controls.keys()):
@@ -199,7 +222,12 @@ def build_matrix(catalog: dict[str, Any], repository: str, base_sha: str, target
                 "human_judgment_required": human_judgment_required,
                 "required_evidence": per_requirement,
                 "capability_coverage": capability_coverage,
-                "live_execution_exists": False,
+                # Derived, never asserted: a control has live_execution_exists
+                # = True iff at least one REAL run was actually submitted for
+                # it in THIS bundle (control_id appears in the real,
+                # already-computed evidence_model.py output) -- distinct from
+                # capability_coverage, which only says a path COULD exist.
+                "live_execution_exists": control_id in controls_with_real_runs,
                 "evidence_can_be_produced_today_offline": capability_coverage == "FULLY_COVERED",
                 "resulting_state": real_result.get("result", "UNPROVEN"),
                 "explicit_reason": "; ".join(real_result.get("reasons", ["no verification runs submitted for this control"])),

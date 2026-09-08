@@ -75,6 +75,13 @@ TRUSTED_FILES = (
     "diana/security/security_bundle.py",
     "diana/security/security_reducer.py",
     "diana/security/ci_verifier_runs.py",
+    # Security Track remediation round A: ci_verifier_runs.py now
+    # genuinely imports these to run live Semgrep execution -- if they
+    # are missing, ci_verifier_runs.py cannot even be imported, so they
+    # are part of "the trusted evaluator is present", not optional.
+    "diana/security/adapters/adapter_base.py",
+    "diana/security/adapters/semgrep_adapter.py",
+    "diana/security/verifiers/semgrep-rules.yml",
 )
 
 

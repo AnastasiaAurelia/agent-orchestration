@@ -758,6 +758,134 @@ documented, honest limitation, unchanged by this phase.
   control's `resulting_state` is `UNPROVEN`, exactly like every other
   control with zero trusted runs.
 
+## Security Track remediation round A
+
+Not a new architecture phase -- a focused round reducing the real gaps
+Security Phase 6 proved (21 `FULLY_COVERED` / 25 `PARTIALLY_COVERED` /
+29 `NOT_COVERED`, `resulting_state` `UNPROVEN` for all 75, zero live
+verifier execution). Two priorities, addressed honestly rather than by
+loosening any catalog mode or inventing authorization the catalog
+doesn't permit.
+
+### Priority 1: the 8 CRITICAL `NOT_COVERED` controls
+
+| Control | Outcome | How |
+|---|---|---|
+| `SEC-010` OS Command Injection | now `FULLY_COVERED` | `semgrep_adapter.py` (static half) + new dynamic scenario (dynamic half) |
+| `SEC-011` Server-Side Template Injection | now `FULLY_COVERED` | same pattern |
+| `SEC-021` JWT Signature Verification Errors | now `FULLY_COVERED` | same pattern |
+| `SEC-058` Insecure Deserialization | now `FULLY_COVERED` | same pattern |
+| `SEC-064` Exposed `.env`/Git/Backup/Config Files | now `FULLY_COVERED` | new `deterministic_repo_adapter.py` (static half, `DETERMINISTIC_REPO` mode) + new dynamic scenario (dynamic half) |
+| `SEC-035` Server-Side Request Forgery (SSRF) | now `PARTIALLY_COVERED` | dynamic scenario added; static half explicitly BLOCKED (see below) |
+| `SEC-006` Exposed API Keys/Secrets in Frontend | unchanged, explicitly BLOCKED | see below |
+| `SEC-065` Cloud/DB Service Role Key Exposure | unchanged, explicitly BLOCKED | see below |
+
+**`SEC-006`/`SEC-065` remain explicitly blocked, not silently skipped.**
+`gitleaks_adapter.py`'s module docstring has said since Phase 2 that it
+is "deliberately NOT authorized for `SEC-006` or `SEC-065` -- both make a
+claim about a specific SCOPE this adapter's target model does not yet
+represent" (its `target.scope` model only distinguishes `"full-repo"`
+today; these two controls need a genuinely different scope concept --
+"this is exactly the shipped client bundle" for `SEC-006`, "this is
+everywhere including the client bundle" for `SEC-065`). This round
+confirmed that reasoning is still correct and did not attempt a rushed
+fix: extending the adapter's scope model is real, non-trivial,
+adapter-level work deserving its own careful round, not a shortcut taken
+under this round's time pressure. **Not loosening `AUTHORIZED_EVIDENCE`
+to cover these without solving the underlying scope-representation gap
+was a deliberate choice**, consistent with "do not invent authorization
+the catalog/adapter model doesn't actually support."
+
+**`SEC-035`'s static item is explicitly blocked for a different, sharper
+reason**: its wording ("outbound request targets are validated/allow-
+listed and internal/metadata address ranges are blocked") is a claim
+about actual network-egress *behavior* (DNS-rebinding resistance,
+redirect-following, allow-list completeness), not a lexical/structural
+code pattern -- a static analyzer can flag "a URL is built from request
+input near an HTTP call," but cannot establish the stronger claim the
+catalog requires. See `semgrep_adapter.py`'s own module docstring for the
+full reasoning. Its dynamic item (a real negative test) is not subject to
+this limitation and was added normally.
+
+### Priority 2: real trusted live verifier execution
+
+`ci_verifier_runs.py` no longer always returns `[]`. It now genuinely
+installs (into an ephemeral venv, on demand, no workflow-file changes
+needed) and runs **Semgrep** -- a real, independently-maintained static
+analyzer -- against the actual checked-out repository, using this
+repository's own PINNED, committed rule file
+(`diana/security/verifiers/semgrep-rules.yml`), never a live external
+rule registry (`--config=auto`/`p/...` would depend on a remote registry
+at scan time, which is neither deterministic nor reproducible).
+
+- **Target identity is self-determined from real git state**
+  (`git rev-parse HEAD`, `git remote get-url origin`), never from an
+  argument or environment variable a PR could influence.
+- **Unavailable tool != PASS; tool error != PASS; no finding != PASS.**
+  Any failure at any step (git identity, venv/pip install, Semgrep
+  execution, JSON parsing) degrades to the exact same `tool_unavailable`
+  path Phase 2 already built and tested -- explicit `UNPROVEN`, never a
+  crash, never fabricated evidence. A top-level guard additionally
+  ensures `collect_trusted_runs()` itself can never raise.
+  `test-ci-verifier-runs.sh` proves this degradation path directly
+  (mocking tool unavailability) without depending on network access.
+- **No PR-head executable code.** `diana-security-gate.yml`'s
+  `pull_request_target` trust root (Security Phase 5's correction) means
+  this script always runs from the protected base; Semgrep itself reads
+  files as pattern-matching DATA, never executes/imports/evaluates them.
+- **No secrets, no synthetic evidence outside tests.** The artifact this
+  module builds always wraps Semgrep's own real, just-produced JSON
+  output; synthetic reports exist only in the test suite.
+
+**Real, honest result on this repository today**: Semgrep finds zero
+matches for its 4 pinned rules against this repository's own code, so
+`SEC-010`/`SEC-011`/`SEC-021`/`SEC-058` each gain a genuine `SATISFIED`
+contribution for their static half -- their `resulting_state` remains
+`UNPROVEN` (they are `dynamic_required=true` and no live dynamic
+execution exists yet), but the REASON is now substantively different:
+"missing required evidence: `<the specific dynamic negative-test item>`"
+instead of the blanket "no verification runs submitted for this
+control." This is real, if partial, progress -- not yet PASS anywhere,
+because reaching PASS also needs the dynamic half, which remains
+capability-only (a registered scenario, not live execution) after this
+round.
+
+### New totals after this round
+
+| capability_coverage | before | after |
+|---|---|---|
+| `FULLY_COVERED` | 21 | 26 |
+| `PARTIALLY_COVERED` | 25 | 26 |
+| `NOT_COVERED` | 29 | 23 |
+
+`resulting_state_counts` remains `{PASS: 0, FAIL: 0, NOT_APPLICABLE: 0,
+UNPROVEN: 75, ERROR: 0}` -- unchanged in aggregate shape, though 4
+controls' `UNPROVEN` reason is now substantively different (real partial
+evidence, not blanket absence) as described above.
+`live_execution_wired_count` is 4, up from 0.
+
+### What this round does not do
+
+- Does not wire live DYNAMIC_API/DYNAMIC_BROWSER/DYNAMIC_DB/
+  DYNAMIC_CONCURRENCY/PROVIDER_SANDBOX execution, or any live semantic
+  reviewer session, into CI -- only Semgrep (`STATIC_ANALYZER`) runs for
+  real. Every dynamic scenario and every reviewer authorization remains
+  capability-only.
+- Does not wire Gitleaks or the new `deterministic_repo_adapter.py` into
+  live execution -- both remain capability-only; a future round adding
+  them would extend `ci_verifier_runs.py` in the same pattern this round
+  established for Semgrep, without needing to change `security_bundle.py`,
+  `security_reducer.py`, or the Gate integration at all.
+- Does not claim PASS for any control -- `resulting_state_counts` still
+  has zero `PASS` after this round; see the exact counts in this round's
+  PR description / final report.
+- Does not build a generic scanner platform -- `ci_verifier_runs.py`
+  wires in exactly one real verifier family, using this repository's own
+  pinned rules, not a configurable multi-tool framework.
+- Does not change `catalog.json`'s modes, or authorize any adapter for a
+  control/requirement its catalog `verification.modes` doesn't already
+  structurally permit.
+
 ## Future phases (not started here)
 
 - This README does not promise the exact shape of future work ahead of
@@ -774,10 +902,17 @@ bash diana/security/dynamic/test-dynamic.sh
 bash diana/security/reviewer/test-reviewer.sh
 bash diana/security/test-security-gate.sh
 bash diana/security/test-coverage-matrix.sh
+bash diana/security/test-ci-verifier-runs.sh
 ```
 
-All of the above are deterministic, offline, and make no changes to this
-repository. `test-security-gate.sh` additionally creates and destroys
+Every suite above is deterministic and offline for its CORE assertions.
+`test-ci-verifier-runs.sh` and (since Security Track remediation round A)
+`test-security-gate.sh`/`test-coverage-matrix.sh` additionally attempt
+ONE real, network-dependent end-to-end check each (real Semgrep
+installation and execution) -- these SKIP gracefully (never fail the
+suite) if network/pip install is unavailable in the current environment,
+since the deterministic checks alongside them already prove the
+underlying logic offline. `test-security-gate.sh` additionally creates and destroys
 small, ephemeral, local-only `git init` scratch repositories under a
 `mktemp -d` directory (to prove the protected-base extraction end to end,
 S2+S3) -- no network access and no changes to this repository.
