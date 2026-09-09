@@ -102,6 +102,7 @@
 !diana/security/test-security-gate.sh
 !diana/security/coverage_matrix.py
 !diana/security/test-coverage-matrix.sh
+!diana/security/ROUND_D_ACTIVATION_PROBE.md
 !diana/security/adapters/
 !diana/security/adapters/README.md
 !diana/security/adapters/adapter_base.py
