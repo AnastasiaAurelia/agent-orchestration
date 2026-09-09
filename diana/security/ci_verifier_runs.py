@@ -71,7 +71,21 @@ state after these rounds, not a claim of completeness. See
   state of the checkout it is running in (`git rev-parse HEAD`, `git
   remote get-url origin`) -- which, because `diana-security-gate.yml`
   runs under `pull_request_target` with a default (base-rooted)
-  checkout, is always the protected base, never the PR head.
+  checkout, is always the protected base, never the PR head. This is
+  the EXECUTOR trust root for Semgrep/Gitleaks/the deterministic repo
+  scan/the dynamic scenario: the code that runs, and the files it
+  scans, always come from the protected base.
+  `collect_github_review_runs()` (Security Track remediation round E)
+  is the one deliberate exception to "target == base": a GitHub human
+  review is genuinely, by GitHub's own design, bound to the PR HEAD
+  commit under review, never the base -- so REVIEW TARGET IDENTITY is
+  bound to `DIANA_HEAD_SHA` (the workflow's own
+  `github.event.pull_request.head.sha`, strictly validated as a full
+  40-hex SHA and cross-checked against GitHub's live PR-metadata API
+  response), while the code that fetches and evaluates that review
+  still runs only from the same protected-base executor as everything
+  else here -- PR head is DATA/IDENTITY ONLY, never checked out,
+  fetched, imported, or executed.
 - **No PR-head executable code.** Both Semgrep and Gitleaks are
   pattern-matching TOOLS: they read the checkout's files as DATA (text/
   AST/regex matching), never executing, importing, or evaluating
@@ -915,6 +929,41 @@ def _pr_number_from_env() -> int | None:
     return int(raw) if raw.isdigit() else None
 
 
+_FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _valid_full_sha(value: Any) -> bool:
+    """Strict shape check for a real git/GitHub commit SHA: exactly 40
+    lowercase hex characters. Anything else (short SHA, mixed case,
+    non-hex, wrong length, non-string, empty) fails closed -- this
+    function never guesses or normalizes, it only accepts what a real
+    SHA already looks like."""
+    return isinstance(value, str) and bool(_FULL_SHA_RE.fullmatch(value))
+
+
+def _head_sha_from_env() -> str | None:
+    """The PR HEAD commit SHA is read from an environment variable the
+    WORKFLOW itself sets from GitHub's own
+    `github.event.pull_request.head.sha` (see `DIANA_HEAD_SHA` in
+    `diana-security-gate.yml`) -- GitHub's own determination of which
+    commit is under review, not a string a PR could type into its own
+    body or a commit message. Strictly validated as a full 40-hex SHA;
+    absent, truncated, or malformed -> None, degrading to tool-
+    unavailable exactly like a missing PR number already does (fail
+    closed, never guess).
+
+    This is the REVIEW TARGET identity (Security Track remediation
+    round E) -- deliberately distinct from `git_repository_identity()`'s
+    commit, which names the EXECUTOR trust root (the protected base this
+    script itself runs from). A GitHub review's own `commit_id` is bound
+    by GitHub to the PR HEAD at the time of review, never to the base;
+    conflating the two (the pre-round-E defect) meant a review's
+    `commit_id` could never match the executor's base commit, so every
+    genuine, current review was silently treated as stale/absent."""
+    raw = os.environ.get("DIANA_HEAD_SHA", "").strip()
+    return raw if _valid_full_sha(raw) else None
+
+
 def _parse_human_review_blocks(body: str) -> list[dict[str, Any]]:
     """Extracts every well-formed `<!-- DIANA:HUMAN-REVIEW {...}
     DIANA:HUMAN-REVIEW -->` JSON object from a real GitHub review body.
@@ -985,24 +1034,51 @@ def collect_github_review_runs(repo_root: str = ".") -> list[dict[str, Any]]:
     control's own required_evidence item), and ingests each through the
     real, unmodified adapter.
 
-    Trust properties: the PR number comes from the workflow's own
-    GitHub-event context (`_pr_number_from_env`), never PR content.
+    Target binding (Security Track remediation round E; see the module
+    docstring's "Trust properties" section for the full rationale). Two
+    genuinely different identities are involved and must never be
+    conflated:
+
+    - EXECUTOR trust root: `git_repository_identity()`'s commit -- the
+      protected base this script itself runs from. Used ONLY to derive
+      `repository` here; the base commit itself is not the review
+      target and is deliberately not enforced against `DIANA_BASE_SHA`
+      (main may legitimately have advanced between event dispatch and
+      this checkout -- that is not a defect to fail closed on).
+    - REVIEW target identity: `DIANA_HEAD_SHA` (`_head_sha_from_env()`),
+      the workflow's own `github.event.pull_request.head.sha`, strictly
+      validated as a full 40-hex SHA. This is the commit a real GitHub
+      review's `commit_id` is actually bound to (verified empirically:
+      PR #37's own real review carried `commit_id` equal to PR #37's
+      HEAD, never its base) -- so it is what `expected_target["commit"]`
+      and the staleness check below are bound to, never the base
+      commit. `DIANA_HEAD_SHA` is cross-checked against GitHub's own
+      live PR-metadata API response (`pr_data["head"]["sha"]`, plus PR
+      number and base-repository full_name) before being trusted for
+      anything -- a mismatch (malformed env value, or the event and the
+      live API state disagreeing, e.g. a new push landed between event
+      dispatch and this fetch) degrades to tool-unavailable rather than
+      guessing which source to believe. PR head is DATA/IDENTITY ONLY
+      throughout: never checked out, fetched, imported, or executed.
+
     Reviewer identity (`login`, `review_id`) is copied verbatim from the
     real `gh api .../reviews` response. Independence
     (`reviewer_is_pr_author`/`reviewer_is_diana_agent`) is computed HERE,
     by trusted code, from the PR's real fetched author login and the
     fixed `DIANA_AGENT_LOGIN` constant -- never self-declared by a PR or
     a review body. A review whose `commit_id` does not exactly match the
-    commit currently being evaluated is skipped BEFORE even reaching the
-    adapter (defense in depth; `github_review_adapter.py`'s own target
-    binding would independently reject it too) -- this is exactly how
-    staleness after a new push is handled: no new mechanism, the same
-    exact-commit binding this whole track already uses everywhere.
+    PR HEAD SHA currently being evaluated is skipped BEFORE even
+    reaching the adapter (defense in depth; `github_review_adapter.py`'s
+    own target binding would independently reject it too) -- this is
+    exactly how staleness after a new push is handled: no new
+    mechanism, the same exact-commit binding this whole track already
+    uses everywhere, now bound to the correct (head, not base) commit.
     `COMMENTED`/`DISMISSED`/`PENDING` review states are not a terminal
     judgment and are skipped. Any failure at any step (PR number
-    unavailable, git identity unavailable, `gh api` failure) degrades to
-    `github_review_adapter.ingest(catalog_controls, None, ...)` -- the
-    explicit tool-unavailable path, never a crash, never fabricated
+    unavailable, head SHA unavailable/malformed, git identity
+    unavailable, `gh api` failure, PR-metadata/event mismatch) degrades
+    to `github_review_adapter.ingest(catalog_controls, None, ...)` --
+    the explicit tool-unavailable path, never a crash, never fabricated
     evidence."""
     identity = "ci_verifier_runs::github-review"
 
@@ -1011,16 +1087,35 @@ def collect_github_review_runs(repo_root: str = ".") -> list[dict[str, Any]]:
     catalog_controls = {c["id"]: c for c in catalog["controls"]}
     control_ids = sorted(github_review_adapter._authorized_control_ids(catalog_controls))
 
-    target = git_repository_identity(repo_root)
+    base_target = git_repository_identity(repo_root)
     pr_number = _pr_number_from_env()
-    if target is None or pr_number is None:
+    head_sha = _head_sha_from_env()
+    if base_target is None or pr_number is None or head_sha is None:
         return github_review_adapter.ingest(catalog_controls, None, control_ids, identity, None)
-    repository, commit = target
-    expected_target = {"repository": repository, "commit": commit}
+    repository, _base_commit = base_target
+    expected_target = {"repository": repository, "commit": head_sha}
 
     pr_data = _gh_api(f"repos/{repository}/pulls/{pr_number}")
     reviews = _gh_api(f"repos/{repository}/pulls/{pr_number}/reviews")
     if not isinstance(pr_data, dict) or not isinstance(reviews, list):
+        return github_review_adapter.ingest(catalog_controls, None, control_ids, identity, expected_target)
+
+    # Cross-check GitHub's own live PR-metadata response against the
+    # trusted, workflow-supplied event identity before trusting anything
+    # derived from it -- fail closed on any disagreement rather than
+    # guess which source to believe (e.g. a push landing between event
+    # dispatch and this fetch would move the real head out from under
+    # `DIANA_HEAD_SHA`; safest to treat that window as tool-unavailable).
+    pr_head = pr_data.get("head")
+    pr_base = pr_data.get("base")
+    pr_base_repo = pr_base.get("repo") if isinstance(pr_base, dict) else None
+    pr_base_repo_full_name = pr_base_repo.get("full_name") if isinstance(pr_base_repo, dict) else None
+    if (
+        pr_data.get("number") != pr_number
+        or pr_base_repo_full_name != repository
+        or not isinstance(pr_head, dict)
+        or pr_head.get("sha") != head_sha
+    ):
         return github_review_adapter.ingest(catalog_controls, None, control_ids, identity, expected_target)
 
     pr_author_login = pr_data.get("user", {}).get("login") if isinstance(pr_data.get("user"), dict) else None
@@ -1046,8 +1141,8 @@ def collect_github_review_runs(repo_root: str = ".") -> list[dict[str, Any]]:
                 or not isinstance(submitted_at, str) or not submitted_at
             ):
                 continue
-            if commit_id != commit:
-                continue  # stale relative to the commit being evaluated -- never attempted
+            if commit_id != head_sha:
+                continue  # stale relative to the PR HEAD being evaluated -- never attempted
             if state not in ("APPROVED", "CHANGES_REQUESTED"):
                 continue  # COMMENTED/DISMISSED/PENDING: not a terminal judgment
             judgment = "APPROVE" if state == "APPROVED" else "REQUEST_CHANGES"
@@ -1064,7 +1159,7 @@ def collect_github_review_runs(repo_root: str = ".") -> list[dict[str, Any]]:
                     continue
                 for requirement in control["required_evidence"]:
                     envelope = build_github_review_envelope(
-                        repository, commit, reviewer_login, review_id, control_id,
+                        repository, head_sha, reviewer_login, review_id, control_id,
                         requirement, judgment, block["rationale"], independence, submitted_at,
                     )
                     artifact_path = tmp / f"github-review-{artifact_index}.json"
