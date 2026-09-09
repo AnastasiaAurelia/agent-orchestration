@@ -338,22 +338,50 @@ finally:
 # (no real network dependency for this specific check -- the real
 # end-to-end check below separately proves genuine `gh api` connectivity
 # when available).
-_FAKE_COMMIT = "deadbeef" * 5
-_FAKE_PR = {"user": {"login": "pr-author"}}
+#
+# Round E fixture note: BASE and HEAD are deliberately DIFFERENT fake
+# commits below (the pre-round-E fixture used a single shared fake
+# commit for both -- that collapse is exactly what let the base/head
+# target-binding defect pass every prior test undetected: a review's
+# commit_id was checked against the mocked "base", and the mock made
+# base equal head by construction).
+_FAKE_BASE_COMMIT = "baseb45e" * 5
+_FAKE_HEAD_SHA = "deadbeef" * 5
+_FAKE_PR = {
+    "user": {"login": "pr-author"},
+    "number": 99,
+    "head": {"sha": _FAKE_HEAD_SHA},
+    "base": {"repo": {"full_name": "owner/repo"}},
+}
 
 
-def _fake_gh_api_factory(reviews):
+def _fake_gh_api_factory(reviews, pr=None):
     def _fake(path):
         if path.endswith("/pulls/99"):
-            return _FAKE_PR
+            return pr if pr is not None else _FAKE_PR
         if path.endswith("/pulls/99/reviews"):
             return reviews
         return None
     return _fake
 
 
-m.git_repository_identity = lambda repo_root: ("owner/repo", _FAKE_COMMIT)
+# Captured BEFORE any mocking below -- the real, file-backed function,
+# used only by the [I] no-PR-head-execution static source check further
+# down (by the time that check runs, m._gh_api has long since been
+# overridden by test mocks, whose closures aren't source-inspectable).
+_real_gh_api_fn = m._gh_api
+
+m.git_repository_identity = lambda repo_root: ("owner/repo", _FAKE_BASE_COMMIT)
 os.environ["DIANA_PR_NUMBER"] = "99"
+os.environ["DIANA_HEAD_SHA"] = _FAKE_HEAD_SHA
+
+# _valid_full_sha / _head_sha_from_env: strict shape checks (round E).
+check("_valid_full_sha accepts a real-shaped 40-hex SHA", m._valid_full_sha(_FAKE_HEAD_SHA))
+check("_valid_full_sha rejects a short SHA", not m._valid_full_sha(_FAKE_HEAD_SHA[:7]))
+check("_valid_full_sha rejects uppercase hex", not m._valid_full_sha(_FAKE_HEAD_SHA.upper()))
+check("_valid_full_sha rejects non-hex characters", not m._valid_full_sha("z" * 40))
+check("_valid_full_sha rejects non-string", not m._valid_full_sha(None))
+check("_head_sha_from_env reads a valid SHA from DIANA_HEAD_SHA", m._head_sha_from_env() == _FAKE_HEAD_SHA)
 
 # No PR number at all -> tool-unavailable for every authorized control.
 del os.environ["DIANA_PR_NUMBER"]
@@ -361,10 +389,30 @@ gr_no_pr = m.collect_github_review_runs(".")
 check("no PR number set -> every authorized control degrades to UNKNOWN", all(r["applicability"] == "UNKNOWN" for r in gr_no_pr) and len(gr_no_pr) >= 30)
 os.environ["DIANA_PR_NUMBER"] = "99"
 
+# [D] malformed/missing DIANA_HEAD_SHA -> fail closed, never guessed,
+# never falls back to the base commit.
+del os.environ["DIANA_HEAD_SHA"]
+gr_no_head = m.collect_github_review_runs(".")
+check("[D] no DIANA_HEAD_SHA set -> every authorized control degrades to UNKNOWN", all(r["applicability"] == "UNKNOWN" for r in gr_no_head) and len(gr_no_head) >= 30)
+os.environ["DIANA_HEAD_SHA"] = "short-and-not-hex"
+check("[D] _head_sha_from_env rejects a malformed DIANA_HEAD_SHA", m._head_sha_from_env() is None)
+gr_bad_head = m.collect_github_review_runs(".")
+check("[D] malformed DIANA_HEAD_SHA -> every authorized control degrades to UNKNOWN (fail closed)", all(r["applicability"] == "UNKNOWN" for r in gr_bad_head))
+os.environ["DIANA_HEAD_SHA"] = _FAKE_HEAD_SHA
+
 # gh api totally unavailable -> tool-unavailable.
 m._gh_api = lambda path: None
 gr_api_down = m.collect_github_review_runs(".")
 check("gh api unavailable -> every authorized control degrades to UNKNOWN", all(r["applicability"] == "UNKNOWN" for r in gr_api_down))
+
+# [C] DIANA_HEAD_SHA disagrees with GitHub's own live PR-metadata
+# head.sha -> fail closed rather than trust either source alone (e.g. a
+# push landed between event dispatch and this fetch).
+_mismatched_pr = dict(_FAKE_PR)
+_mismatched_pr["head"] = {"sha": "cafebabe" * 5}
+m._gh_api = _fake_gh_api_factory([], pr=_mismatched_pr)
+gr_head_mismatch = m.collect_github_review_runs(".")
+check("[C] DIANA_HEAD_SHA != PR-metadata head.sha -> every authorized control degrades to UNKNOWN (fail closed)", all(r["applicability"] == "UNKNOWN" for r in gr_head_mismatch))
 
 _good_body = (
     '<!-- DIANA:HUMAN-REVIEW {"control_id": "SEC-016", '
@@ -372,10 +420,15 @@ _good_body = (
     'DIANA:HUMAN-REVIEW -->'
 )
 
-# Genuine, independent, substantiated APPROVE -> real PASS through the
-# FULL live orchestration + the real, unmodified evidence_model.py.
+# [A] Genuine, independent, substantiated APPROVE bound to the CURRENT
+# PR HEAD -> real PASS through the FULL live orchestration + the real,
+# unmodified evidence_model.py. commit_id == _FAKE_HEAD_SHA, NOT
+# _FAKE_BASE_COMMIT -- exactly how a real GitHub review is bound
+# (verified against PR #37's own real review, whose commit_id equaled
+# PR #37's HEAD, never its base), and exactly the case the pre-round-E
+# defect silently rejected.
 m._gh_api = _fake_gh_api_factory([
-    {"user": {"login": "a-codeowner"}, "id": 555, "state": "APPROVED", "commit_id": _FAKE_COMMIT, "body": _good_body, "submitted_at": "2026-09-09T00:00:00Z"}
+    {"user": {"login": "a-codeowner"}, "id": 555, "state": "APPROVED", "commit_id": _FAKE_HEAD_SHA, "body": _good_body, "submitted_at": "2026-09-09T00:00:00Z"}
 ])
 gr_runs_happy = m.collect_github_review_runs(".")
 gr_catalog = json.load(open("diana/security/catalog.json"))
@@ -383,60 +436,125 @@ gr_controls_all = {c["id"]: c for c in gr_catalog["controls"]}
 gr_agg = evidence_model.evaluate(gr_runs_happy, gr_controls_all)
 gr_sec016 = next(r for r in gr_agg if r["control_id"] == "SEC-016")
 check(
-    "live collect_github_review_runs(): a real, independent, structured review reaches genuine PASS "
-    "through the unmodified evidence_model.py",
+    "[A] live collect_github_review_runs(): a real, independent, structured review bound to the "
+    "current PR HEAD reaches genuine PASS through the unmodified evidence_model.py",
     gr_sec016["result"] == "PASS",
 )
+# [H] the contribution is bound to exactly the reviewed control and its
+# real catalog required_evidence strings -- never a blanket grant to
+# every control, never a fabricated requirement string.
+gr_happy_sec016_runs = [r for r in gr_runs_happy if r["control_id"] == "SEC-016"]
+check(
+    "[H] SEC-016 contribution covers exactly its real catalog required_evidence strings",
+    {e["requirement"] for r in gr_happy_sec016_runs for e in r["evidence"]} == set(gr_controls_all["SEC-016"]["required_evidence"]),
+)
+check(
+    "[H] no other control receives a contribution from this single-control review block",
+    all(r["evidence"] == [] for r in gr_runs_happy if r["control_id"] != "SEC-016"),
+)
 
-# DIANA-AGENT "reviewing" its own PR must never be trusted, even with a
+# [F] DIANA-AGENT "reviewing" its own PR must never be trusted, even with a
 # well-formed, substantiated block -- no self-certification path.
 m._gh_api = _fake_gh_api_factory([
-    {"user": {"login": "DIANA-AGENT"}, "id": 556, "state": "APPROVED", "commit_id": _FAKE_COMMIT, "body": _good_body, "submitted_at": "2026-09-09T00:00:00Z"}
+    {"user": {"login": "DIANA-AGENT"}, "id": 556, "state": "APPROVED", "commit_id": _FAKE_HEAD_SHA, "body": _good_body, "submitted_at": "2026-09-09T00:00:00Z"}
 ])
 gr_runs_self = m.collect_github_review_runs(".")
 gr_self_sec016 = [r for r in gr_runs_self if r["control_id"] == "SEC-016"]
 check(
-    "DIANA-AGENT self-review is rejected (ERROR, never trusted) even with a well-formed block",
+    "[F] DIANA-AGENT self-review is rejected (ERROR, never trusted) even with a well-formed block",
     all(r["tool_error"] is not None and r["evidence"] == [] for r in gr_self_sec016),
 )
 
-# The PR author reviewing their own PR must never be trusted either.
+# [E] The PR author reviewing their own PR must never be trusted either.
 m._gh_api = _fake_gh_api_factory([
-    {"user": {"login": "pr-author"}, "id": 557, "state": "APPROVED", "commit_id": _FAKE_COMMIT, "body": _good_body, "submitted_at": "2026-09-09T00:00:00Z"}
+    {"user": {"login": "pr-author"}, "id": 557, "state": "APPROVED", "commit_id": _FAKE_HEAD_SHA, "body": _good_body, "submitted_at": "2026-09-09T00:00:00Z"}
 ])
 gr_runs_author = m.collect_github_review_runs(".")
 gr_author_sec016 = [r for r in gr_runs_author if r["control_id"] == "SEC-016"]
 check(
-    "PR author self-review is rejected (ERROR, never trusted) even with a well-formed block",
+    "[E] PR author self-review is rejected (ERROR, never trusted) even with a well-formed block",
     all(r["tool_error"] is not None and r["evidence"] == [] for r in gr_author_sec016),
 )
 
-# A review against a SUPERSEDED commit (stale after a new push) must
-# never be attempted -- staleness handling, no new mechanism.
+# [B] A review bound to an OLDER head SHA (superseded after a new push)
+# must never be attempted -- staleness handling, no new mechanism, now
+# correctly measured against the PR HEAD, not the base.
 m._gh_api = _fake_gh_api_factory([
-    {"user": {"login": "a-codeowner"}, "id": 558, "state": "APPROVED", "commit_id": "cafebabe" * 5, "body": _good_body, "submitted_at": "2026-09-09T00:00:00Z"}
+    {"user": {"login": "a-codeowner"}, "id": 558, "state": "APPROVED", "commit_id": "oldhead0" * 5, "body": _good_body, "submitted_at": "2026-09-09T00:00:00Z"}
 ])
 gr_runs_stale = m.collect_github_review_runs(".")
 gr_stale_sec016 = [r for r in gr_runs_stale if r["control_id"] == "SEC-016"]
-check("stale review (commit_id != current head) -> no contribution", all(r["evidence"] == [] and r["tool_error"] is None for r in gr_stale_sec016))
+check("[B] review bound to an older head SHA (commit_id != current PR HEAD) -> no contribution", all(r["evidence"] == [] and r["tool_error"] is None for r in gr_stale_sec016))
 
-# A bare "LGTM" approval (no structured block at all) never becomes
+# A review bound to the BASE commit (the pre-round-E defect's own
+# accidental comparison target) must ALSO never be attempted -- proves
+# the fix actually rebinds to HEAD, rather than merely moving the bug.
+m._gh_api = _fake_gh_api_factory([
+    {"user": {"login": "a-codeowner"}, "id": 561, "state": "APPROVED", "commit_id": _FAKE_BASE_COMMIT, "body": _good_body, "submitted_at": "2026-09-09T00:00:00Z"}
+])
+gr_runs_base_bound = m.collect_github_review_runs(".")
+gr_base_bound_sec016 = [r for r in gr_runs_base_bound if r["control_id"] == "SEC-016"]
+check(
+    "a review bound to the BASE commit (not the PR HEAD) -> no contribution (proves round E rebinds to HEAD, doesn't just relocate the bug)",
+    all(r["evidence"] == [] and r["tool_error"] is None for r in gr_base_bound_sec016),
+)
+
+# [G] A bare "LGTM" approval (no structured block at all) never becomes
 # evidence for any control.
 m._gh_api = _fake_gh_api_factory([
-    {"user": {"login": "a-codeowner"}, "id": 559, "state": "APPROVED", "commit_id": _FAKE_COMMIT, "body": "LGTM, ship it!", "submitted_at": "2026-09-09T00:00:00Z"}
+    {"user": {"login": "a-codeowner"}, "id": 559, "state": "APPROVED", "commit_id": _FAKE_HEAD_SHA, "body": "LGTM, ship it!", "submitted_at": "2026-09-09T00:00:00Z"}
 ])
 gr_runs_lgtm = m.collect_github_review_runs(".")
-check("bare LGTM approval -> zero contributions for every control", all(r["evidence"] == [] for r in gr_runs_lgtm))
+check("[G] bare LGTM approval -> zero contributions for every control", all(r["evidence"] == [] for r in gr_runs_lgtm))
 
 # A COMMENTED review (not a terminal judgment) never becomes evidence
 # even with a well-formed block.
 m._gh_api = _fake_gh_api_factory([
-    {"user": {"login": "a-codeowner"}, "id": 560, "state": "COMMENTED", "commit_id": _FAKE_COMMIT, "body": _good_body, "submitted_at": "2026-09-09T00:00:00Z"}
+    {"user": {"login": "a-codeowner"}, "id": 560, "state": "COMMENTED", "commit_id": _FAKE_HEAD_SHA, "body": _good_body, "submitted_at": "2026-09-09T00:00:00Z"}
 ])
 gr_runs_commented = m.collect_github_review_runs(".")
 check("COMMENTED review state -> zero contributions (not a terminal judgment)", all(r["evidence"] == [] for r in gr_runs_commented))
 
+# [I] No PR-head code is checked out or executed anywhere in the
+# GitHub-review collection path -- a static check against the real,
+# unmodified source of every function in that path (PR head must remain
+# DATA/IDENTITY ONLY: an opaque SHA string, never a checkout/subprocess
+# target).
+import inspect as _inspect
+# _gh_api is deliberately checked SEPARATELY below: it is the one
+# function in this path allowed a subprocess call at all -- a read-only
+# `gh api <path>` GET (never PR content, never a checkout/fetch, never
+# -X/a request body). Every OTHER function in the review-collection
+# path must contain no subprocess/exec/eval/checkout of any kind.
+_gr_orchestration_fns = (
+    m.collect_github_review_runs, m._head_sha_from_env, m._pr_number_from_env,
+    m.build_github_review_envelope, m._parse_human_review_blocks,
+)
+_gr_orchestration_source = "".join(_inspect.getsource(fn) for fn in _gr_orchestration_fns)
+check(
+    "[I] no subprocess/exec/eval call anywhere in the GitHub-review orchestration functions "
+    "(docstrings may discuss the protected-base checkout in prose; no such function ever spawns one)",
+    "subprocess" not in _gr_orchestration_source and "_run(" not in _gr_orchestration_source
+    and "exec(" not in _gr_orchestration_source and "eval(" not in _gr_orchestration_source,
+)
+# _gh_api's CODE (not its docstring, which discusses -X only in prose to
+# disclaim it) makes exactly one subprocess call, and it is exactly the
+# read-only `gh api <path>` GET -- never a checkout, never -X, never a
+# request body, never any other git/gh subcommand.
+_gh_api_code_lines = [
+    line for line in _inspect.getsource(_real_gh_api_fn).splitlines()
+    if not line.strip().startswith(("#", '"""')) and '"""' not in line
+]
+_gh_api_code = "\n".join(_gh_api_code_lines)
+check(
+    "[I] _gh_api's only subprocess call is a read-only `gh api <path>` GET -- no checkout, no -X, no request body",
+    _gh_api_code.count("_run(") == 1
+    and '_run(["gh", "api", path], timeout=30)' in _gh_api_code
+    and "checkout" not in _gh_api_code,
+)
+
 os.environ.pop("DIANA_PR_NUMBER", None)
+os.environ.pop("DIANA_HEAD_SHA", None)
 
 # collect_trusted_runs() must never raise even under a total internal
 # failure -- the absolute safety net, across all five live families.
