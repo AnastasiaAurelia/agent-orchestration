@@ -18,6 +18,7 @@
 !.github/CODEOWNERS
 !.github/pull_request_template.md
 !README.md
+!ROUND_E_ACTIVATION_PROBE.md
 !install.sh
 !verify.sh
 !test-verify.sh
