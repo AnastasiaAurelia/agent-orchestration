@@ -36,6 +36,10 @@ CONTRACT_RUN_ID_MISMATCH = "contract-run-id-mismatch"
 CONTRACT_NOT_SAFE_D1 = "contract-not-safe-d1"
 READ_SCOPE_MALFORMED = "read-scope-malformed"
 
+# --- Live turn (M2-D10): a failed turn is a process failure, not a partial result ---
+HERMES_TURN_FAILED = "hermes-turn-failed"
+HERMES_PROVIDER_UNAVAILABLE = "hermes-provider-unavailable"
+
 # --- Run-time process failures (spec: failure-semantics table) ---
 REPO_PROFILE_FAILED = "repo-profile-failed"
 SCANNER_RAISED = "scanner-raised"
