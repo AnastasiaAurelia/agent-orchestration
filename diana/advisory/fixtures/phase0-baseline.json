@@ -1,0 +1,33 @@
+{
+  "description": "Empirically measured Diana behavior on the M1 tiny static fixture BEFORE the D1 advisory path existed. This is the 'before' half of acceptance criterion AC-12; it is a recorded measurement, not an aspiration.",
+  "spec": "docs/architecture/HERMES-RUNTIME-M1.md",
+  "measured_on": "2026-09-13",
+  "fixture": "diana/advisory/fixtures/repo",
+  "planted_vulnerability": {
+    "rule_id": "DOM-XSS-001",
+    "file": "app.js",
+    "construct": "el.innerHTML = location.hash"
+  },
+  "diana_preflight": {
+    "checks": 11,
+    "pass": 5,
+    "skip": 5,
+    "blocker": "build-test-evidence-present"
+  },
+  "diana_gate": {
+    "result": "FAIL",
+    "reason": "blocker preflight failed: build-test-evidence-present"
+  },
+  "dom_xss_identified": false,
+  "security_track_against_diana": {
+    "controls_total": 75,
+    "controls_unproven": 75,
+    "reducer": "REQUIRE_HUMAN",
+    "breakdown": {
+      "applicability_unknown": 37,
+      "no_verification_runs": 33,
+      "partial_evidence_missing_verifier": 5
+    },
+    "note": "Repository applicability alone cannot make the Security Track PASS."
+  }
+}
