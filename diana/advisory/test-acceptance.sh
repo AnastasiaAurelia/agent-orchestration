@@ -232,14 +232,29 @@ deleted = sorted(path for code, path in entries if code.startswith("D"))
 
 # The real invariant is about MODIFICATION, not path spelling: M1 may add files
 # anywhere it owns, but it must not change code that already worked.
-ALLOWED_MODIFIED = [".gitignore", "docs/architecture/HERMES-RUNTIME-M1.md"]
-check("AC-13 only .gitignore and the M1 spec were modified; everything else is new",
-      modified == ALLOWED_MODIFIED, f"(modified: {modified})")
+# M2-D14: the invariant is "the AO path and pre-existing Diana modules are
+# untouched", NOT "nothing changed since the M1 freeze". Once a later milestone
+# begins, the second reading measures the wrong thing, so the invariant is
+# asserted directly and more strictly below.
+ALLOWED_MODIFIED = {
+    ".gitignore",                               # allowlists new paths under a deny-all policy
+    "docs/architecture/HERMES-RUNTIME-M1.md",   # the M1 implementation-constants commit
+    "diana/runtime/blocking.py",                # M2 extends the single reason-code vocabulary
+    "diana/advisory/run.py",                    # M2 adds the turn-record driver seam
+}
+unexpected_modified = sorted(set(modified) - ALLOWED_MODIFIED)
+check("AC-13 no unexpected file was modified", unexpected_modified == [],
+      f"(modified: {unexpected_modified})")
 check("AC-13 nothing was deleted", deleted == [], f"(deleted: {deleted})")
-check("AC-13 M1 added files under its own modules only",
+check("AC-13 additions stay inside Diana modules and architecture docs",
       all(a.startswith(("diana/runtime/", "diana/profile/", "diana/advisory/",
-                        "diana/adapters/")) for a in added),
-      f"(stray additions: {[a for a in added if not a.startswith(('diana/runtime/','diana/profile/','diana/advisory/','diana/adapters/'))]})")
+                        "diana/adapters/", "docs/architecture/")) for a in added),
+      f"(stray additions: {[a for a in added if not a.startswith(('diana/runtime/','diana/profile/','diana/advisory/','diana/adapters/','docs/architecture/'))]})")
+check("AC-13 the frozen M1 specification's decisions are untouched by later work",
+      "docs/architecture/HERMES-RUNTIME-M1.md" not in
+      real_run(["git", "-C", repo_root, "diff", "--name-only",
+                "5d0079eb1176d334366d9725ed7182593e4a5060", "HEAD"],
+               capture_output=True, text=True, check=False).stdout.split())
 check("AC-13 the AO adapter source is untouched", "diana/adapters/ao.py" not in modified)
 check("AC-13 the AO adapter test is untouched", "diana/adapters/test-ao-adapter.sh" not in modified)
 for pre_existing in ("diana/gate/", "diana/ship/", "diana/security/", "diana/preflight/",
