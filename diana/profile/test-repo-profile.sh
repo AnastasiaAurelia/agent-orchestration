@@ -125,6 +125,18 @@ check("symlink escape is recorded in notes, never silently dropped",
 check("routine denied_subpaths exclusions are counted in notes",
       any("denied_subpaths" in n for n in RP.profile(static, scope_for(static))["inventory_notes"]))
 
+# --- a target that is not a directory is refused, not merely "incomplete" ---
+try:
+    RP.profile(os.path.join(tmp, "does-not-exist"), scope_for(tmp))
+    check("a nonexistent target is refused", False, "(no error raised)")
+except NotADirectoryError:
+    check("a nonexistent target is refused rather than profiled as empty", True)
+try:
+    RP.profile(os.path.join(static, "app.js"), scope_for(static))
+    check("a file used as a repo root is refused", False, "(no error raised)")
+except NotADirectoryError:
+    check("a file used as a repo root is refused", True)
+
 # --- determinism ---
 a = RP.profile(static, scope_for(static))
 b = RP.profile(static, scope_for(static))

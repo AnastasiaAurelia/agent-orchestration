@@ -79,6 +79,11 @@ def _walk(repo_root: str, scope: dict) -> tuple[list[str], bool, list[str]]:
     complete picture.
     """
     root = _read_scope.canonicalize(repo_root)
+    if not os.path.isdir(root):
+        # An absent tree would otherwise yield an empty, merely "incomplete"
+        # profile, and the run would go on to review nothing at all. Refusing
+        # here keeps a meaningless target from producing a plausible document.
+        raise NotADirectoryError(f"target repository root is not a directory: {root}")
     inventory: list[str] = []
     complete = True
     notes: list[str] = []
