@@ -96,15 +96,26 @@ cannot loop or spend without limit. Exceeding either is `hermes-turn-failed`, no
 and refused tool names. M1 D25 deferred reconciliation and M2 does not revive it: prevention is the
 control, and this record is for humans.
 
-**M2-D14 — AC-13 is re-based, and its invariant is strengthened.** M1's AC-13 compared modified files
-against the freeze commit; once M2 begins, that comparison measures "did anything change since M1"
-rather than its actual invariant, *the AO path and pre-existing Diana modules are untouched*. M2
-asserts that invariant **directly and more strictly**: `diana/adapters/ao.py`, `diana/gate/`,
-`diana/ship/`, `diana/security/`, `diana/preflight/`, `diana/ci/`, `diana/playwright/`,
-`diana/hooks/`, `diana/skills/` unmodified since the freeze, and `HERMES-RUNTIME-M1.md` unmodified.
-M1 files that M2 legitimately extends (`blocking.py`'s single reason-code vocabulary, `run.py`'s
-driver seam) are permitted and enumerated. **No M1 behavior may change**, which the unchanged M1
-suites prove independently.
+**M2-D14 — M2 carries its own later-milestone regression invariant.** M1's acceptance criteria are
+frozen and are **not** re-based, reinterpreted, or weakened by M2. In particular, M1's AC-13 is a
+**historical assertion** about what the M1 implementation itself did between the M1 freeze commit and
+the M1 completion commit; it is evidence about M1, it stays true forever, and it is deliberately not
+evaluated against a moving `HEAD`. "Nothing changed since the M1 freeze" was never a perpetual
+repository invariant and must not become one.
+
+What a later milestone owes instead is its own standing invariant, which M2 defines and every future
+milestone is expected to carry its own copy of rather than inheriting M1's historical evidence:
+
+- **M2-REG-1** — the frozen M1 specification remains **byte-identical**.
+- **M2-REG-2** — pre-existing Diana/AO modules and behavior remain unchanged, **except where a future
+  milestone explicitly freezes and proves a replacement**. M2 freezes no replacement, so its
+  permitted-replacement set is empty.
+- **M2-REG-3** — nothing is deleted by later work.
+- **M2-REG-4** — all reusable M1 **behavioral** acceptance tests remain green.
+
+Files M1 created that M2 legitimately extends — `blocking.py`'s single reason-code vocabulary and
+`run.py`'s driver seam — are additions to M1-owned modules, not modifications of pre-existing Diana
+code, and no M1 behavior changes, which M2-REG-4 and the unchanged M1 suites prove independently.
 
 ---
 
@@ -126,7 +137,7 @@ M2 is accepted only if **all** hold, and **all 13 M1 criteria remain green uncha
 | **M2-AC-10** | A provider/turn failure yields `BLOCKED` with `hermes-turn-failed` and no artifact. |
 | **M2-AC-11** | No Gate, no Security Track, no PR, no mutating subprocess during a live turn. |
 | **M2-AC-12** | M1's AC-8 determinism holds across two live-turn runs, with observations excluded as already specified. |
-| **M2-AC-13** | The AO path and every pre-existing Diana module are unmodified (M2-D14), and all M1 suites pass unchanged. |
+| **M2-AC-13** | The M2 later-milestone regression invariant holds (M2-D14): M1's frozen specification is byte-identical, no pre-existing Diana/AO module is modified, nothing is deleted, and the reusable M1 behavioral suites are green. M1's own acceptance criteria pass unchanged and are not re-based. |
 
 ---
 

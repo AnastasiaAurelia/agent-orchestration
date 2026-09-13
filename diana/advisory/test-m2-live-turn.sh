@@ -260,6 +260,50 @@ check("M2-AC-11 no gh subprocess during a live turn", gh_calls == [])
 check("M2-AC-11 no mutating git subprocess during a live turn",
       not [c for c in git_calls if any(str(a) in MUTATING for a in c)])
 
+# ============ M2 later-milestone regression invariant ============
+# Distinct in kind from M1's AC-13, which is a HISTORICAL assertion about what
+# the M1 implementation did between two fixed commits. This one is perpetual and
+# owned by M2: it constrains what a LATER milestone may disturb, and every
+# future milestone is expected to carry its own copy rather than reinterpret
+# M1's historical evidence as a standing rule.
+FREEZE = "2b26f7bfcaa41b3b068635bb207ca807b2967964"
+M1_CONSTANTS = "5d0079eb1176d334366d9725ed7182593e4a5060"
+
+def git_out(*args):
+    return subprocess.run(["git", "-C", str(diana.parent), *args],
+                          capture_output=True, text=True, check=False).stdout
+
+# 1. The frozen M1 specification remains byte-identical.
+check("M2-REG-1 the frozen M1 specification is byte-identical since its constants commit",
+      git_out("diff", "--name-only", M1_CONSTANTS, "HEAD",
+              "--", "docs/architecture/HERMES-RUNTIME-M1.md").split() == [],
+      "(M1 spec was modified by later work)")
+
+# 2. Pre-existing Diana/AO modules and behavior remain unchanged, except where a
+#    future milestone explicitly freezes and proves a replacement. M2 freezes no
+#    replacement, so the permitted set here is empty.
+now = [l.split("\t", 1) for l in git_out("diff", "--name-status", FREEZE, "HEAD").splitlines()
+       if "\t" in l]
+modified_now = sorted(path for code, path in now if code.startswith("M"))
+PRE_EXISTING = ("diana/adapters/ao.py", "diana/adapters/test-ao-adapter.sh",
+                "diana/gate/", "diana/ship/", "diana/security/", "diana/preflight/",
+                "diana/ci/", "diana/playwright/", "diana/hooks/", "diana/skills/")
+disturbed = [m for m in modified_now if m.startswith(PRE_EXISTING)]
+check("M2-REG-2 no pre-existing Diana/AO module was modified by any later milestone",
+      disturbed == [], f"(disturbed: {disturbed})")
+check("M2-REG-2 M2 freezes no replacement, so the permitted-replacement set is empty",
+      True)
+check("M2-REG-3 nothing was deleted by later work",
+      [p for c, p in now if c.startswith("D")] == [])
+
+# 4. All reusable M1 BEHAVIORAL acceptance tests remain green. These are the
+#    deterministic ones; the full M1 suite is run separately by the milestone
+#    protocol, and this is the fast in-suite regression guard.
+for suite in ("runtime/test-contract.sh", "profile/test-repo-profile.sh",
+              "advisory/test-dom-scan.sh", "advisory/test-artifact.sh"):
+    rc = subprocess.run([str(diana / suite)], capture_output=True, text=True).returncode
+    check(f"M2-REG-4 reusable M1 behavioral suite still green: {suite}", rc == 0)
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
 PY

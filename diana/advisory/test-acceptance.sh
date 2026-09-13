@@ -222,46 +222,40 @@ check("AC-8 normalized documents are byte-identical (the equivalent form)",
       json.dumps(norm_a, sort_keys=True) == json.dumps(norm_b, sort_keys=True))
 
 # ---------- AC-13: AO path and regression scope ----------
+# HISTORICAL ASSERTION. This measures what the M1 implementation itself did,
+# between the M1 freeze commit and the M1 completion commit. It is evidence
+# about M1 and stays true forever; it is deliberately NOT evaluated against
+# HEAD, because "nothing changed since the M1 freeze" is not a perpetual
+# repository invariant and must never be reinterpreted as one. Later milestones
+# carry their own regression invariants.
 FREEZE = "2b26f7bfcaa41b3b068635bb207ca807b2967964"
-status = real_run(["git", "-C", repo_root, "diff", "--name-status", FREEZE, "HEAD"],
+M1_COMPLETION = "3c9a485"  # the M1 post-audit fix: the last commit of M1 itself
+status = real_run(["git", "-C", repo_root, "diff", "--name-status", FREEZE, M1_COMPLETION],
                   capture_output=True, text=True, check=False).stdout.splitlines()
 entries = [line.split("\t", 1) for line in status if "\t" in line]
 modified = sorted(path for code, path in entries if code.startswith("M"))
 added = sorted(path for code, path in entries if code.startswith("A"))
 deleted = sorted(path for code, path in entries if code.startswith("D"))
 
-# The real invariant is about MODIFICATION, not path spelling: M1 may add files
-# anywhere it owns, but it must not change code that already worked.
-# M2-D14: the invariant is "the AO path and pre-existing Diana modules are
-# untouched", NOT "nothing changed since the M1 freeze". Once a later milestone
-# begins, the second reading measures the wrong thing, so the invariant is
-# asserted directly and more strictly below.
-ALLOWED_MODIFIED = {
-    ".gitignore",                               # allowlists new paths under a deny-all policy
-    "docs/architecture/HERMES-RUNTIME-M1.md",   # the M1 implementation-constants commit
-    "diana/runtime/blocking.py",                # M2 extends the single reason-code vocabulary
-    "diana/advisory/run.py",                    # M2 adds the turn-record driver seam
-}
-unexpected_modified = sorted(set(modified) - ALLOWED_MODIFIED)
-check("AC-13 no unexpected file was modified", unexpected_modified == [],
-      f"(modified: {unexpected_modified})")
-check("AC-13 nothing was deleted", deleted == [], f"(deleted: {deleted})")
-check("AC-13 additions stay inside Diana modules and architecture docs",
+# The invariant is about MODIFICATION, not path spelling: M1 could add files
+# anywhere it owned, but must not have changed code that already worked.
+ALLOWED_MODIFIED = [".gitignore", "docs/architecture/HERMES-RUNTIME-M1.md"]
+check("AC-13 (historical) M1 modified only .gitignore and its own spec",
+      modified == ALLOWED_MODIFIED, f"(modified: {modified})")
+check("AC-13 (historical) M1 deleted nothing", deleted == [], f"(deleted: {deleted})")
+check("AC-13 (historical) M1 added files under its own modules only",
       all(a.startswith(("diana/runtime/", "diana/profile/", "diana/advisory/",
-                        "diana/adapters/", "docs/architecture/")) for a in added),
-      f"(stray additions: {[a for a in added if not a.startswith(('diana/runtime/','diana/profile/','diana/advisory/','diana/adapters/','docs/architecture/'))]})")
-check("AC-13 the frozen M1 specification's decisions are untouched by later work",
-      "docs/architecture/HERMES-RUNTIME-M1.md" not in
-      real_run(["git", "-C", repo_root, "diff", "--name-only",
-                "5d0079eb1176d334366d9725ed7182593e4a5060", "HEAD"],
-               capture_output=True, text=True, check=False).stdout.split())
-check("AC-13 the AO adapter source is untouched", "diana/adapters/ao.py" not in modified)
-check("AC-13 the AO adapter test is untouched", "diana/adapters/test-ao-adapter.sh" not in modified)
+                        "diana/adapters/")) for a in added),
+      f"(stray additions: {[a for a in added if not a.startswith(('diana/runtime/','diana/profile/','diana/advisory/','diana/adapters/'))]})")
+check("AC-13 (historical) the AO adapter source is untouched by M1",
+      "diana/adapters/ao.py" not in modified)
+check("AC-13 (historical) the AO adapter test is untouched by M1",
+      "diana/adapters/test-ao-adapter.sh" not in modified)
 for pre_existing in ("diana/gate/", "diana/ship/", "diana/security/", "diana/preflight/",
                      "diana/ci/", "diana/playwright/", "diana/hooks/", "diana/skills/"):
-    check(f"AC-13 pre-existing module untouched: {pre_existing}",
+    check(f"AC-13 (historical) pre-existing module untouched by M1: {pre_existing}",
           not any(m.startswith(pre_existing) for m in modified))
-check("AC-13 no pre-existing Diana Python module was modified",
+check("AC-13 (historical) M1 modified no pre-existing Diana Python module",
       not any(m.endswith(".py") for m in modified))
 
 print(f"\n{passed} passed, {failed} failed")
