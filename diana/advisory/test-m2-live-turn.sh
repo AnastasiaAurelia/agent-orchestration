@@ -188,6 +188,30 @@ except blocking.Blocked as exc:
 finally:
     os.environ.update(saved)
 
+# ============ M2-D12: the bound must STOP the turn, not just stop waiting ============
+saved_cap = HL.WALL_CLOCK_SECONDS
+HL.WALL_CLOCK_SECONDS = 1  # deadline the model cannot possibly meet
+slow = HL.LiveTurnDriver(prompt=(
+    f"Read every file in {FIXTURE} one at a time with separate tool calls, "
+    "then write a long, detailed security review of at least 600 words."))
+try:
+    go(slow, "slow")
+    check("M2-D12 an over-deadline turn BLOCKS", False, "(no Blocked raised)")
+except blocking.Blocked as exc:
+    check("M2-D12 an over-deadline turn BLOCKS with hermes-turn-failed",
+          exc.code == blocking.HERMES_TURN_FAILED, f"(got {exc.code})")
+finally:
+    HL.WALL_CLOCK_SECONDS = saved_cap
+rec_slow = slow.record or {}
+check("M2-D12 the timeout was recorded", rec_slow.get("timed_out") is True)
+check("M2-D12 an interrupt was issued rather than abandoning a spending thread",
+      rec_slow.get("interrupted_on_timeout") is True and not rec_slow.get("interrupt_error"),
+      f"(record: {({k: rec_slow.get(k) for k in ('timed_out','interrupted_on_timeout','interrupt_error','stopped_after_interrupt')})})")
+check("M2-D12 the interrupted turn produced no advisory artifact",
+      not list(Path(tmp, "slow").rglob("advisory-security-review.json")))
+check("M2-D12 the target repo is still untouched after an interrupted turn",
+      snapshot(FIXTURE) == before_hashes)
+
 # ============ AC-12: determinism across two live runs ============
 out_c = go(HL.LiveTurnDriver(), "c")
 doc_c = out_c["document"]

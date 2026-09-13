@@ -52,6 +52,8 @@ ENVELOPE = ("read_file", "search_files")
 # without limit. Exceeding either bound is a failure, never a partial result.
 MAX_ITERATIONS = 12
 WALL_CLOCK_SECONDS = 240
+# How long to let an over-deadline turn wind down after being interrupted.
+INTERRUPT_GRACE_SECONDS = 20
 
 # Bound what one model utterance can contribute; an observation is ungraded
 # context, not a finding, and does not need to be long.
@@ -214,7 +216,8 @@ class LiveTurnDriver:
             contract_block, hermes_home=self.hermes_home, narrow=self.narrow
         )
         message = self._build_prompt(contract_block)
-        outcome: dict = {"final": None, "error": None}
+        outcome: dict = {"final": None, "error": None, "interrupt_error": None}
+        stopped = None
 
         def run_turn():
             try:
@@ -230,6 +233,19 @@ class LiveTurnDriver:
                 worker.start()
                 worker.join(timeout=WALL_CLOCK_SECONDS)
                 timed_out = worker.is_alive()
+                if timed_out:
+                    # Raising Blocked stops Diana WAITING; it does not stop the
+                    # turn. A daemon thread left running would keep calling the
+                    # model and spending after the deadline Diana already
+                    # declared missed, which is the opposite of what a bound is
+                    # for (M2-D12). `interrupt` is explicitly safe to call from
+                    # another thread.
+                    try:
+                        agent.interrupt(hard_cancel=True, tool_reason="diana: wall-clock bound exceeded")
+                    except Exception as exc:  # noqa: BLE001 - recorded, never masked
+                        outcome["interrupt_error"] = f"{type(exc).__name__}: {exc}"
+                    worker.join(timeout=INTERRUPT_GRACE_SECONDS)
+                    stopped = not worker.is_alive()
             finally:
                 if self.corruptor is not None:
                     self.corruptor.uninstall()
@@ -247,13 +263,17 @@ class LiveTurnDriver:
             "wall_clock_cap_seconds": WALL_CLOCK_SECONDS,
             "elapsed_seconds": elapsed,
             "timed_out": bool(timed_out),
+            "interrupted_on_timeout": bool(timed_out),
+            "stopped_after_interrupt": stopped,
+            "interrupt_error": outcome["interrupt_error"],
             "error": outcome["error"],
         }
 
         if timed_out:
             raise blocking.Blocked(
                 blocking.HERMES_TURN_FAILED,
-                f"live turn exceeded its {WALL_CLOCK_SECONDS}s wall-clock bound",
+                f"live turn exceeded its {WALL_CLOCK_SECONDS}s wall-clock bound; "
+                f"interrupt issued, stopped={stopped}",
             )
         if outcome["error"] is not None:
             raise blocking.Blocked(blocking.HERMES_TURN_FAILED, outcome["error"])
