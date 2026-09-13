@@ -24,6 +24,10 @@
 !uninstall.sh
 !.mcp.json
 
+!docs/
+!docs/architecture/
+!docs/architecture/HERMES-RUNTIME-M1.md
+
 !diana/
 !diana/CLAUDE.md
 !diana/mcp/
