@@ -1,8 +1,16 @@
 # Hermes Runtime — Milestone 1 (FROZEN)
 
-Status: **frozen specification**. Nothing in this document is implemented.
+Status: **normative and frozen**. This document is the source of truth for Milestone 1 and remains normative
+after implementation begins: every checkpoint diff is reviewed against it.
+
+Architectural decisions **D1-D38 are frozen** as of commit `2b26f7bfcaa41b3b068635bb207ca807b2967964`.
+They may not be changed, reopened, reinterpreted, or weakened by implementation work. Only the
+**Implementation constants** section below may be extended, and only with values that implement an
+existing decision rather than alter one. Revising D1-D38 requires a new design round, not an edit.
+
 Branch: `feature/hermes-runtime`.
-Frozen: 2026-09-13.
+Architecture frozen: 2026-09-13.
+Implementation constants finalized: 2026-09-13.
 
 ---
 
@@ -105,7 +113,7 @@ Each failure ⇒ **BLOCKED with its own specific reason code**.
 | Control | Evidence anchor |
 |---|---|
 | Hermes reachable | — |
-| Hermes **version pin** matches | `~/.hermes/hermes-agent` |
+| Hermes **version pin** matches | `hermes-agent 0.21.1` @ `b8e8639445bd6f05a8141abcea7ae2aa8279f2b7` - see Implementation constants |
 | `HERMES_SAFE_MODE == 1` | `plugins.py:1210`, `shell_hooks.py:145`, `mcp_tool_config.py:325`, `outbound_webhooks.py:78` |
 | `background_review.enabled == false` | default is **`True`** — `hermes_cli/config_defaults.py:744` |
 | side-question auxiliary execution disabled | `agent/side_question.py:111-127` |
@@ -189,6 +197,77 @@ Each failure ⇒ **BLOCKED with its own specific reason code**.
 ```
 
 Contains **no** `control_id`, `applicability`, `verifier`, `evidence`, `tool_error`, or `observed_at` key at any nesting level. `unverified_observations[]` carries **no severity field**.
+
+---
+
+## Implementation constants
+
+Values that implement frozen decisions. Adding or correcting a constant here is a documentation change;
+it must never be used to alter D1-D38.
+
+### C1 - Hermes version pin (implements D27)
+
+| Field | Value |
+|---|---|
+| Package | `hermes-agent` |
+| Version | `0.21.1` (`pyproject.toml:5`, `hermes_cli/__init__.py:6`) |
+| Git commit | `b8e8639445bd6f05a8141abcea7ae2aa8279f2b7` |
+| Branch at pin time | `main`, working tree clean |
+| Install path | `~/.hermes/hermes-agent` |
+
+`check()` compares **both** the declared version string and the resolved git commit. Either mismatching is a
+distinct BLOCKED reason code. Per D27 the pin is mandatory but the behavioral self-test remains the actual
+enforcement tripwire: an upstream rename of a patch target breaks the self-test loudly even when the pin matches.
+
+### C2 - `read_scope` matching semantics (implements D17, D20)
+
+All matching happens on the **fully canonicalized absolute path** (`os.path.realpath`, symlinks dereferenced),
+never on the path as supplied. String-prefix comparison is prohibited.
+
+**Allowed-root test.** A candidate path is in scope iff, after canonicalization, it equals one of
+`allowed_roots` or is a descendant of one, compared **path-component-wise** on the canonicalized forms.
+Component-wise comparison is required so that `/home/u/repo-evil` is not treated as inside `/home/u/repo`.
+
+**Denied-subpath rules.** Each entry of `denied_subpaths` is exactly one of two forms, decided by whether it
+ends with `/`:
+
+| Form | Example | Semantics |
+|---|---|---|
+| Directory rule - ends with `/` | `.git/` | Denied if **any** path component of the canonicalized path, relative to its matched allowed root, is exactly equal to the rule with the trailing `/` removed. Applies at any depth, so nested `.git` directories (submodules) are denied too. |
+| Name-glob rule - contains no `/` | `.env`, `.env.*` | `fnmatch.fnmatchcase` is applied to **each** path component of the relative path independently. Denied if any component matches. `.env` matches a component named exactly `.env`; `.env.*` matches `.env.local`, `.env.production`, and not `.env`. |
+
+An entry containing an interior `/` is a configuration error and is rejected at contract construction, so the
+two forms above are exhaustive.
+
+**Evaluation order and defaults.**
+
+1. Canonicalize. If canonicalization raises, the path is **denied**.
+2. If the canonicalized path is not under any allowed root, **deny**. This is what makes a symlink whose target
+   escapes the root deny rather than allow - the escape is visible only after canonicalization.
+3. If any denied-subpath rule matches, **deny**. Deny always wins over allow.
+4. Otherwise, allow.
+
+Matching is byte-exact and case-sensitive (POSIX). For a path that does not exist, canonicalization resolves the
+existing ancestor chain; if that resolution fails or escapes an allowed root, the path is denied. `read_file` and
+`search_files` obey exactly the same rules, per D17.
+
+### C3 - `FILE_TOO_LARGE` threshold (implements D36 `scan_issues[]`)
+
+**Threshold: 512,000 bytes**, measured as `os.stat().st_size` on disk **before** any decode attempt.
+
+The enum is retained rather than removed, and the value is taken from code evidence rather than invented:
+Hermes's own large-file constant is `_LARGE_FILE_HINT_BYTES = 512_000` (`tools/file_tools.py:116`), the point at
+which Hermes tells a caller a file is large; its per-read budget is `_DEFAULT_MAX_READ_CHARS = 100_000`
+(`tools/file_tools.py:47`). Aligning Diana's scanner ceiling with Hermes's own notion of "large" keeps the two
+components' file-size semantics consistent.
+
+A threshold is justified on scanner grounds independently: `dom_scan.py` is a whole-file lexer (D6), and minified
+or bundled JavaScript routinely exceeds several hundred kilobytes on a single line, where lexing cost is high and
+the result is not meaningfully analyzable.
+
+Behavior: a file strictly greater than the threshold is **not scanned**, produces exactly one `scan_issues[]`
+entry of kind `FILE_TOO_LARGE` carrying the observed byte size, and therefore forces `outcome: INCOMPLETE` per
+D36. It is never silently skipped and never reported as analyzed.
 
 ---
 
