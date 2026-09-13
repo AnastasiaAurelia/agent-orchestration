@@ -167,6 +167,87 @@ def capability_probes(tree: dict) -> list[dict]:
     return _run(checks)
 
 
+def _drive_real_dispatch(tool_name: str) -> dict:
+    """Drive Hermes's REAL `_dispatch_authorized_once` and report whether the
+    inner `execute` ran.
+
+    This is the path the inline-executor bypass lived on: 13 tools, including
+    `delegate_task`, resolve to inline callables that never reach
+    `handle_function_call`, on BOTH the concurrent
+    (`agent/agent_runtime_helpers.py:2265`) and sequential
+    (`agent/tool_executor.py:1498`) routes. Probing `handle_function_call`
+    alone would miss it entirely, so this drives the common funnel with a
+    sentinel `execute` and asserts on whether the sentinel fired.
+    """
+    import types
+
+    if str(_patches.HERMES_HOME) not in sys.path:
+        sys.path.insert(0, str(_patches.HERMES_HOME))
+    import agent.tool_executor as te
+    from agent.tool_guardrails import ToolCallGuardrailController
+
+    ran = {"execute": False}
+
+    def sentinel(_args):
+        ran["execute"] = True
+        return '{"ok": "the real handler would have run here"}'
+
+    agent = types.SimpleNamespace(
+        _tool_guardrails=ToolCallGuardrailController(),
+        _guardrail_block_result=lambda decision: '{"error": "guardrail"}',
+        _checkpoint_mgr=types.SimpleNamespace(enabled=False),
+        _current_tool=None,
+        _touch_activity=lambda *a, **k: None,
+        _turns_since_memory=0,
+        _iters_since_skill=0,
+        tool_progress_callback=None,
+        tool_start_callback=None,
+        quiet_mode=True,
+        tool_progress_mode="off",
+        verbose_logging=False,
+        log_prefix_chars=80,
+        log_prefix="",
+    )
+    ref = te._ToolCallRef(tool_name, {}, "task", "call-1", [])
+    state = te._ManagedToolResult(result=None, args={}, middleware_trace=[],
+                                  blocked=False, dispatched=False)
+    result = te._dispatch_authorized_once(
+        agent, state, ref, execute=sentinel, scope_block=None,
+        display_index=None, begin_execution=None, authorization_gate=None,
+    )
+    return {"executed": ran["execute"], "result": str(result)}
+
+
+def dispatch_funnel_probes() -> list[dict]:
+    """Capability enforcement on the agent loop's own dispatch funnel."""
+    if str(_patches.HERMES_HOME) not in sys.path:
+        sys.path.insert(0, str(_patches.HERMES_HOME))
+    from agent.inline_tool_executors import INLINE_TOOL_EXECUTORS
+
+    checks = [
+        ("read_file reaches its handler through the agent-loop funnel",
+         lambda: _drive_real_dispatch("read_file")["executed"] is True),
+        ("search_files reaches its handler through the agent-loop funnel",
+         lambda: _drive_real_dispatch("search_files")["executed"] is True),
+    ]
+    # Every inline-executor tool must be refused on the funnel; these are the
+    # exact names that bypass handle_function_call.
+    for name in sorted(INLINE_TOOL_EXECUTORS):
+        checks.append((
+            f"inline-executor tool refused on the agent-loop funnel: {name}",
+            lambda n=name: _drive_real_dispatch(n)["executed"] is False,
+        ))
+    checks.append((
+        "delegate_task's handler never runs on the agent-loop funnel",
+        lambda: _denied(_drive_real_dispatch("delegate_task")["result"]),
+    ))
+    checks.append((
+        "write_file's handler never runs on the agent-loop funnel",
+        lambda: _drive_real_dispatch("write_file")["executed"] is False,
+    ))
+    return _run(checks)
+
+
 def _run(checks) -> list[dict]:
     results = []
     for label, probe in checks:

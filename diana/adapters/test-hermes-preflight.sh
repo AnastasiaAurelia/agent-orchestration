@@ -116,6 +116,39 @@ blocks("8. confinement patch not live", by_id["confinement-patch-dead"],
        lambda: H.check(repo_root=str(repo), env=GOOD_ENV, config=GOOD_CONFIG,
                        hermes_home=hermes_home, require_patches=True))
 
+# --- the pre-import phase: controls proven BEFORE Hermes is imported ---
+# Importing model_tools with HERMES_SAFE_MODE unset loads plugin modules
+# in-process, so these four controls must not depend on a Hermes import.
+import subprocess as _sp
+probe = (
+    "import sys, os, json;"
+    "sys.path.insert(0, %r); sys.path.insert(0, %r);"
+    "os.environ.pop('HERMES_SAFE_MODE', None);"
+    "import hermes as H, blocking;"
+    "\ntry:\n"
+    "    H.check_pre_import(repo_root=%r, env={}, hermes_home=%r)\n"
+    "    print('NO_BLOCK')\n"
+    "except blocking.Blocked as b:\n"
+    "    print('BLOCKED:' + b.code)\n"
+    "print('HERMES_IMPORTED:' + str(any(m in sys.modules for m in ('model_tools', 'tools.registry'))))"
+) % (ad_dir, str(Path(ad_dir).parent / "runtime"), str(repo), hermes_home)
+res = _sp.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=120)
+out = res.stdout
+check("pre-import phase BLOCKS when HERMES_SAFE_MODE is unset",
+      "BLOCKED:" + blocking.SAFE_MODE_NOT_ENABLED in out, f"(got {out.strip()!r} {res.stderr[-200:]})")
+check("pre-import phase did NOT import Hermes (no plugin discovery ran)",
+      "HERMES_IMPORTED:False" in out, f"(got {out.strip()!r})")
+check("pre-import phase passes with a clean environment",
+      isinstance(H.check_pre_import(repo_root=str(repo), env=GOOD_ENV, hermes_home=hermes_home), dict))
+for label, kwargs, code in (
+    ("version pin", {"hermes_home": str(fake_home)}, by_id["version-pin-mismatch"]),
+    (".hermes.md", {"repo_root": str(poisoned)}, by_id["hermes-md-present"]),
+    ("AGENTS.override.md", {"repo_root": str(poisoned2)}, by_id["agents-override-present"]),
+):
+    blocks(f"pre-import phase enforces {label}", code,
+           lambda kw=kwargs: H.check_pre_import(
+               **{"repo_root": str(repo), "env": GOOD_ENV, "hermes_home": hermes_home, **kw}))
+
 # --- with both patches live and probed, preflight passes end to end ---
 HP.install_confinement(scope)
 full = H.check(repo_root=str(repo), env=GOOD_ENV, config=GOOD_CONFIG,

@@ -86,6 +86,73 @@ def _auxiliary(config: dict, name: str) -> dict:
     return block if isinstance(block, dict) else {}
 
 
+def check_pre_import(
+    *,
+    repo_root: str,
+    env: dict | None = None,
+    hermes_home: str | None = None,
+) -> dict:
+    """The controls that MUST be proven before Hermes is imported at all.
+
+    Importing `model_tools` with `HERMES_SAFE_MODE` unset runs plugin discovery
+    and loads plugin modules in-process -- measured at 57 on the pinned install.
+    Verifying safe mode only after installing the patches would evaluate the
+    control AFTER the risk it exists to prevent, and plugin module-level code
+    can clear or re-patch Diana's boundaries.
+
+    Every control here is filesystem- or environment-only: reading a version
+    string, running `git rev-parse`, stat-ing two files, and reading one
+    environment variable. None of them import Hermes.
+    """
+    env = dict(os.environ if env is None else env)
+    home = Path(hermes_home or _patches.HERMES_HOME)
+    report: dict = {"controls": []}
+
+    def record(name: str, detail: str = "") -> None:
+        report["controls"].append({"control": name, "status": "PASS", "detail": detail})
+
+    if not (home / "model_tools.py").is_file() or not (home / "hermes_cli").is_dir():
+        raise blocking.Blocked(blocking.HERMES_UNREACHABLE, f"no Hermes installation at {home}")
+    record("hermes-reachable", str(home))
+
+    version = _patches.hermes_version(str(home))
+    if version != _patches.PINNED_VERSION:
+        raise blocking.Blocked(
+            blocking.HERMES_VERSION_PIN_MISMATCH,
+            f"found {version!r}, pinned {_patches.PINNED_VERSION!r}",
+        )
+    record("hermes-version-pin", version)
+    commit = _patches.hermes_commit(str(home))
+    if commit != _patches.PINNED_COMMIT:
+        raise blocking.Blocked(
+            blocking.HERMES_COMMIT_PIN_MISMATCH,
+            f"found {commit!r}, pinned {_patches.PINNED_COMMIT!r}",
+        )
+    record("hermes-commit-pin", commit)
+
+    if str(env.get("HERMES_SAFE_MODE", "")).strip() != "1":
+        raise blocking.Blocked(
+            blocking.SAFE_MODE_NOT_ENABLED,
+            f"HERMES_SAFE_MODE={env.get('HERMES_SAFE_MODE')!r}; M1 requires 1 so plugin "
+            "discovery, user shell hooks, MCP config and outbound webhooks stay off",
+        )
+    record("hermes-safe-mode", "1")
+
+    for filename, code in (
+        (".hermes.md", blocking.HERMES_MD_PRESENT),
+        ("AGENTS.override.md", blocking.AGENTS_OVERRIDE_PRESENT),
+    ):
+        for root in (Path(repo_root), home, Path.home() / ".hermes"):
+            if (root / filename).is_file():
+                raise blocking.Blocked(
+                    code,
+                    f"{root / filename} would change what this run means; "
+                    "M1 requires a reproducible run",
+                )
+        record(f"no-{filename}")
+    return report
+
+
 def check(
     *,
     repo_root: str,
@@ -191,8 +258,16 @@ def check(
             _selftest.assert_all(
                 _selftest.capability_probes(probe_tree), blocking.CAPABILITY_PATCH_NOT_LIVE
             )
+            # The agent loop resolves 13 tools -- delegate_task among them -- to
+            # inline executors that never reach handle_function_call, so the
+            # registry probes above cannot see them. This drives the common
+            # dispatch funnel both executor paths share.
+            _selftest.assert_all(
+                _selftest.dispatch_funnel_probes(), blocking.CAPABILITY_PATCH_NOT_LIVE
+            )
             record("confinement-self-test")
             record("capability-self-test")
+            record("dispatch-funnel-self-test")
         else:
             record("confinement-patch-live")
             record("capability-patch-live")

@@ -208,6 +208,12 @@ def execute(
     os.environ["DIANA_CONTRACT_DIGEST"] = digest
     _contract.load_and_verify(contract_path, contract_block["run_id"], digest)
 
+    # Everything provable without importing Hermes is proven FIRST. Importing
+    # model_tools with HERMES_SAFE_MODE unset runs plugin discovery and loads
+    # plugin modules in-process, so checking safe mode afterwards would order
+    # the control behind the risk it guards.
+    _hermes.check_pre_import(repo_root=repo_root, env=env, hermes_home=hermes_home)
+
     _patches.install_confinement(read_scope_block)
     _patches.install_capability(ALLOWED_TOOLS)
 

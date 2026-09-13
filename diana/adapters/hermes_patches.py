@@ -33,6 +33,28 @@ the failure that matters is the one preventing a verdict. And
 `DaemonThreadPoolExecutor` workers with no contextvars propagation, so it is
 inert on the execution path -- it is deliberately NOT used here (D24).
 
+## Why capability enforcement needs TWO entries, not one
+
+`handle_function_call` is the sole entry for *registry* dispatch, but it is NOT
+the only way a tool runs. The agent loop resolves some tools to INLINE
+executors that never reach it:
+
+* `agent/inline_tool_executors.py:153` `INLINE_TOOL_EXECUTORS` maps 13 names --
+  including **`delegate_task`** -- to callables invoked directly.
+* Concurrent path: `agent/agent_runtime_helpers.py:2265` takes the inline
+  branch and only falls through to `handle_function_call` in its `else`.
+* Sequential path: `agent/tool_executor.py:1498 _resolve_sequential_dispatch`
+  has its own inline branch, a dedicated `delegate_task` branch, a
+  context-engine branch, and a memory-provider branch.
+
+Both paths funnel through **`_dispatch_authorized_once`**
+(`agent/tool_executor.py:639`, called at `:724` via a module-global name), which
+receives the `execute` callable for EVERY branch. Diana therefore guards there
+too, by SUBSTITUTING `execute` rather than short-circuiting: Hermes keeps its
+start-order gate, spinner and terminal-hook bookkeeping -- the file warns that
+`begin_execution` must advance on every path or later workers wedge -- and only
+the thing that would have run is replaced by a refusal.
+
 ## Why handle_function_call rather than registry.dispatch
 
 `registry.dispatch` is not the sole choke point: `model_tools.py:827` routes any
@@ -68,7 +90,10 @@ HERMES_HOME = os.environ.get("DIANA_HERMES_HOME", str(Path.home() / ".hermes" / 
 PINNED_VERSION = "0.21.1"
 PINNED_COMMIT = "b8e8639445bd6f05a8141abcea7ae2aa8279f2b7"
 
-_STATE = {"confinement": None, "capability": None}
+_STATE = {"confinement": None, "capability": None, "dispatch": None}
+
+REFUSAL = ('{"error": "diana: tool %s is not in the execution contract '
+           'capability envelope; refused before dispatch"}')
 
 
 class ScopeDenied(Exception):
@@ -179,10 +204,7 @@ def install_capability(allowed_tools) -> None:
         if function_name not in allowed:
             # Fail closed on unknown names too: a tool Hermes gains in a future
             # version is denied by set membership, with no special case.
-            return (
-                '{"error": "diana: tool %s is not in the execution contract '
-                'capability envelope; refused before dispatch"}' % function_name
-            )
+            return REFUSAL % function_name
         return original(function_name, function_args, *args, **kwargs)
 
     guarded.__name__ = "handle_function_call"
@@ -197,11 +219,41 @@ def install_capability(allowed_tools) -> None:
             setattr(module, "handle_function_call", guarded)
             rebound.append(mod_name)
     _STATE["capability"] = {"allowed_tools": sorted(allowed), "rebound": rebound}
+    _install_dispatch_guard(allowed)
+
+
+def _install_dispatch_guard(allowed) -> None:
+    """Guard the agent loop's common dispatch funnel (both executor paths).
+
+    Without this, every tool in `INLINE_TOOL_EXECUTORS` -- `delegate_task`
+    among them -- executes without ever passing `handle_function_call`.
+    """
+    import agent.tool_executor as te
+
+    original = getattr(te, "_diana_original_dispatch", None) or te._dispatch_authorized_once
+
+    def guarded_dispatch(agent_, state, ref, *, execute, **kwargs):
+        name = getattr(ref, "name", None)
+        if name not in allowed:
+            def refused(_args, _name=name):
+                return REFUSAL % _name
+            return original(agent_, state, ref, execute=refused, **kwargs)
+        return original(agent_, state, ref, execute=execute, **kwargs)
+
+    guarded_dispatch.__name__ = "_dispatch_authorized_once"
+    te._diana_original_dispatch = original
+    te._dispatch_authorized_once = guarded_dispatch
+    _STATE["dispatch"] = {"allowed_tools": sorted(allowed)}
 
 
 def capability_live() -> bool:
-    module = sys.modules.get("model_tools")
-    return bool(module and hasattr(module, "_diana_original_handle"))
+    """Both capability entries must be live; one alone leaves a real bypass."""
+    model_tools_mod = sys.modules.get("model_tools")
+    executor = sys.modules.get("agent.tool_executor")
+    return bool(
+        model_tools_mod and hasattr(model_tools_mod, "_diana_original_handle")
+        and executor and hasattr(executor, "_diana_original_dispatch")
+    )
 
 
 def uninstall() -> None:
@@ -216,6 +268,10 @@ def uninstall() -> None:
             module = sys.modules.get(mod_name)
             if module is not None and hasattr(module, "_resolve_path_for_task"):
                 setattr(module, "_resolve_path_for_task", fp._resolve_path_for_task)
+    te = sys.modules.get("agent.tool_executor")
+    if te is not None and hasattr(te, "_diana_original_dispatch"):
+        te._dispatch_authorized_once = te._diana_original_dispatch
+        del te._diana_original_dispatch
     mt = sys.modules.get("model_tools")
     if mt is not None and hasattr(mt, "_diana_original_handle"):
         mt.handle_function_call = mt._diana_original_handle
@@ -226,3 +282,4 @@ def uninstall() -> None:
                 setattr(module, "handle_function_call", mt.handle_function_call)
     _STATE["confinement"] = None
     _STATE["capability"] = None
+    _STATE["dispatch"] = None

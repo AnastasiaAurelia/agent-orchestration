@@ -53,6 +53,15 @@ check("WITHOUT the patch, a crafted write_file call actually writes the file",
       Path(hole).exists())
 check("WITHOUT the patch, no approval gate stopped it", Path(hole).read_text().strip() == "written by hermes")
 
+# --- the inline-executor bypass: handle_function_call is NOT the only entry ---
+from agent.inline_tool_executors import INLINE_TOOL_EXECUTORS, resolve_invoke_tool_executor
+check("13 tools resolve to inline executors that never reach handle_function_call",
+      len(INLINE_TOOL_EXECUTORS) == 13, f"(got {len(INLINE_TOOL_EXECUTORS)})")
+check("delegate_task is one of them", "delegate_task" in INLINE_TOOL_EXECUTORS)
+before = ST._drive_real_dispatch("delegate_task")
+check("WITHOUT the dispatch guard, delegate_task's handler RUNS on the agent-loop funnel",
+      before["executed"] is True, f"(got {before})")
+
 # --- install and probe on the real worker path ---
 HP.install_confinement(scope)
 HP.install_capability(ALLOWED)
@@ -63,6 +72,16 @@ for r in results:
     check(f"AC-2 {r['probe']}", r["ok"], f"({r['detail']})")
 check("assert_all passes when every probe passes",
       ST.assert_all(results, blocking.CAPABILITY_PATCH_NOT_LIVE) is None)
+
+# --- the agent-loop funnel, where the inline bypass lived ---
+funnel = ST.dispatch_funnel_probes()
+for r in funnel:
+    check(f"AC-2 {r['probe']}", r["ok"], f"({r['detail']})")
+after = ST._drive_real_dispatch("delegate_task")
+check("WITH the dispatch guard, delegate_task's handler never runs",
+      after["executed"] is False and "diana:" in after["result"], f"(got {after})")
+check("the funnel guard covers every inline-executor name",
+      len(funnel) >= len(INLINE_TOOL_EXECUTORS) + 2)
 
 # --- the invariant, stated directly ---
 canary = str(Path(tree["repo"], "invariant.txt"))
@@ -84,6 +103,8 @@ check("connector-prefixed name is refused at handle_function_call",
 # --- falsifiability: probes must fail when the patch is removed ---
 HP.uninstall()
 check("capability reports not live after uninstall", HP.capability_live() is False)
+check("uninstall restores the real dispatch funnel (the bypass returns)",
+      ST._drive_real_dispatch("delegate_task")["executed"] is True)
 after = ST.capability_probes(tree)
 check("probes FAIL when the patch is not live (the self-test is falsifiable)",
       any(not r["ok"] for r in after))
