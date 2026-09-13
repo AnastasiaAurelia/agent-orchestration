@@ -27,6 +27,7 @@
 !docs/
 !docs/architecture/
 !docs/architecture/HERMES-RUNTIME-M1.md
+!docs/architecture/HERMES-ROADMAP.md
 
 !diana/runtime/
 !diana/runtime/*.py
