@@ -29,7 +29,17 @@
 !docs/architecture/HERMES-RUNTIME-M1.md
 !docs/architecture/HERMES-ROADMAP.md
 !docs/architecture/HERMES-RUNTIME-M2.md
+!docs/architecture/HERMES-RUNTIME-M3.md
 
+!diana/runtime_verify/
+!diana/runtime_verify/*.py
+!diana/runtime_verify/*.mjs
+!diana/runtime_verify/*.sh
+!diana/runtime_verify/*.md
+!diana/runtime_verify/fixtures/
+!diana/runtime_verify/fixtures/*/
+!diana/runtime_verify/fixtures/*/*.html
+!diana/runtime_verify/fixtures/*/*.js
 !diana/runtime/
 !diana/runtime/*.py
 !diana/runtime/*.sh
