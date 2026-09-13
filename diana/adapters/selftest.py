@@ -99,11 +99,29 @@ def build_probe_tree(root: str) -> dict:
     }
 
 
+_PROBE_SEQ = {"n": 0}
+
+
+def _fresh_in_scope(tree: dict) -> str:
+    """A uniquely named in-scope file for each 'allows' probe.
+
+    Hermes keeps a per-task repeated-read guard (`tools/file_tools.py`
+    `_read_tracker`) that refuses the same path after a few consecutive reads,
+    and an equivalent guard for repeated searches. Reusing one sentinel would
+    make an 'allows' probe fail for a reason that has nothing to do with
+    enforcement, so each probe gets its own file and its own pattern.
+    """
+    _PROBE_SEQ["n"] += 1
+    path = Path(tree["repo"], f"probe_{_PROBE_SEQ['n']}.js")
+    path.write_text(f"var sentinel = 'in-scope-{_PROBE_SEQ['n']}';\n")
+    return str(path)
+
+
 def confinement_probes(tree: dict) -> list[dict]:
     """AC-2, confinement half. Every probe runs on a pool worker."""
     checks = [
         ("read_file allows an in-scope sentinel",
-         lambda: "in-scope" in _on_worker(_read, tree["in_scope"])),
+         lambda: "in-scope" in _on_worker(_read, _fresh_in_scope(tree))),
         ("read_file denies a readable sentinel outside allowed_roots",
          lambda: _denied(_on_worker(_read, tree["outside"]))),
         ("read_file denies an in-repo symlink escaping the root",
@@ -113,9 +131,9 @@ def confinement_probes(tree: dict) -> list[dict]:
         ("read_file denies an absolute path to a system file",
          lambda: _denied(_on_worker(_read, "/etc/passwd"))),
         ("search_files allows an in-scope directory",
-         lambda: not _denied(_on_worker(_search, "*.js", tree["repo"]))),
+         lambda: not _denied(_on_worker(_search, f"*probe*{_PROBE_SEQ['n']}*.js", tree["repo"]))),
         ("search_files denies an out-of-scope directory",
-         lambda: _denied(_on_worker(_search, "*", str(Path(tree["outside"]).parent)))),
+         lambda: _denied(_on_worker(_search, f"*{_PROBE_SEQ['n']}*", str(Path(tree["outside"]).parent)))),
     ]
     return _run(checks)
 
@@ -125,10 +143,11 @@ def capability_probes(tree: dict) -> list[dict]:
     canary = str(Path(tree["repo"], "canary.txt"))
     checks = [
         ("read_file executes when allowed",
-         lambda: "in-scope" in _on_worker(_call, "read_file", {"path": tree["in_scope"]})),
+         lambda: "in-scope" in _on_worker(_call, "read_file", {"path": _fresh_in_scope(tree)})),
         ("search_files executes when allowed",
          lambda: not _denied(_on_worker(_call, "search_files",
-                                        {"pattern": "*.js", "path": tree["repo"], "target": "files"}))),
+                                        {"pattern": f"*probe_{_PROBE_SEQ['n']}*",
+                                         "path": tree["repo"], "target": "files"}))),
         ("a crafted write_file call is blocked",
          lambda: _denied(_on_worker(_call, "write_file",
                                     {"path": canary, "content": "written"}))),
