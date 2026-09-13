@@ -43,6 +43,7 @@ through `model_tools.handle_function_call`, the same entry a live model reaches.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -236,20 +237,40 @@ def execute(
     except Exception as exc:
         raise blocking.Blocked(blocking.SCANNER_RAISED, f"{type(exc).__name__}: {exc}") from None
 
-    observations = _artifact.validate_observations(
-        turn_driver(contract_block, probe_tree) if turn_driver else []
-    )
+    try:
+        raw_observations = turn_driver(contract_block, probe_tree) if turn_driver else []
+    except blocking.Blocked:
+        record = getattr(turn_driver, "record", None)
+        if isinstance(record, dict):
+            (run_directory / "turn-record.json").write_text(
+                json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+        raise
+    observations = _artifact.validate_observations(raw_observations)
 
     document = _artifact.build(
         contract_block, scan_result, profile_block["categories"], observations
     )
     artifact_path = _artifact.persist(document, run_directory)
+
+    # M2-D5: a live turn records provider, model and the observed tool-call
+    # sequence in a SEPARATE file. Neither frozen schema may gain a field, so
+    # the driver exposes `.record` and the run persists it beside the artifact.
+    turn_record_path = None
+    record = getattr(turn_driver, "record", None)
+    if isinstance(record, dict):
+        turn_record_path = run_directory / "turn-record.json"
+        turn_record_path.write_text(
+            json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
     return {
         "run_id": contract_block["run_id"],
         "run_directory": str(run_directory),
         "contract_path": str(contract_path),
         "contract_digest": digest,
         "artifact_path": str(artifact_path),
+        "turn_record_path": str(turn_record_path) if turn_record_path else None,
         "document": document,
     }
 
