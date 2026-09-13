@@ -1,0 +1,25 @@
+{
+  "description": "The frozen preflight-failure matrix. Each case must produce BLOCKED with ITS OWN reason code -- a single over-broad check that rejected all eight would prove nothing about any of them. See docs/architecture/HERMES-RUNTIME-M1.md, 'Preflight-failure matrix'.",
+  "cases": [
+    {"id": "safe-mode-off", "control": "HERMES_SAFE_MODE != 1", "reason_code": "hermes-safe-mode-not-enabled",
+     "why": "plugin discovery, user shell hooks, MCP config and outbound webhooks would all load in-process"},
+    {"id": "background-review-on", "control": "background_review.enabled == true", "reason_code": "hermes-background-review-enabled",
+     "why": "a review fork runs on its own thread with its own tool whitelist, outside this run's ledger; its default is true"},
+    {"id": "side-question-on", "control": "side-question auxiliary execution enabled", "reason_code": "hermes-side-question-enabled",
+     "why": "auxiliary execution runs outside this run's ledger"},
+    {"id": "hermes-md-present", "control": ".hermes.md present", "reason_code": "hermes-md-present",
+     "why": "context integrity: cannot widen the envelope, but changes what the run means"},
+    {"id": "agents-override-present", "control": "AGENTS.override.md present", "reason_code": "agents-override-md-present",
+     "why": "context integrity: same reasoning as .hermes.md"},
+    {"id": "version-pin-mismatch", "control": "Hermes version pin mismatch", "reason_code": "hermes-version-pin-mismatch",
+     "why": "the patches target private functions; an upstream change must be legible"},
+    {"id": "capability-patch-dead", "control": "capability patch not live", "reason_code": "capability-patch-not-live",
+     "why": "handle_function_call unwrapped means every registered tool is reachable"},
+    {"id": "confinement-patch-dead", "control": "confinement patch not live", "reason_code": "confinement-patch-not-live",
+     "why": "_resolve_path_for_task unwrapped means arbitrary reads leave the repository"}
+  ],
+  "recorded_context_not_controls": ["approvals.mode"],
+  "subsumed_controls": {
+    "subagent_auto_approve": "delegate_task is not in the capability envelope, so it is denied by set membership with no dedicated control"
+  }
+}

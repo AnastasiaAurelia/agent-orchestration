@@ -1,0 +1,44 @@
+{
+  "description": "The frozen M1 fixture matrix: 8 fixtures, one rule. Each entry pins exact severity, exact sink line, and exact outcome, so a range or a vague assertion cannot hide a regression. See docs/architecture/HERMES-RUNTIME-M1.md, 'Fixture matrix'.",
+  "rule_id": "DOM-XSS-001",
+  "fixtures": [
+    {
+      "id": "fx01", "case": "vulnerable innerHTML from location.hash",
+      "findings": [{"file": "app.js", "line": 7, "severity": "HIGH", "source_kind": "location.hash", "sink_kind": "innerHTML", "flow": "DIRECT"}],
+      "suppressed": [], "unsupported_constructs": [], "scan_issues": [], "outcome": "COMPLETE"
+    },
+    {
+      "id": "fx02", "case": "document.write from location.search (closure is not one hardcoded pair)",
+      "findings": [{"file": "app.js", "line": 3, "severity": "HIGH", "source_kind": "location.search", "sink_kind": "document.write", "flow": "DIRECT"}],
+      "suppressed": [], "unsupported_constructs": [], "scan_issues": [], "outcome": "COMPLETE"
+    },
+    {
+      "id": "fx03", "case": "safe textContent usage (sink not in the closed set)",
+      "findings": [], "suppressed": [], "unsupported_constructs": [], "scan_issues": [], "outcome": "COMPLETE"
+    },
+    {
+      "id": "fx04", "case": "constant innerHTML (a sink alone is never a finding)",
+      "findings": [], "suppressed": [], "unsupported_constructs": [], "scan_issues": [], "outcome": "COMPLETE"
+    },
+    {
+      "id": "fx05", "case": "vulnerable line inside comments (line and block)",
+      "findings": [], "suppressed": [], "unsupported_constructs": [], "scan_issues": [], "outcome": "COMPLETE"
+    },
+    {
+      "id": "fx06", "case": "vulnerable line inside string literals (single and double quoted)",
+      "findings": [], "suppressed": [], "unsupported_constructs": [], "scan_issues": [], "outcome": "COMPLETE"
+    },
+    {
+      "id": "fx07", "case": "sanitized through DOMPurify.sanitize",
+      "findings": [],
+      "suppressed": [{"file": "app.js", "line": 4, "rule_id": "DOM-XSS-001", "reason": "enclosed in DOMPurify.sanitize"}],
+      "unsupported_constructs": [], "scan_issues": [], "outcome": "COMPLETE"
+    },
+    {
+      "id": "fx08", "case": "template-literal flow, pinning the NOT_ANALYZED limitation",
+      "findings": [], "suppressed": [],
+      "unsupported_constructs": [{"file": "app.js", "line": 4, "construct": "template_literal"}],
+      "scan_issues": [], "outcome": "INCOMPLETE"
+    }
+  ]
+}
