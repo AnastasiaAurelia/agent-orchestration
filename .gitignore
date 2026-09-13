@@ -43,9 +43,10 @@
 !diana/advisory/fixtures/
 !diana/advisory/fixtures/*.json
 !diana/advisory/fixtures/repo/
-!diana/advisory/fixtures/repo/*.html
-!diana/advisory/fixtures/repo/*.js
-!diana/advisory/fixtures/repo/*.css
+!diana/advisory/fixtures/repo/*/
+!diana/advisory/fixtures/repo/*/*.html
+!diana/advisory/fixtures/repo/*/*.js
+!diana/advisory/fixtures/repo/*/*.css
 !diana/adapters/fixtures/hermes-config/
 !diana/adapters/fixtures/hermes-config/*.json
 !diana/

@@ -2,7 +2,7 @@
   "description": "Empirically measured Diana behavior on the M1 tiny static fixture BEFORE the D1 advisory path existed. This is the 'before' half of acceptance criterion AC-12; it is a recorded measurement, not an aspiration.",
   "spec": "docs/architecture/HERMES-RUNTIME-M1.md",
   "measured_on": "2026-09-13",
-  "fixture": "diana/advisory/fixtures/repo",
+  "fixture": "diana/advisory/fixtures/repo/fx01",
   "planted_vulnerability": {
     "rule_id": "DOM-XSS-001",
     "file": "app.js",
