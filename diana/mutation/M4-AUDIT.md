@@ -204,3 +204,78 @@ replaced with an exact-equality check before any run.
 - M3's 4 failures were harness defects (F-A4), now corrected.
 
 The verdict is established only by the full post-erratum re-run recorded in §6.
+
+## 6. Post-erratum re-run and final verdict
+
+Commits, in order, with no amend and no rebase:
+
+| Commit | Contents |
+|---|---|
+| `7e2395e` | M4 implementation + frozen spec + acceptance suite + audit record (F-A1, F-A2 already fixed) |
+| `38bf27a` | `ERRATA-001`, corrected M4-REG-2 assertion, corrected M3 harness (F-A3, F-A4) |
+
+### Acceptance results, all measured on `38bf27a`
+
+| Suite | Result |
+|---|---|
+| M1 (`diana/advisory/test-m1.sh`) | **470 passed, 0 failed**, 9/9 suites, 13/13 criteria |
+| M2 (`diana/advisory/test-m2-live-turn.sh`) | **59 passed, 0 failed**, live provider |
+| M3 (`diana/runtime_verify/test-m3-runtime-verify.sh`) | **106 passed, 0 failed** |
+| M4 (`diana/mutation/test-m4-bounded-mutation.sh`) | **111 passed, 0 failed** |
+| Pre-existing Diana regression | **26/26 suites green** |
+
+M3 rose from 95/4-failed to 106/0 and M4 from 106 to 111 assertions, both because the corrections
+replaced coarse global checks with narrower, more numerous ones.
+
+### The twelve approval checks
+
+1. M1 green. 2. M2 green. 3. M3 green. 4. M4 green. 5. Diana regression green.
+6. **No orphan processes** — no process executes any `ms-playwright`/`chromium`/`headless_shell`
+   binary (resolved per-PID via `/proc/<pid>/exe`, not by name pattern); no leftover fixture server,
+   proxy, or listening socket; one live `claude`.
+7. **Frozen specs byte-identical** — M1/M2/M3 identical to accepted base `6753996`; M4 identical to
+   its own implementation commit `7e2395e`, i.e. not edited in place; none of the four appears in
+   the `38bf27a` diff.
+8. **`ERRATA-001` is the only normative correction** (one errata document in the tree), scoped
+   "M4-REG-2 only", naming exactly `contract.py`, `blocking.py`, `hermes_patches.py` and no other
+   pre-existing production module, with the negative-scope sentence explicit. The actual production
+   diff equals those three by **set equality**, recomputed independently of the suite.
+9. **M3 harness preserves both concepts** — zero remaining `M2_MERGE..HEAD` comparisons; historical
+   assertions anchored to `114b541..6753996` (a 10-entry, non-vacuous diff); substantive controls
+   still green on current HEAD (proxy/origin confinement, redirect refusal, sub-resource and
+   `fetch()` blocking, read-only target, static/runtime separation, anti-masquerade, D2 ownership,
+   termination).
+10. **All four fixes exercised** — F-A1: 2 assertions, F-A2: 2, F-A3: 7, F-A4: 17.
+11. **No relevant assertion vacuous** — every diff a regression assertion reads is non-empty
+    (15 / 10 / 15 entries); the REG-2 check is equality with zero subset checks remaining; and the
+    committed logic was falsification-tested against six counterfactual diffs, failing on a 4th
+    production module, an M1-owned scanner, a *missing* `blocking.py` (drift the other way), an
+    unauthorised harness edit, and a modified frozen M3 spec.
+12. **Nothing unintended committed** — no `.log`, `.bak`, `.pyc`, `__pycache__`, generated evidence
+    or temp file anywhere in `git ls-tree -r HEAD`; working tree has zero uncommitted entries; all
+    scratch artifacts live outside the repository.
+
+### Declared residual weaknesses
+
+Recorded rather than resolved, so a later reader is not misled:
+
+- **M4 has no pre-implementation git freeze commit** (§1). Its "frozen before implementation" claim
+  rests on filesystem mtimes, which is weaker evidence than M1–M3 carry.
+- **This was not an independent third-party audit** (§2). It was a fresh-session self-audit reading
+  the pinned Hermes source directly. It found four real defects, but no reviewer outside the
+  implementation has examined M4.
+- **M3's harness now asserts less about the global workflow map**, by design: it no longer fails when
+  a later milestone adds its own certified class. The compensating control is that each milestone
+  pins its own mapping (M4's suite pins `BOUNDED_REMEDIATION` → `D2`) while M3 still pins
+  `ADVISORY_SECURITY_REVIEW` → `D1`, its own class's absence from the contract map, `UNCERTIFIED`
+  for unknown classes, and a certified depth for every mapped class.
+- **M2-AC-4 is sensitive to live-provider behavior.** It needs ≥3 of 5 forced corruptions to land,
+  which requires the model to make enough tool calls. One post-commit run failed it after the API
+  call was interrupted; the boundary assertions all passed and a re-run returned 59/59. The
+  assertion measures enforcement *coverage*, not enforcement, and can flake on a degraded network.
+
+### Verdict
+
+**M4 APPROVED**, on the evidence above, subject to the declared residual weaknesses. Approval
+covers the bounded-mutation envelope as specified and corrected; it does not extend to
+`execute_code`, subagents, unattended execution, or durable run state, none of which M4 grants.
