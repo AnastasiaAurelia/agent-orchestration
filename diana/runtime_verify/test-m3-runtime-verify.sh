@@ -344,8 +344,26 @@ check("M3-AC-13 the advisory schema gained no runtime field",
 
 print("--- M3-AC-14: depth is Diana-owned; the contract is untouched ---")
 check("M3-AC-14 the ExecutionContract is still exactly SAFE/D1", cb1["risk"] == "SAFE" and cb1["depth"] == "D1")
-check("M3-AC-14 M3 added no workflow to the contract's certified map",
-      set(C.WORKFLOW_DEPTH) == {"ADVISORY_SECURITY_REVIEW"}, f"(got {sorted(C.WORKFLOW_DEPTH)})")
+# Corrected by the M4 audit (finding 4). This asserted the GLOBAL certified map
+# equals exactly {ADVISORY_SECURITY_REVIEW} -- which made any later milestone
+# that independently freezes its own class (M4-D5's BOUNDED_REMEDIATION is the
+# first) look like an M3 regression. The actual M3 invariant is narrower and is
+# what is asserted now: M3's own class keeps its certified depth, M3 added no
+# class of its own to the CONTRACT map, and depth remains Diana-owned and
+# unproposable by Hermes. Coexistence of independently frozen classes is
+# permitted; silent promotion is not.
+check("M3-AC-14 ADVISORY_SECURITY_REVIEW keeps its certified M3 depth of D1",
+      C.WORKFLOW_DEPTH.get("ADVISORY_SECURITY_REVIEW") == "D1",
+      f"(got {C.WORKFLOW_DEPTH.get('ADVISORY_SECURITY_REVIEW')})")
+check("M3-AC-14 M3's own workflow class is absent from the CONTRACT map (M3 added nothing)",
+      RV.RUNTIME_WORKFLOW not in C.WORKFLOW_DEPTH,
+      f"(contract map={sorted(C.WORKFLOW_DEPTH)})")
+check("M3-AC-14 an uncertified workflow class still has NO certified depth",
+      C.derive_depth("TOTALLY_NEW_WORKFLOW") == "UNCERTIFIED",
+      f"(got {C.derive_depth('TOTALLY_NEW_WORKFLOW')})")
+check("M3-AC-14 every class in the contract map has an explicitly certified depth",
+      all(d in ("D1", "D2", "D3") for d in C.WORKFLOW_DEPTH.values()),
+      f"(got {C.WORKFLOW_DEPTH})")
 check("M3-AC-14 D2 comes from the M3-owned runtime workflow map",
       r1["depth"] == "D2" and RV.RUNTIME_WORKFLOW_DEPTH[r1["workflow"]] == "D2")
 forged = dict(r1); forged["depth"] = "D3"
@@ -411,23 +429,66 @@ for spec in ("HERMES-RUNTIME-M1.md", "HERMES-RUNTIME-M2.md"):
                           capture_output=True, text=True, check=False).stdout.strip()
     check(f"M3-REG-1 the frozen {spec} is byte-identical since the accepted M2 main", now == then and now != "")
 
-changed = [l.split("\t") for l in git("diff", "--name-status", f"{M2_MERGE}..HEAD").strip().splitlines() if l]
-modified = [p for st, p in changed if st.startswith("M")]
-deleted = [p for st, p in changed if st.startswith("D")]
+# ---------------------------------------------------------------------------
+# Corrected by the M4 audit (audit finding 4). This block previously computed
+# `git diff M2_MERGE..HEAD` and asserted that the ONLY modified paths were M3's
+# own spec and the publish manifest. That conflated two different questions:
+#
+#   (A) what did M3 itself change?   -- a HISTORICAL fact, fixed forever
+#   (B) what must survive on a later HEAD? -- a REUSABLE invariant
+#
+# Anchored to a moving HEAD, (A) silently became "no later milestone may ever
+# modify anything", so every legitimate later change was reported as an M3
+# regression. M3's own frozen M3-REG-2 already grants the exemption this test
+# never implemented: "except where a future milestone explicitly freezes and
+# proves a replacement". No M3 specification text is changed here, and no
+# substantive M3 control is weakened -- the browser/origin confinement,
+# read-only target, static/runtime separation, anti-masquerade, D2 ownership
+# and process-termination assertions above are untouched and still run on the
+# current HEAD.
+M3_SNAPSHOT = "6753996"   # accepted M3 main: the M3 implementation snapshot
+
+# --- (A) HISTORICAL M3 ACCEPTANCE: anchored to M3's own implementation range.
+hist = [l.split("\t") for l in git("diff", "--name-status", f"{M2_MERGE}..{M3_SNAPSHOT}").strip().splitlines() if l]
+hist_modified = [p for st, p in hist if st.startswith("M")]
+hist_deleted = [p for st, p in hist if st.startswith("D")]
 # .gitignore is a deny-all-then-allowlist manifest: in this repository a new
 # file is unpublishable until it is named there. Adding entries is how M3's own
 # files become tracked at all, and it changes no Diana/AO behavior.
 allowed_modified = {"docs/architecture/HERMES-RUNTIME-M3.md", ".gitignore"}
-check("M3-REG-2 no pre-existing Diana/AO module was modified",
-      set(modified) <= allowed_modified, f"(modified={modified})")
-check("M3-REG-2 the only pre-existing file M3 touched is the publish manifest",
-      [p for p in modified if p != "docs/architecture/HERMES-RUNTIME-M3.md"] in ([], [".gitignore"]),
-      f"(modified={modified})")
-check("M3-REG-2 M3 modified no M1-owned module (M3-D2)",
-      not any(p.startswith(("diana/runtime/", "diana/advisory/", "diana/adapters/", "diana/profile/")) for p in modified),
-      f"(modified={modified})")
-check("M3-REG-2 M3 freezes no replacement, so its permitted-replacement set is empty", True)
-check("M3-REG-3 nothing was deleted by M3", deleted == [], f"(deleted={deleted})")
+check("M3-REG-2 (historical) M3 itself modified no pre-existing Diana/AO module",
+      set(hist_modified) <= allowed_modified, f"(modified={hist_modified})")
+check("M3-REG-2 (historical) the only pre-existing file M3 touched is the publish manifest",
+      [p for p in hist_modified if p != "docs/architecture/HERMES-RUNTIME-M3.md"] in ([], [".gitignore"]),
+      f"(modified={hist_modified})")
+check("M3-REG-2 (historical) M3 modified no M1-owned module (M3-D2)",
+      not any(p.startswith(("diana/runtime/", "diana/advisory/", "diana/adapters/", "diana/profile/")) for p in hist_modified),
+      f"(modified={hist_modified})")
+check("M3-REG-2 (historical) M3 froze no replacement, so its permitted set was empty", True)
+check("M3-REG-3 (historical) nothing was deleted by M3", hist_deleted == [], f"(deleted={hist_deleted})")
+
+# --- (B) REUSABLE LATER-MILESTONE REGRESSION: evaluated on the CURRENT HEAD.
+# Frozen M3 spec integrity, plus the invariants that must survive any later
+# milestone -- not "nothing may change".
+m3_spec_now = git("hash-object", "docs/architecture/HERMES-RUNTIME-M3.md").strip()
+m3_spec_then = git("rev-parse", f"{M3_SNAPSHOT}:docs/architecture/HERMES-RUNTIME-M3.md").strip()
+check("M3-REG-1 the frozen M3 specification is byte-identical on the current HEAD",
+      m3_spec_now == m3_spec_then and m3_spec_now != "")
+
+later = [l.split("\t") for l in git("diff", "--name-status", f"{M3_SNAPSHOT}..HEAD").strip().splitlines() if l]
+later_deleted = [p for st, p in later if st.startswith("D")]
+check("M3-REG-3 no later milestone has deleted anything that existed at accepted M3 main",
+      later_deleted == [], f"(deleted={later_deleted})")
+
+# M3's own production modules must still be present and importable. A later
+# milestone may add its own files; it may not remove or gut M3's.
+m3_own = sorted(q.name for q in (diana / "runtime_verify").glob("*.py"))
+check("M3-REG-2 M3's own production module is still present on the current HEAD",
+      m3_own == ["runtime_verify.py"], f"(modules={m3_own})")
+check("M3-REG-2 M3 still owns its runtime workflow map, separate from the contract's",
+      RV.RUNTIME_WORKFLOW_DEPTH.get(RV.RUNTIME_WORKFLOW) == "D2"
+      and RV.RUNTIME_WORKFLOW not in C.WORKFLOW_DEPTH,
+      f"(runtime map={RV.RUNTIME_WORKFLOW_DEPTH}, contract map={sorted(C.WORKFLOW_DEPTH)})")
 
 for suite in ("runtime/test-contract.sh", "profile/test-repo-profile.sh",
               "advisory/test-dom-scan.sh", "advisory/test-artifact.sh"):
