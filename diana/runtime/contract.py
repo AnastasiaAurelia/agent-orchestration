@@ -52,10 +52,30 @@ KNOWN_READ_ONLY_TOOLS = frozenset({"read_file", "search_files"})
 
 # Workflow class -> depth (D13). A workflow absent from this map has no
 # certified depth and therefore cannot be executed.
-WORKFLOW_DEPTH = {"ADVISORY_SECURITY_REVIEW": "D1"}
+WORKFLOW_DEPTH = {
+    "ADVISORY_SECURITY_REVIEW": "D1",
+    # M4-D5. Depth still comes from the certified workflow class and Hermes
+    # still has no channel to propose one.
+    "BOUNDED_REMEDIATION": "D2",
+}
 
 M1_RISK = "SAFE"
 M1_DEPTH = "D1"
+
+# --- contract classes (M4-D4) ---------------------------------------------
+#
+# M1 D15 -- "M1 executes only SAFE/D1" -- is a frozen behavior, so it stays the
+# DEFAULT here and a milestone that widens authority must name the class it
+# executes. Permission is declared, never inherited by editing a shared default.
+M1_CLASS = (M1_RISK, M1_DEPTH)
+M4_CLASS = ("ELEVATED", "D2")
+DEFAULT_ACCEPT = (M1_CLASS,)
+
+# The envelope's M1 shape is exactly `allowed_tools` and stays valid unchanged
+# (M4-D2). The optional keys constrain HOW a granted tool may be used; which
+# tools are granted remains `allowed_tools` alone (M1 D16).
+ENVELOPE_REQUIRED_KEYS = {"allowed_tools"}
+ENVELOPE_OPTIONAL_KEYS = {"write_scope", "allowed_commands", "command_policy"}
 
 CONTRACT_KEYS = (
     "contract_version",
@@ -128,9 +148,26 @@ def build(
     denied_subpaths: tuple[str, ...] = DEFAULT_DENIED_SUBPATHS,
     run_id: str | None = None,
     created_at: str | None = None,
+    write_roots: tuple[str, ...] | None = None,
+    allowed_commands: tuple[str, ...] | None = None,
+    command_policy: dict | None = None,
+    accept=None,
 ) -> dict:
-    """Build a contract and prove it is exactly SAFE/D1, or raise Blocked."""
+    """Build a contract and prove it is an accepted class, or raise Blocked.
+
+    `accept` defaults to M1's single class, so every existing caller keeps M1's
+    exact behavior and a widening milestone has to say so.
+    """
     envelope = {"allowed_tools": sorted(allowed_tools)}
+    if write_roots is not None:
+        envelope["write_scope"] = {
+            "allowed_roots": [_read_scope.canonicalize(r) for r in write_roots],
+            "denied_subpaths": list(denied_subpaths),
+        }
+    if allowed_commands is not None:
+        envelope["allowed_commands"] = list(allowed_commands)
+    if command_policy is not None:
+        envelope["command_policy"] = dict(command_policy)
     root = _read_scope.canonicalize(repo_root)
     contract = {
         "contract_version": CONTRACT_VERSION,
@@ -152,12 +189,18 @@ def build(
         },
         "repo_profile": repo_profile,
     }
-    validate(contract)
+    validate(contract, accept=accept)
     return contract
 
 
-def validate(contract: object) -> None:
-    """Raise Blocked unless the contract is well-formed and exactly SAFE/D1."""
+def validate(contract: object, accept=None) -> None:
+    """Raise Blocked unless the contract is well-formed and an accepted class.
+
+    `accept` is a sequence of (risk, depth) pairs and DEFAULTS TO M1's, so
+    calling `validate(contract)` is byte-for-byte M1's frozen behavior including
+    its reason code (M4-D4, M4-AC-16).
+    """
+    accept = tuple(accept) if accept else DEFAULT_ACCEPT
     if not isinstance(contract, dict):
         raise blocking.Blocked(blocking.CONTRACT_MALFORMED, "contract is not an object")
 
@@ -188,11 +231,27 @@ def validate(contract: object) -> None:
         raise blocking.Blocked(blocking.CONTRACT_MALFORMED, "target.dirty must be a boolean")
 
     envelope = contract["capability_envelope"]
-    if not isinstance(envelope, dict) or set(envelope) != {"allowed_tools"}:
+    if not isinstance(envelope, dict):
+        raise blocking.Blocked(blocking.CONTRACT_MALFORMED, "capability_envelope must be an object")
+    keys = set(envelope)
+    if not ENVELOPE_REQUIRED_KEYS <= keys or not keys <= (ENVELOPE_REQUIRED_KEYS | ENVELOPE_OPTIONAL_KEYS):
         raise blocking.Blocked(
             blocking.CONTRACT_MALFORMED,
-            "capability_envelope must contain exactly allowed_tools",
+            "capability_envelope must contain allowed_tools and no unknown key; got "
+            + str(sorted(keys)),
         )
+    if "write_scope" in envelope:
+        try:
+            _read_scope.validate_read_scope(envelope["write_scope"])
+        except _read_scope.ScopeError as exc:
+            raise blocking.Blocked(blocking.WRITE_SCOPE_MALFORMED, str(exc)) from None
+    if "allowed_commands" in envelope:
+        commands = envelope["allowed_commands"]
+        if not isinstance(commands, list) or not all(isinstance(x, str) and x for x in commands):
+            raise blocking.Blocked(
+                blocking.CONTRACT_MALFORMED, "allowed_commands must be a list of non-empty strings")
+    if "command_policy" in envelope and not isinstance(envelope["command_policy"], dict):
+        raise blocking.Blocked(blocking.CONTRACT_MALFORMED, "command_policy must be an object")
 
     try:
         _read_scope.validate_read_scope(contract["read_scope"])
@@ -209,12 +268,30 @@ def validate(contract: object) -> None:
             f"stored risk/depth ({contract['risk']}/{contract['depth']}) "
             f"disagree with derived ({risk}/{depth})",
         )
-    if risk != M1_RISK or depth != M1_DEPTH:
-        # Never downgrade, never attempt (D15).
+    if (risk, depth) not in accept:
+        # Never downgrade, never attempt (D15). M1's own reason code is
+        # preserved exactly when M1's default class set is in force, so its
+        # frozen observable does not change.
+        if accept == DEFAULT_ACCEPT:
+            raise blocking.Blocked(
+                blocking.CONTRACT_NOT_SAFE_D1,
+                f"derived {risk}/{depth}; M1 executes only {M1_RISK}/{M1_DEPTH}",
+            )
         raise blocking.Blocked(
-            blocking.CONTRACT_NOT_SAFE_D1,
-            f"derived {risk}/{depth}; M1 executes only {M1_RISK}/{M1_DEPTH}",
+            blocking.CONTRACT_CLASS_NOT_ACCEPTED,
+            f"derived {risk}/{depth}; this run accepts {sorted(accept)}",
         )
+
+    # M4-D6: a run may read more than it may write, never the reverse. Checked
+    # here rather than at use, so an impossible envelope cannot be persisted.
+    if "write_scope" in envelope:
+        read_roots, _ = _read_scope.validate_read_scope(contract["read_scope"])
+        for root in envelope["write_scope"]["allowed_roots"]:
+            if not _read_scope.is_allowed(root, contract["read_scope"]):
+                raise blocking.Blocked(
+                    blocking.WRITE_SCOPE_EXCEEDS_READ_SCOPE,
+                    f"write root {root!r} is not inside read_scope {read_roots}",
+                )
 
 
 # --- run directory (spec: TCB "contract digest + run_id bind") ---
@@ -224,14 +301,14 @@ def run_dir(run_id: str, base: str | None = None) -> Path:
     return root / run_id
 
 
-def persist(contract: dict, base: str | None = None) -> tuple[Path, str]:
+def persist(contract: dict, base: str | None = None, accept=None) -> tuple[Path, str]:
     """Write the contract to its per-run directory; return (path, digest).
 
     Per-run directory 0700, contract.json 0600, outside the target repository.
     Per-run paths also make a stale contract from an earlier run unusable and
     let concurrent runs coexist without a lock.
     """
-    validate(contract)
+    validate(contract, accept=accept)
     directory = run_dir(contract["run_id"], base)
     directory.mkdir(parents=True, exist_ok=True)
     os.chmod(directory, 0o700)
@@ -243,7 +320,7 @@ def persist(contract: dict, base: str | None = None) -> tuple[Path, str]:
     return path, digest(contract)
 
 
-def load_and_verify(path: str | Path, expected_run_id: str, expected_digest: str) -> dict:
+def load_and_verify(path: str | Path, expected_run_id: str, expected_digest: str, accept=None) -> dict:
     """Read a persisted contract back, proving it is the one bound to this run.
 
     Binding is env-carried run_id + digest against a per-run path. Hermes has no
@@ -256,7 +333,7 @@ def load_and_verify(path: str | Path, expected_run_id: str, expected_digest: str
         contract = json.loads(raw.decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise blocking.Blocked(blocking.CONTRACT_MALFORMED, f"unreadable contract: {exc}") from None
-    validate(contract)
+    validate(contract, accept=accept)
     actual = digest(contract)
     if actual != expected_digest:
         raise blocking.Blocked(

@@ -40,6 +40,15 @@ READ_SCOPE_MALFORMED = "read-scope-malformed"
 HERMES_TURN_FAILED = "hermes-turn-failed"
 HERMES_PROVIDER_UNAVAILABLE = "hermes-provider-unavailable"
 
+# --- Bounded mutation (M4-D4, M4-D15) ---
+# CONTRACT_CLASS_NOT_ACCEPTED is distinct from CONTRACT_NOT_SAFE_D1 on purpose:
+# M1's code means "M1 executes only SAFE/D1" and is a frozen observable, so a
+# later milestone refusing a class it does not execute must say something else.
+CONTRACT_CLASS_NOT_ACCEPTED = "contract-class-not-accepted"
+WRITE_SCOPE_MALFORMED = "write-scope-malformed"
+WRITE_SCOPE_EXCEEDS_READ_SCOPE = "write-scope-exceeds-read-scope"
+RECONCILIATION_MISMATCH = "reconciliation-mismatch"
+
 # --- Run-time process failures (spec: failure-semantics table) ---
 REPO_PROFILE_FAILED = "repo-profile-failed"
 SCANNER_RAISED = "scanner-raised"

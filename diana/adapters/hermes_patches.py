@@ -95,6 +95,12 @@ _STATE = {"confinement": None, "capability": None, "dispatch": None}
 REFUSAL = ('{"error": "diana: tool %s is not in the execution contract '
            'capability envelope; refused before dispatch"}')
 
+# M4: a tool granted by NAME whose ARGUMENTS fall outside the envelope. Distinct
+# text from REFUSAL because the two failures mean different things to an
+# operator: one says "you may not use this tool", the other "not like that".
+ARG_REFUSAL = ('{"error": "diana: %s call refused before dispatch; '
+               'argument policy: %s"}')
+
 
 class ScopeDenied(Exception):
     """Raised by the confinement wrapper when a path is outside the contract.
@@ -186,12 +192,18 @@ def confinement_live() -> bool:
 
 # --- patch 2: capability (D21, D22) ---------------------------------------
 
-def install_capability(allowed_tools) -> None:
+def install_capability(allowed_tools, policy=None) -> None:
     """Refuse any tool outside the contract envelope BEFORE its handler runs.
 
     The invariant is `tool_name in allowed_tools or the call is blocked before
     its handler executes`. The global registry may keep all 88 tools; their
     existence is irrelevant if dispatch cannot reach them outside the contract.
+
+    `policy` (M4-D1) is the optional per-tool ARGUMENT policy. Omitted, this
+    function behaves exactly as M1 froze it -- a name-set membership test and
+    nothing else -- which is what keeps every M1 suite green unmodified. Given,
+    the same boundary additionally adjudicates paths and commands. The boundary
+    is not replaced; it gets a richer policy.
     """
     if str(HERMES_HOME) not in sys.path:
         sys.path.insert(0, str(HERMES_HOME))
@@ -205,6 +217,13 @@ def install_capability(allowed_tools) -> None:
             # Fail closed on unknown names too: a tool Hermes gains in a future
             # version is denied by set membership, with no special case.
             return REFUSAL % function_name
+        if policy is not None:
+            # This is the LAST point before the handler, so it sees the final
+            # arguments -- including any a plugin `modify` hook rewrote after
+            # the dispatch guard looked at them.
+            verdict = policy.decide(function_name, function_args)
+            if not verdict.allowed:
+                return ARG_REFUSAL % (function_name, verdict.reason.replace('"', "'"))
         return original(function_name, function_args, *args, **kwargs)
 
     guarded.__name__ = "handle_function_call"
@@ -218,15 +237,18 @@ def install_capability(allowed_tools) -> None:
         if module is not None and hasattr(module, "handle_function_call"):
             setattr(module, "handle_function_call", guarded)
             rebound.append(mod_name)
-    _STATE["capability"] = {"allowed_tools": sorted(allowed), "rebound": rebound}
-    _install_dispatch_guard(allowed)
+    _STATE["capability"] = {"allowed_tools": sorted(allowed), "rebound": rebound,
+                            "policy": policy is not None}
+    _install_dispatch_guard(allowed, policy)
 
 
-def _install_dispatch_guard(allowed) -> None:
+def _install_dispatch_guard(allowed, policy=None) -> None:
     """Guard the agent loop's common dispatch funnel (both executor paths).
 
     Without this, every tool in `INLINE_TOOL_EXECUTORS` -- `delegate_task`
-    among them -- executes without ever passing `handle_function_call`.
+    among them -- executes without ever passing `handle_function_call`. The
+    argument policy is applied here too, because an inline tool never reaches
+    the other guard at all.
     """
     import agent.tool_executor as te
 
@@ -238,6 +260,12 @@ def _install_dispatch_guard(allowed) -> None:
             def refused(_args, _name=name):
                 return REFUSAL % _name
             return original(agent_, state, ref, execute=refused, **kwargs)
+        if policy is not None:
+            verdict = policy.decide(name, getattr(ref, "args", None))
+            if not verdict.allowed:
+                def arg_refused(_args, _name=name, _why=verdict.reason):
+                    return ARG_REFUSAL % (_name, _why.replace('"', "'"))
+                return original(agent_, state, ref, execute=arg_refused, **kwargs)
         return original(agent_, state, ref, execute=execute, **kwargs)
 
     guarded_dispatch.__name__ = "_dispatch_authorized_once"
