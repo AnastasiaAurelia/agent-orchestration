@@ -303,6 +303,128 @@ report = RM.reconcile_target(cb3, before)
 check("M4-AC-12 a deletion inside write_scope is seen and stays within the envelope",
       "src/ok.py" in report["changes"]["deleted"] and report["within_envelope"])
 
+# ---------- F-A5: reconciliation must survive ANY turn failure (M4-D14/D15) ----
+print("--- F-A5: reconciliation runs after an unexpected turn exception ---")
+import threading as _thr
+
+# Case 1: the driver mutates OUTSIDE write_scope and then dies with a RuntimeError
+# that Diana never normalised. Reconciliation must still run, and the mismatch
+# must outrank the raw RuntimeError.
+root6 = fresh("fa5-mismatch")
+Path(root6, "src").mkdir(exist_ok=True)
+def _driver_mutates_then_raises(cb):
+    Path(cb["target"]["repo_root"], "calc.py").write_text("# escaped the envelope\n")
+    raise RuntimeError("driver exploded after mutating")
+P.uninstall()
+outcome, raised = None, None
+try:
+    RM.execute(task="fa5", repo_root=root6, allowed_commands=("python3 check.py",),
+               turn_driver=_driver_mutates_then_raises,
+               write_roots=(str(Path(root6, "src")),), require_preflight=False)
+except blocking.Blocked as exc:
+    outcome, raised = exc.code, exc
+except RuntimeError as exc:
+    outcome, raised = "RAW_RUNTIME_ERROR", exc
+check("F-A5 an unexpected turn exception does NOT skip reconciliation",
+      outcome == blocking.RECONCILIATION_MISMATCH, f"(got {outcome}: {raised})")
+check("F-A5 the mismatch outranks the raw RuntimeError",
+      isinstance(raised, blocking.Blocked), f"(got {type(raised).__name__})")
+check("F-A5 the original RuntimeError is preserved as the cause, not discarded",
+      isinstance(getattr(raised, "__cause__", None), RuntimeError),
+      f"(cause={type(getattr(raised, '__cause__', None)).__name__})")
+check("F-A5 the out-of-envelope mutation really did land (so reconciliation had work to do)",
+      "escaped the envelope" in Path(root6, "calc.py").read_text())
+
+# Case 2: the driver raises with NO envelope violation. Reconciliation still runs,
+# and the original exception must reach the caller unchanged.
+root7 = fresh("fa5-clean")
+Path(root7, "src").mkdir(exist_ok=True)
+sentinel = RuntimeError("clean failure, nothing escaped")
+def _driver_raises_only(cb):
+    Path(cb["target"]["repo_root"], "src", "inside.py").write_text("y = 2\n")
+    raise sentinel
+P.uninstall()
+outcome2 = None
+try:
+    RM.execute(task="fa5b", repo_root=root7, allowed_commands=("python3 check.py",),
+               turn_driver=_driver_raises_only,
+               write_roots=(str(Path(root7, "src")),), require_preflight=False)
+except blocking.Blocked as exc:
+    outcome2 = f"BLOCKED:{exc.code}"
+except RuntimeError as exc:
+    outcome2 = exc
+check("F-A5 without a violation the ORIGINAL exception is preserved, not replaced",
+      outcome2 is sentinel, f"(got {outcome2!r})")
+check("F-A5 the in-scope write still landed, proving the turn really ran",
+      Path(root7, "src", "inside.py").exists())
+
+# ---------- F-A6: the snapshot must never follow a symlink -------------------
+print("--- F-A6: reconciliation snapshot does not follow symlinks ---")
+outside_dir = Path(tmp, "fa6-outside"); outside_dir.mkdir(exist_ok=True)
+outside_secret = outside_dir / "secret.txt"
+outside_secret.write_text("OUTSIDE-SECRET-CONTENT\n")
+root8 = fresh("fa6")
+link = Path(root8, "link.txt")
+link.symlink_to(outside_secret)
+
+snap = RC.snapshot(root8)
+check("F-A6 the symlink is recorded in the snapshot at all", "link.txt" in snap, f"({sorted(snap)})")
+check("F-A6 the snapshot records it AS A SYMLINK, not as file content",
+      snap["link.txt"].startswith("<symlink:"), f"(got {snap['link.txt']})")
+import hashlib as _h
+content_digest = _h.sha256(outside_secret.read_bytes()).hexdigest()
+check("F-A6 the snapshot value is NOT the digest of the outside target's content",
+      snap["link.txt"] != content_digest)
+check("F-A6 no outside path leaked into the snapshot keys",
+      all(not k.startswith("/") and ".." not in k for k in snap), f"({sorted(snap)})")
+
+# Repointing the link is itself a detected change...
+before8 = RC.snapshot(root8)
+other = outside_dir / "other.txt"; other.write_text("DIFFERENT\n")
+link.unlink(); link.symlink_to(other)
+after8 = RC.snapshot(root8)
+check("F-A6 repointing the symlink IS detected as a change",
+      "link.txt" in RC.diff(before8, after8)["modified"],
+      f"({RC.diff(before8, after8)})")
+
+# ...while changing only the OUTSIDE target's content is invisible, which is the
+# whole point: Diana never read it.
+before9 = RC.snapshot(root8)
+other.write_text("MUTATED-OUTSIDE-CONTENT-THAT-DIANA-MUST-NOT-SEE\n")
+after9 = RC.snapshot(root8)
+check("F-A6 mutating the outside target is invisible to the snapshot (it was never read)",
+      RC.diff(before9, after9)["modified"] == [], f"({RC.diff(before9, after9)})")
+
+# A symlink aimed at a fifo would block forever if opened; and a fifo directly in
+# the tree would too. Both must be recorded without opening.
+root10 = fresh("fa6-fifo")
+fifo_out = outside_dir / "blocker.fifo"
+if not fifo_out.exists():
+    os.mkfifo(str(fifo_out))
+Path(root10, "fifo-link").symlink_to(fifo_out)
+os.mkfifo(str(Path(root10, "direct.fifo")))
+done, snap10 = _thr.Event(), {}
+def _snap():
+    global snap10
+    snap10 = RC.snapshot(root10); done.set()
+t = _thr.Thread(target=_snap, daemon=True); t.start()
+check("F-A6 the snapshot does not HANG on a symlink to a fifo or on a fifo itself",
+      done.wait(20), "(timed out after 20s -- snapshot opened a blocking file)")
+if done.is_set():
+    check("F-A6 a symlink to a fifo is recorded as a symlink, unopened",
+          snap10.get("fifo-link", "").startswith("<symlink:"), f"(got {snap10.get('fifo-link')})")
+    check("F-A6 a fifo in the tree is recorded as special, unopened",
+          snap10.get("direct.fifo", "").startswith("<special:"), f"(got {snap10.get('direct.fifo')})")
+
+# A symlinked DIRECTORY must be recorded and never descended into.
+root11 = fresh("fa6-dirlink")
+Path(root11, "dirlink").symlink_to(outside_dir, target_is_directory=True)
+snap11 = RC.snapshot(root11)
+check("F-A6 a symlinked directory is recorded as a symlink",
+      snap11.get("dirlink", "").startswith("<symlink:"), f"(got {snap11.get('dirlink')})")
+check("F-A6 the snapshot did not descend into the symlinked directory",
+      not any(k.startswith("dirlink/") for k in snap11), f"({sorted(snap11)})")
+
 # ===================== M4-AC-14: prior boundaries intact ==================
 print("--- M4-AC-14: prior boundaries under the widened envelope ---")
 root4 = fresh("boundary")

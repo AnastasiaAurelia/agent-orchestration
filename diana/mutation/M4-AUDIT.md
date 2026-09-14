@@ -189,6 +189,71 @@ operator precedence to `len(m3_own) >= 2` — an assertion that passes or fails 
 reason, and the exact accidental-pass pattern M3's own audit had already found once. It was
 replaced with an exact-equality check before any run.
 
+### F-A5 — reconciliation was not guaranteed once a mutating turn had begun
+
+Raised by **independent review**, after the self-audit had declared M4 approved.
+
+`remediate.execute()` caught only `blocking.Blocked`:
+
+```python
+except blocking.Blocked as exc:
+    turn_error = exc
+report = reconcile_target(contract_block, before)   # unreachable on anything else
+```
+
+Any other exception from the turn driver — a `RuntimeError` from a bug, a `TypeError` from a
+changed Hermes signature, an interrupt — propagated straight out of `execute()` **before**
+`reconcile_target()` ran. Reconciliation therefore depended on the failure having already been
+normalised into `Blocked`, which inverts M4-D14/D15: a mutating turn that died half-way is the
+case *most* likely to have left something behind, and it was precisely the case that skipped the
+audit.
+
+Confirmed structurally against the pre-fix source: one `except` clause, `Blocked`-only, with no
+path to `reconcile_target` for any other exception type.
+
+**Resolution.** `execute()` now captures **every** `BaseException` without losing it, always
+reconciles, lets a mismatch take precedence, and otherwise re-raises the original:
+
+- mutation outside the envelope + unexpected exception → `RECONCILIATION_MISMATCH` **blocks**, with
+  the original exception preserved as `__cause__` rather than discarded;
+- unexpected exception with no violation → reconciliation still runs and the **original** exception
+  reaches the caller unchanged;
+- reconciliation itself failing cannot hide the turn's error — it is chained, not swallowed.
+
+Deliberately not a `finally`: the report must be able to raise a `Blocked` that outranks
+`turn_error`, and a `finally` that raises would discard the original without a cause chain.
+
+**Locked by** six assertions, including that the out-of-envelope mutation really landed (so
+reconciliation had work to do) and that the in-scope write really landed (so the turn really ran).
+
+### F-A6 — the reconciliation snapshot followed file symlinks
+
+Raised by the same independent review.
+
+`reconcile.snapshot()` hashed each entry with `Path.read_bytes()`, which **follows symlinks**. A
+symlink inside the target repository therefore made Diana's own reconciliation read a file
+**outside** the repository — the detection control reaching past the boundary it exists to police.
+A link aimed at a fifo or device node could also block the snapshot indefinitely, hanging the
+audit rather than reporting it.
+
+**Proven, not argued.** Against the pre-fix module, a repo-internal symlink to an outside file
+produced a snapshot value byte-identical to `sha256(outside_file)` — Diana had read content it
+must never see. The fixed module records `<symlink:…>` instead.
+
+**Resolution.** Nothing follows a link or opens a non-regular file:
+
+- `lstat()` classifies each entry without resolving the final component;
+- symlinks are recorded as a hash of their `os.readlink` target string, so **repointing the link is
+  still detected** while its target is never opened;
+- non-regular files (fifo, socket, device) are recorded by type, never opened;
+- symlinked **directories** are recorded and pruned explicitly rather than left silently
+  unrepresented, since `os.walk(followlinks=False)` lists but never descends into them.
+
+**Locked by** eleven assertions, including that mutating the outside target is *invisible* to the
+snapshot (proving it was never read), that repointing the link *is* detected, that a symlink to a
+fifo and a fifo in the tree do not hang the snapshot (20s watchdog on a worker thread), and that
+the walk does not descend into a symlinked directory.
+
 ## 5. Verdict
 
 **Not approved at the time of writing.** Recorded here for the audit trail:
@@ -276,6 +341,44 @@ Recorded rather than resolved, so a later reader is not misled:
 
 ### Verdict
 
-**M4 APPROVED**, on the evidence above, subject to the declared residual weaknesses. Approval
-covers the bounded-mutation envelope as specified and corrected; it does not extend to
+**Approval WITHDRAWN and re-established.** The verdict above was recorded on `86e15b5`. An
+**independent review** then found two further defects — F-A5 and F-A6 — both in the reconciliation
+path, both real rather than theoretical, and both fixed in the follow-up commit recorded in §7.
+
+That sequence is itself the most useful finding in this document. The self-audit of §2 explicitly
+declared that no reviewer outside the implementation had examined M4, and named that as a residual
+weakness. The first independent reviewer to look found two more defects in a control the self-audit
+had signed off. **A self-audit is not a substitute for independent review, and this milestone is the
+evidence.**
+
+Approval covers the bounded-mutation envelope as specified and corrected; it does not extend to
 `execute_code`, subagents, unattended execution, or durable run state, none of which M4 grants.
+
+## 7. F-A5 / F-A6 round
+
+Commit: the audit-fix follow-up (no existing commit amended, no frozen spec edited).
+
+| Suite | Result |
+|---|---|
+| M4 | **128 passed, 0 failed** (111 → 128: +17 F-A5/F-A6 assertions) |
+| M1 | see the run recorded with this commit |
+| M2 | see the run recorded with this commit |
+| M3 | see the run recorded with this commit |
+| Diana regression | see the run recorded with this commit |
+
+Both defects were demonstrated against the pre-fix sources before being fixed, so neither rests on
+reading the new code's own claims:
+
+- F-A6: pre-fix snapshot of a repo-internal symlink returned exactly `sha256(outside target)`.
+- F-A5: pre-fix `execute()` had a single `Blocked`-only `except` with no path to
+  `reconcile_target()` for any other exception type.
+
+### Revised residual weaknesses
+
+- The §1 process deviation (no pre-implementation freeze commit) is unchanged and unfixable without
+  fabricating history.
+- M4 **has now had one round of independent review**, which found F-A5 and F-A6. It has not had an
+  independent review *of the F-A5/F-A6 fixes themselves*, which are the newest and least-reviewed
+  code in the milestone.
+- The M3 global-workflow-map scope reduction and `M2-AC-4`'s live-provider sensitivity are unchanged
+  from §6.

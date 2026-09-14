@@ -111,16 +111,44 @@ def execute(*, task: str, repo_root: str, allowed_commands, turn_driver,
             require_preflight=require_preflight)
 
     before = snapshot_target(contract_block)
-    turn_error = None
+    turn_error: BaseException | None = None
     try:
         turn_driver(contract_block)
-    except blocking.Blocked as exc:
-        # Reconcile anyway: a failed turn may still have mutated something, and
-        # that is exactly the case an audit must not skip.
+    except BaseException as exc:  # noqa: BLE001 - deliberate; see below
+        # M4-D14/D15 (audit finding F-A5). This caught only `Blocked`, which made
+        # the audit depend on the failure having ALREADY been normalised: a driver
+        # raising anything else -- a RuntimeError from a bug, a TypeError from a
+        # changed Hermes signature, an interrupt -- propagated straight out and
+        # skipped reconciliation entirely. That is exactly the case reconciliation
+        # exists for, because a mutating turn that died half-way is the one most
+        # likely to have left something behind.
+        #
+        # So every BaseException is caught, and none is lost: it is held here and
+        # re-raised below once reconciliation has had its say.
         turn_error = exc
 
-    report = reconcile_target(contract_block, before)
-    _reconcile.require_within_envelope(report)
+    # ALWAYS reconcile. Not in a `finally`, because the report must be able to
+    # raise a Blocked that takes precedence over `turn_error`, and a `finally`
+    # that raises would discard the original without a cause chain.
+    try:
+        report = reconcile_target(contract_block, before)
+    except BaseException as rec_exc:
+        # Reconciliation itself failed. It must not hide the turn's failure.
+        if turn_error is not None:
+            raise rec_exc from turn_error
+        raise
+
+    try:
+        _reconcile.require_within_envelope(report)
+    except blocking.Blocked as mismatch:
+        # A mismatch OUTRANKS the turn's own error (M4-D15): either way the run
+        # yields no deliverable, and "something landed outside the envelope" is
+        # the more serious fact about the system. The original failure is kept as
+        # the cause rather than discarded, so diagnosis loses nothing.
+        if turn_error is not None:
+            raise mismatch from turn_error
+        raise
+
     if turn_error is not None:
         raise turn_error
     return {"contract": contract_block, "reconciliation": report}
