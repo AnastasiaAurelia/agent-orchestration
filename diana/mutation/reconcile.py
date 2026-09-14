@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -44,21 +45,68 @@ import read_scope as _read_scope  # noqa: E402
 _SKIP_DIRS = {".git"}
 
 
+def _link_record(path: Path) -> str:
+    """Record a symlink BY ITS TARGET STRING, without following it (F-A6).
+
+    Hashing `os.readlink` output means a repointed link is a detected change,
+    while Diana never opens whatever it aims at.
+    """
+    try:
+        target = os.readlink(path)
+    except OSError as exc:
+        return f"<unreadable-symlink: {type(exc).__name__}>"
+    return "<symlink:" + hashlib.sha256(target.encode("utf-8", "surrogateescape")).hexdigest() + ">"
+
+
 def snapshot(root: str) -> dict[str, str]:
-    """SHA-256 of every file under `root`. Diana's own view, not Hermes's."""
+    """SHA-256 of every REGULAR file under `root`. Diana's own view, not Hermes's.
+
+    Audit finding F-A6: this used `Path.read_bytes()`, which follows symlinks. A
+    symlink committed inside the target repository therefore made Diana's own
+    reconciliation read a file OUTSIDE the repository -- the reconciliation
+    control reaching past the boundary it exists to police -- and a link aimed at
+    a fifo or device node could block the snapshot indefinitely, hanging the audit
+    rather than reporting it.
+
+    Nothing here follows a link or opens a non-regular file. Links and special
+    files are recorded deterministically by what they ARE, so a change to the link
+    itself is still detected while its target is never touched. `os.walk` already
+    runs with `followlinks=False`; symlinked directories are additionally recorded
+    and pruned explicitly rather than left silently unrepresented.
+    """
     out: dict[str, str] = {}
     root = os.path.realpath(root)
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
+        kept: list[str] = []
+        for name in sorted(dirnames):
+            if name in _SKIP_DIRS:
+                continue
+            path = Path(dirpath, name)
+            if path.is_symlink():
+                # A symlinked directory: record the link, never descend into it.
+                out[str(path.relative_to(root))] = _link_record(path)
+                continue
+            kept.append(name)
+        dirnames[:] = kept
+
         for name in sorted(filenames):
             path = Path(dirpath, name)
+            rel = str(path.relative_to(root))
             try:
-                out[str(path.relative_to(root))] = hashlib.sha256(path.read_bytes()).hexdigest()
+                st = path.lstat()          # lstat: never resolves the final link
+                if stat.S_ISLNK(st.st_mode):
+                    out[rel] = _link_record(path)
+                elif not stat.S_ISREG(st.st_mode):
+                    # fifo, socket, device, door: recorded by type, never opened,
+                    # because opening one can block forever.
+                    out[rel] = f"<special:{stat.S_IFMT(st.st_mode):#o}>"
+                else:
+                    out[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
             except OSError as exc:
                 # An unreadable file is recorded as unreadable rather than
                 # omitted: a file that silently vanishes from both snapshots
                 # would reconcile as "unchanged".
-                out[str(path.relative_to(root))] = f"<unreadable: {type(exc).__name__}>"
+                out[rel] = f"<unreadable: {type(exc).__name__}>"
     return out
 
 
