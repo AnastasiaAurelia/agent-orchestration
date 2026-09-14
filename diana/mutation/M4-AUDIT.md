@@ -382,3 +382,65 @@ reading the new code's own claims:
   code in the milestone.
 - The M3 global-workflow-map scope reduction and `M2-AC-4`'s live-provider sensitivity are unchanged
   from §6.
+
+## 8. Governance limitation — REQUIRE_HUMAN is not mechanically enforced
+
+Recorded as a limitation, not remedied. **No repository rule or setting was changed as part of M4**,
+and no classic branch protection was created.
+
+### What IS enforced
+
+`main` is protected by the active GitHub **repository ruleset** `diana-main-protection`
+(id `22188373`, `enforcement: active`, `bypass_actors: []`). It requires the pull-request path and
+both `Diana Gate` and `Diana Security Gate` as required status checks, and forbids deletion and
+non-fast-forward pushes. There are no bypass actors, so the checks cannot be skipped.
+
+Note for future auditors: the classic REST endpoint `/repos/{owner}/{repo}/branches/main/protection`
+returns **404 "Branch not protected"** for a repository protected this way. That 404 is **not**
+evidence of an unprotected branch — ruleset-based protection is only visible through
+`/repos/{owner}/{repo}/rulesets`. An earlier pass of this audit drew the wrong conclusion from that
+404, and the correction is recorded here so the mistake is not repeated.
+
+### What is NOT enforced
+
+The ruleset currently sets:
+
+| Parameter | Value |
+|---|---|
+| `required_approving_review_count` | **0** |
+| `require_code_owner_review` | **false** |
+| `require_last_push_approval` | **false** |
+
+`.github/CODEOWNERS` contains `* @AnastasiaAurelia`, but with `require_code_owner_review: false`
+that file has no merge-blocking effect.
+
+So when Diana Gate decides `REQUIRE_HUMAN` — as it does for M4's `DANGEROUS` classification —
+`map-gate-result.py` maps exit 2 to a **passing** check (by design, to avoid a REQUIRE_HUMAN pull
+request deadlocking against its own required status check) and documents that "merge stays blocked
+by the independent required human/code-owner review rule." **No such rule is currently configured.**
+`REQUIRE_HUMAN` is therefore an advisory verdict rather than a mechanical merge condition.
+
+### How human approval is represented for M4
+
+For M4, explicit human approval is represented by **the human owner manually choosing to merge after
+all checks pass**. Claude stops at merge-readiness and does not merge. That is a procedural control
+resting on the owner's discretion, not a mechanical one, and it is stated as such rather than
+presented as enforcement.
+
+### Requirement carried forward
+
+> **Before any future milestone grants autonomous PR-merge authority, `REQUIRE_HUMAN` needs an
+> independently verifiable human-approval mechanism that automation cannot self-satisfy.**
+
+The distinction that matters is *self-satisfiable* versus *not*. A required status check is
+satisfied by automation and so cannot represent human approval. A required approving review from an
+identity the automation does not control — enforced by `required_approving_review_count >= 1` plus
+`require_code_owner_review`, and ideally `require_last_push_approval` so the pusher cannot approve
+their own final commit — is not self-satisfiable. Until that exists, an agent holding merge
+authority could satisfy every mechanical condition on a `DANGEROUS` change by itself, which would
+make `REQUIRE_HUMAN` decorative at exactly the moment it matters most.
+
+This is the same class of gap as the project's founding architectural finding — *Markdown rules are
+not enforcement* — one level up: `risk-tiers.md` states "Protected-branch merge is always
+human-approved even when the underlying change is SAFE", and for now that sentence is policy text
+whose mechanism is the owner's own judgement.
