@@ -403,16 +403,59 @@ for spec in ("HERMES-RUNTIME-M1.md", "HERMES-RUNTIME-M2.md", "HERMES-RUNTIME-M3.
 
 changed = [l.split("\t") for l in git("diff", "--name-status", f"{M3_MERGE}..HEAD").strip().splitlines() if l]
 modified = sorted(p for st, p in changed if st.startswith("M"))
+added = sorted(p for st, p in changed if st.startswith("A"))
 deleted = sorted(p for st, p in changed if st.startswith("D"))
-# M4-REG-2: the permitted-replacement set is exactly the additive, opt-in
-# contract extension, plus the docs/manifest files any new milestone touches.
-permitted = {"docs/architecture/HERMES-RUNTIME-M4.md", ".gitignore",
-             "diana/runtime/contract.py", "diana/runtime/blocking.py",
-             "diana/adapters/hermes_patches.py"}
-check("M4-REG-2 only files in the frozen permitted-replacement set were modified",
-      set(modified) <= permitted, f"(modified={modified})")
-check("M4-REG-2 the contract extension is the ONLY behavioral replacement M4 froze",
-      "diana/runtime/contract.py" in permitted)
+
+# M4-REG-2 as corrected by HERMES-RUNTIME-M4-ERRATA-001 (audit finding 3).
+#
+# The ORIGINAL frozen sentence said the permitted-replacement set was "exactly
+# one item": contract.py. That is impossible -- M4-D1 names the two enforcement
+# entries installed in hermes_patches.py, and M4-D15 needs a reason code, which
+# lives in blocking.py. The previous version of this block papered over the
+# contradiction by listing five paths and calling blocking.py and
+# hermes_patches.py "docs/manifest files", which they are not: they are
+# production code. The suite therefore reported green over a violated frozen
+# constraint. ERRATA-001 states the true minimum set and classifies the three
+# kinds of change separately; this block now mirrors it exactly.
+ERRATA_001_PRODUCTION = {"diana/runtime/contract.py",
+                         "diana/runtime/blocking.py",
+                         "diana/adapters/hermes_patches.py"}
+# (b) docs + publish manifest -- never a production-code replacement.
+DOCS_MANIFEST = {".gitignore"}
+is_doc = lambda q: q.startswith("docs/") or q in DOCS_MANIFEST
+# (c) test-harness corrections -- test code, not production code. The M3
+# harness fix is audit finding 4, authorised as a governance decision.
+is_harness = lambda q: Path(q).name.startswith("test-") and q.endswith(".sh")
+ERRATA_001_HARNESS = {"diana/runtime_verify/test-m3-runtime-verify.sh"}
+
+mod_production = {q for q in modified if not is_doc(q) and not is_harness(q)}
+mod_docs = {q for q in modified if is_doc(q)}
+mod_harness = {q for q in modified if is_harness(q)}
+
+# EQUALITY, not subset: modifying FEWER of the three is also a failure, because
+# it means the frozen design and the implementation have drifted apart.
+check("M4-REG-2 modified pre-existing PRODUCTION code equals the ERRATA-001 set exactly",
+      mod_production == ERRATA_001_PRODUCTION,
+      f"(got {sorted(mod_production)} want {sorted(ERRATA_001_PRODUCTION)})")
+check("M4-REG-2 each ERRATA-001 production file is justified by a frozen M4 decision",
+      ERRATA_001_PRODUCTION == {"diana/runtime/contract.py",      # M4-D2/D4/D5
+                                "diana/runtime/blocking.py",       # M4-D4/D6/D15
+                                "diana/adapters/hermes_patches.py"})  # M4-D1
+check("M4-REG-2 no OTHER pre-existing production module was modified",
+      not (mod_production - ERRATA_001_PRODUCTION),
+      f"(unexpected {sorted(mod_production - ERRATA_001_PRODUCTION)})")
+check("M4-REG-2 docs/manifest changes are classified separately, not as replacements",
+      mod_docs <= ({"docs/architecture/HERMES-RUNTIME-M4.md"} | DOCS_MANIFEST),
+      f"(got {sorted(mod_docs)})")
+check("M4-REG-2 test-harness corrections are classified separately, not as production code",
+      mod_harness <= ERRATA_001_HARNESS, f"(got {sorted(mod_harness)})")
+check("M4-REG-2 new M4 files are ADDITIONS, never counted as replacements",
+      not (set(added) & ERRATA_001_PRODUCTION) and len(added) > 0,
+      f"(added {len(added)})")
+check("M4-REG-2 ERRATA-001 exists and the original M4 spec is untouched by it",
+      Path(repo_dir, "docs/architecture/HERMES-RUNTIME-M4-ERRATA-001.md").is_file()
+      and git("hash-object", "docs/architecture/HERMES-RUNTIME-M4.md").strip()
+          == git("rev-parse", "HEAD:docs/architecture/HERMES-RUNTIME-M4.md").strip())
 check("M4-REG-3 nothing was deleted by M4", deleted == [], f"(deleted={deleted})")
 
 for suite in ("runtime/test-contract.sh", "profile/test-repo-profile.sh",

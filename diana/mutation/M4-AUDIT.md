@@ -120,8 +120,87 @@ The implementing session was killed during an orphan-process cleanup. Determined
 No M4 file was lost or truncated. At resume no Playwright/Chromium process remained, so
 the resumption killed nothing.
 
+### F-A3 — M4-D1 and M4-REG-2 are mutually unsatisfiable, and M4's own suite hid it
+
+Found **after** implementation commit `7e2395e` but **before** M4 approval, push, PR or merge,
+while checking whether `M4-AC-18`'s `M4-REG-2` assertion was *meaningful* rather than merely
+passing.
+
+`M4-REG-2` froze the permitted-replacement set at "exactly **one item**:
+`diana/runtime/contract.py`". `M4-D1` simultaneously requires the argument policy to be consulted
+at `model_tools.handle_function_call` and `agent/tool_executor._dispatch_authorized_once` — both
+installed in `diana/adapters/hermes_patches.py` — and `M4-D15` requires a `reconciliation-mismatch`
+reason code, which lives in `diana/runtime/blocking.py`. **No implementation can satisfy both
+decisions.**
+
+M4's acceptance suite masked the conflict: its `permitted` set listed five paths under a comment
+calling them "the additive, opt-in contract extension, plus the docs/manifest files any new
+milestone touches" — but `blocking.py` and `hermes_patches.py` are neither. They are production
+code, and `hermes_patches.py` is M1's enforcement boundary itself. The assertion was also a
+**subset** test, so it could not detect drift in either direction. `M4-REG-2` therefore reported
+green over a violated frozen constraint: the same failure mode M1's audit found and which the
+roadmap cites as its reason for requiring an audit at all.
+
+The audit's own first pass compounded this: it verified "modified ⊆ the test's permitted set"
+instead of "modified == the *specification's* permitted set". That was the wrong comparison, and
+it is why the violation nearly went out as green evidence.
+
+**Resolution — [`HERMES-RUNTIME-M4-ERRATA-001.md`](../../docs/architecture/HERMES-RUNTIME-M4-ERRATA-001.md).**
+`HERMES-RUNTIME-M4.md` is **not** edited in place and remains byte-identical; commit `7e2395e` is
+**not** amended. The erratum states the contradiction, records that the specification is the
+defect rather than a licence to widen, and names the corrected set of pre-existing **production-code**
+files as exactly `contract.py`, `blocking.py`, `hermes_patches.py`, justifying each from a frozen
+M4 decision. It classifies docs/manifest changes (§4b) and test-harness corrections (§4c)
+separately, and states that new M4 files are additions, never replacements. The suite's assertion
+is now **set equality**, so modifying fewer of the three fails too.
+
+### F-A4 — M3's harness never implemented the future-milestone exemption its own spec grants
+
+`M3-REG-2`'s frozen text says pre-existing modules remain unchanged *"except where a future
+milestone explicitly freezes and proves a replacement"*. Its test implemented no such exemption:
+it computed `git diff M2_MERGE..HEAD` against a hardcoded two-path allowlist, so anchored to a
+moving HEAD it silently asserted "no later milestone may ever modify anything". `M3-AC-14`
+likewise required the global certified workflow map to equal exactly `{ADVISORY_SECURITY_REVIEW}`
+forever, which `M4-D5`'s `BOUNDED_REMEDIATION` necessarily breaks.
+
+The result: after `7e2395e`, M3 reported 95 passed / **4 failed** — and every one of the four was a
+global-state assertion (three reading the git diff, one reading the workflow map). No M3
+*behavioral* assertion failed, and `M3-AC-14 the ExecutionContract is still exactly SAFE/D1`
+passed, which is what establishes these as harness defects rather than M4 regressions.
+
+**Resolution — test-harness correction only.** No M3 specification text is modified. The harness
+now separates **(A)** historical M3 acceptance, anchored to M3's own implementation range
+`114b541..6753996`, from **(B)** reusable later-milestone regression, evaluated on the current
+HEAD: frozen M3 spec byte-integrity, no deletion of anything that existed at accepted M3 main,
+M3's own production module still present, and M3 still owning its runtime workflow map separately
+from the contract's. For the workflow map the preserved invariant is that
+`ADVISORY_SECURITY_REVIEW` keeps its certified `D1`, that M3's own class is absent from the
+contract map, that an uncertified class still derives `UNCERTIFIED`, and that every mapped class
+has an explicitly certified depth — so independently frozen later classes may coexist while
+silent promotion still cannot happen.
+
+No substantive M3 control is weakened: browser/origin confinement, the read-only target guarantee,
+static/runtime separation, anti-masquerade, D2 ownership and process termination are untouched and
+still evaluated on the current HEAD.
+
+One correction made during this work: a first draft of the reusable block contained
+`len(m3_own) >= 2 and "runtime_verify.py" in m3_own or len(m3_own) >= 2`, which collapses by
+operator precedence to `len(m3_own) >= 2` — an assertion that passes or fails for the wrong
+reason, and the exact accidental-pass pattern M3's own audit had already found once. It was
+replaced with an exact-equality check before any run.
+
 ## 5. Verdict
 
-Pending: post-commit re-run, required because `M4-REG-2` and `M4-REG-3` evaluate
-`6753996..HEAD` and were **vacuous** while no M4 commit existed. Their verdict is only
-evidence once that diff is non-empty. Recorded in §6 below once established.
+**Not approved at the time of writing.** Recorded here for the audit trail:
+
+- After `7e2395e`, `M4-REG-2`/`M4-REG-3` became non-vacuous (13-entry diff) and reported green —
+  but `M4-REG-2` was green *vacuously in a second sense*, against a test-defined set wider than
+  the frozen one (F-A3). That is now corrected and asserted by equality.
+- M2's first post-commit run failed one assertion (`M2-AC-4`, `len(applied) >= 3`) because the
+  live provider call was interrupted, injecting 1 of 5 forced corruptions. Every boundary
+  assertion passed — `write_file` refused on the live path, both canaries absent, target
+  byte-identical, git state unchanged — and a re-run returned 59/59. Environment flake, not
+  enforcement.
+- M3's 4 failures were harness defects (F-A4), now corrected.
+
+The verdict is established only by the full post-erratum re-run recorded in §6.
