@@ -33,6 +33,8 @@
 !docs/architecture/HERMES-RUNTIME-M4.md
 !docs/architecture/HERMES-RUNTIME-M4-ERRATA-001.md
 !docs/architecture/HERMES-RUNTIME-M4-ERRATA-002.md
+!docs/architecture/HERMES-RUNTIME-M5.md
+!docs/architecture/HERMES-RUNTIME-M5-ERRATA-001.md
 
 !diana/runtime_verify/
 !diana/runtime_verify/*.py
@@ -50,6 +52,14 @@
 !diana/mutation/fixtures/
 !diana/mutation/fixtures/*/
 !diana/mutation/fixtures/*/*.py
+
+!diana/unattended/
+!diana/unattended/*.py
+!diana/unattended/*.sh
+!diana/unattended/*.md
+!diana/unattended/fixtures/
+!diana/unattended/fixtures/*/
+!diana/unattended/fixtures/*/*.py
 !diana/runtime/
 !diana/runtime/*.py
 !diana/runtime/*.sh
