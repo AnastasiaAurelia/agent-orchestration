@@ -49,6 +49,29 @@ WRITE_SCOPE_MALFORMED = "write-scope-malformed"
 WRITE_SCOPE_EXCEEDS_READ_SCOPE = "write-scope-exceeds-read-scope"
 RECONCILIATION_MISMATCH = "reconciliation-mismatch"
 
+# --- Unattended bounded execution (M5-D7, M5-D9, M5-D11, M5-D13, M5-D15) ---
+#
+# M5 grants no capability, so none of these is a new authority. They exist
+# because M5-D9 requires absence, ambiguity and unprovability to fail closed in
+# their OWN distinct direction: an operator returning to an unattended run has
+# only the reason code to tell them why it stopped, and one over-broad code
+# would make every failure look alike (M1's AC-1 reasoning, carried forward).
+RUN_POLICY_MALFORMED = "run-policy-malformed"
+RUN_POLICY_DIGEST_MISMATCH = "run-policy-digest-mismatch"
+JOURNAL_MALFORMED = "journal-malformed"
+JOURNAL_DIGEST_MISMATCH = "journal-digest-mismatch"
+JOURNAL_ILLEGAL_TRANSITION = "journal-illegal-transition"
+JOURNAL_PATH_UNSAFE = "journal-path-unsafe"
+RUN_ALREADY_TERMINAL = "run-already-terminal"
+RUN_ID_MISMATCH = "run-id-mismatch"
+TARGET_MOVED = "target-moved"
+TARGET_UNREADABLE = "target-unreadable"
+QUIESCENCE_NOT_PROVEN = "quiescence-not-proven"
+RECONCILIATION_OBLIGATION_OUTSTANDING = "reconciliation-obligation-outstanding"
+ATTEMPT_BUDGET_EXHAUSTED = "attempt-budget-exhausted"
+RUN_DEADLINE_EXCEEDED = "run-deadline-exceeded"
+ENFORCEMENT_NOT_REESTABLISHED = "enforcement-not-reestablished"
+
 # --- Run-time process failures (spec: failure-semantics table) ---
 REPO_PROFILE_FAILED = "repo-profile-failed"
 SCANNER_RAISED = "scanner-raised"

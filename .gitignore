@@ -51,6 +51,14 @@
 !diana/mutation/fixtures/
 !diana/mutation/fixtures/*/
 !diana/mutation/fixtures/*/*.py
+
+!diana/unattended/
+!diana/unattended/*.py
+!diana/unattended/*.sh
+!diana/unattended/*.md
+!diana/unattended/fixtures/
+!diana/unattended/fixtures/*/
+!diana/unattended/fixtures/*/*.py
 !diana/runtime/
 !diana/runtime/*.py
 !diana/runtime/*.sh
