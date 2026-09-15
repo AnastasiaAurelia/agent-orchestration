@@ -125,8 +125,15 @@ check("TURN_ACTIVE has an outstanding obligation", J.has_outstanding_obligation(
 r = J.transition(rd3, r, J.RECONCILING)
 r2 = J.transition(rd3, r, J.RECONCILED)
 check("RECONCILING -> RECONCILED is legal", r2["state"] == "RECONCILED")
-r3 = J.transition(rd3, r2, J.COMPLETE, terminal_reason=blocking.RECONCILIATION_MISMATCH)
-check("a terminal transition records its reason code", r3["terminal"]["reason_code"] is not None)
+check("COMPLETE may NOT borrow a fail-closed reason code from blocking.py",
+      raises(blocking.JOURNAL_MALFORMED,
+             lambda: J.transition(rd3, r2, J.COMPLETE,
+                                  terminal_reason=blocking.RECONCILIATION_MISMATCH)))
+check("BLOCKED may NOT use the completion reason",
+      raises(blocking.JOURNAL_MALFORMED,
+             lambda: J.transition(rd3, r2, J.BLOCKED, terminal_reason=J.WORK_FINISHED)))
+r3 = J.transition(rd3, r2, J.COMPLETE, terminal_reason=J.WORK_FINISHED)
+check("a terminal transition records its reason code", r3["terminal"]["reason_code"] == J.WORK_FINISHED)
 check("TERMINAL IS TERMINAL: no transition out of COMPLETE",
       raises(blocking.RUN_ALREADY_TERMINAL, lambda: J.transition(rd3, r3, J.ARMED)))
 check("terminal-state resurrection is refused even to another terminal",

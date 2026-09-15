@@ -68,6 +68,15 @@ FAILED = "FAILED"
 BLOCKED = "BLOCKED"
 
 TERMINAL_STATES = frozenset({COMPLETE, FAILED, BLOCKED})
+
+# COMPLETE is a success, so its reason may NOT come from `blocking.py`. That
+# module is the fail-closed vocabulary -- "the reason code is the thing an
+# operator reads" when a run refused to proceed -- and putting a success value
+# in it would let a success be raised as a `Blocked`. M5 therefore keeps its own
+# closed completion vocabulary, and every terminal state still carries exactly
+# one specific, registered reason.
+WORK_FINISHED = "work-finished"
+COMPLETION_REASONS = frozenset({WORK_FINISHED})
 ALL_STATES = frozenset({APPROVED, ARMED, TURN_ACTIVE, RECONCILING, RECONCILED} | TERMINAL_STATES)
 
 # Exactly the arrows the frozen diagram draws, and no others.
@@ -339,9 +348,11 @@ def transition(run_directory, record: dict, to_state: str, *, note: str = "",
             raise blocking.Blocked(
                 blocking.JOURNAL_MALFORMED,
                 f"a {to_state} transition must carry a reason code")
-        if terminal_reason not in blocking.ALL_REASON_CODES:
+        permitted = COMPLETION_REASONS if to_state == COMPLETE else blocking.ALL_REASON_CODES
+        if terminal_reason not in permitted:
             raise blocking.Blocked(
-                blocking.JOURNAL_MALFORMED, f"unknown reason code {terminal_reason!r}")
+                blocking.JOURNAL_MALFORMED,
+                f"reason {terminal_reason!r} is not valid for a {to_state} transition")
         updated["terminal"] = {
             "outcome": to_state, "reason_code": terminal_reason,
             "detail": terminal_detail, "at": _utc_now(),
