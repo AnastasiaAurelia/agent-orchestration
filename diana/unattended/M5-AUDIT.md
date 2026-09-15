@@ -128,3 +128,85 @@ them.
 reported 57 assertions and another 59, both with **zero failures**. The assertion measures
 enforcement *coverage* — how many of five forced corruptions the model's tool calls allowed
 to be injected — not enforcement itself.
+
+
+## 7. ERRATA-001 round — work items, dependencies, cancellation
+
+Scope: [`HERMES-RUNTIME-M5-ERRATA-001.md`](../../docs/architecture/HERMES-RUNTIME-M5-ERRATA-001.md),
+frozen in its own commit before implementation, per the M1–M3 discipline.
+
+### Two semantics the implementation had to settle
+
+Recorded because both were resolved toward the frozen text rather than toward whichever
+reading was easier to build.
+
+**An envelope violation still terminates the run immediately.** ERRATA-001 says independent
+items may continue when one item blocks. Frozen `M5-D8` draws `RECONCILING -> BLOCKED` for a
+mismatch, and `M4-D15` says a mismatch blocks and yields no deliverable. The erratum's own
+precedence rule is that where it appears to disagree with the frozen text about **authority**,
+the frozen text wins — so independent items do **not** continue past a mismatch. A **turn
+failure with a clean reconciliation** is a different kind of event: the work failed, nothing
+escaped. That blocks only its own item and its transitive dependents, and independent work
+proceeds. This distinction is what makes "continue the independent work" safe rather than
+reckless: the run keeps going only when nothing left the envelope.
+
+**Budget exhaustion is derived before the blocked-item derivation.** Frozen `M5-D13`/`M5-D16`
+make budget exhaustion `FAILED`. Deriving it after the blocked-item rule let one unfinished
+item make an out-of-budget run report `BLOCKED` instead — found by the acceptance suite, fixed
+by following `M5-E1-D14`'s stated order exactly. An unfinished item at budget exhaustion is
+re-armed rather than blocked, because "the work did not finish" is a fact about the run's
+budget, not a boundary failure of that item.
+
+### Focused audit — eleven attack classes, zero defects
+
+| Attack | Result |
+|---|---|
+| Dependency bypass by forging item status | refused (`journal-digest-mismatch`) |
+| Cycle injected into `work-items.json` after approval | refused (`work-item-cycle`) |
+| Foreign item set substituted | refused (`work-items-digest-mismatch`) |
+| Forged replay of a completed item | refused; driver not re-invoked |
+| Cancellation erased from the journal | refused (`journal-digest-mismatch`) |
+| Cancellation skipping an owed reconciliation | reconciliation still ran; the escape was still detected |
+| Blocked item wrongly blocking independent work | independent item still completed |
+| Independent work wrongly bypassing a real dependency | dependent item provably never ran |
+| Retry budget reset per item | budget stayed per-RUN (3 turns across 2 items) |
+| Authority drift through durable item state | refused (`journal-digest-mismatch`) |
+| Journal item set exceeding the approved graph | refused (`work-items-malformed`) |
+
+### M5-AC-4 correction, falsification-tested
+
+The old form accepted any terminal state and so could pass for the wrong reason. The corrected
+criterion names the exact expected outcome (`COMPLETE`/`work-finished`) for the constructed
+scenario. Forcing the run to `FAILED` and to `BLOCKED` each makes it fail, as required by
+ERRATA-001 §4.
+
+### One vacuous assertion written and removed during this round
+
+A journal assertion was first written as `raises(...) is False or True`, which is always true —
+the exact accidental-pass pattern M3's audit had already found once, reproduced here by the
+same author who cited it. It was caught before commit and replaced with a real check against a
+fresh `PENDING` item, plus a positive counterpart proving `PENDING -> BLOCKED` is legal.
+
+### Results
+
+| Suite | Result |
+|---|---|
+| M5 acceptance (AC-1..29) | **168 passed, 0 failed** |
+| M5 journal | **54 passed, 0 failed** |
+| M5 ownership | **29 passed, 0 failed** |
+| M1 | **470 passed, 0 failed** |
+| M2 | **59 passed, 0 failed**, live provider |
+| M3 | **106 passed, 0 failed** |
+| M4 | **146 passed, 0 failed** |
+| Diana regression | **26/26** green |
+
+### Residual limitations added by this round
+
+- **Independent continuation is bounded by the run budget, not by item count.** With
+  `max_attempts` shared across items, a run with many items can exhaust its budget before
+  reaching later ones. That is deliberate (`M5-E1-D10`) — a per-item budget would multiply the
+  bound that audit finding `M5-A1` existed to protect — but it means item ordering within the
+  declaration affects which items get attempted when budget is scarce.
+- **Cancellation is cooperative with respect to a turn already in flight.** It prevents the
+  *next* turn from starting; it does not interrupt a running one. A turn in flight is bounded
+  by the wall-clock deadline that `M2-D12` and `M5-D13` already impose.

@@ -12,7 +12,7 @@ from pathlib import Path
 diana, tmp = sys.argv[1], Path(sys.argv[2])
 for sub in ("unattended", "runtime"):
     sys.path.insert(0, str(Path(diana, sub)))
-import blocking, journal as J, runpolicy as RP, contract as C
+import blocking, journal as J, runpolicy as RP, contract as C, workitems as W
 
 passed = failed = 0
 def check(label, cond, extra=""):
@@ -45,8 +45,10 @@ check("an expired policy reports expired",
 print("--- journal: atomic write + digest integrity ---")
 rd = tmp / "runs" / "r1"
 binding = {"repo_root": "/x", "git_commit": "abc", "dirty": False, "observed_at": "2026-01-01T00:00:00Z"}
+ITEMS = W.build(run_id="r1", items=[{"id": "i1", "task": "t", "depends_on": []}])
 rec = J.new_record(run_id="r1", contract_digest="sha256:" + "a"*64,
-                   run_policy_digest=RP.digest(pol), target_binding=binding)
+                   run_policy_digest=RP.digest(pol), target_binding=binding,
+                   work_items_digest=W.digest(ITEMS), items=W.initial_status(ITEMS))
 J.write(rd, rec)
 check("journal round-trips", J.read(rd)["run_id"] == "r1")
 check("journal file is 0600", stat.S_IMODE((rd / "journal.json").stat().st_mode) == 0o600)
@@ -107,7 +109,9 @@ check("a journal that is itself a SYMLINK is refused",
 
 print("--- state machine: only the frozen arrows (M5-D8) ---")
 rd3 = tmp / "runs" / "r3"; r = J.new_record(run_id="r3", contract_digest="sha256:"+"b"*64,
-                                            run_policy_digest=RP.digest(pol), target_binding=binding)
+                                            run_policy_digest=RP.digest(pol), target_binding=binding,
+                                            work_items_digest=W.digest(ITEMS),
+                                            items=W.initial_status(ITEMS))
 J.write(rd3, r)
 check("APPROVED -> TURN_ACTIVE is ILLEGAL (write-ahead cannot be skipped)",
       raises(blocking.JOURNAL_ILLEGAL_TRANSITION, lambda: J.transition(rd3, r, J.TURN_ACTIVE)))
@@ -158,6 +162,57 @@ check("a closed, reconciled attempt has no outstanding obligation",
 check("an OPEN unreconciled attempt IS an outstanding obligation",
       J.has_outstanding_obligation(
           {**r2, "attempts": [{"attempt": 1, "state": "OPEN", "reconciled": False}]}))
+print("--- ERRATA-001: item status and cancellation in the journal ---")
+rd4 = tmp / "runs" / "r4"
+r4 = J.new_record(run_id="r4", contract_digest="sha256:"+"c"*64,
+                  run_policy_digest=RP.digest(pol), target_binding=binding,
+                  work_items_digest=W.digest(ITEMS), items=W.initial_status(ITEMS))
+J.write(rd4, r4)
+check("items start PENDING with zero attempts",
+      J.read(rd4)["items"]["i1"] == {"status": "PENDING", "attempts": 0, "reason_code": None,
+                                     "detail": "", "reconciliation_file": None})
+r4 = J.transition(rd4, r4, J.ARMED)
+r4 = J.set_item_status(rd4, r4, "i1", J.RUNNING, bump_attempt=True)
+check("RUNNING bumps the item's attempt count", J.read(rd4)["items"]["i1"]["attempts"] == 1)
+# `X is False or True` is always True -- the accidental-pass pattern M3's audit
+# already found once. Asserted properly against a FRESH PENDING item.
+rd5 = tmp / "runs" / "r5"
+r5 = J.new_record(run_id="r5", contract_digest="sha256:"+"d"*64,
+                  run_policy_digest=RP.digest(pol), target_binding=binding,
+                  work_items_digest=W.digest(ITEMS), items=W.initial_status(ITEMS))
+J.write(rd5, r5)
+check("PENDING -> COMPLETE is ILLEGAL (an item must run before it can finish)",
+      raises(blocking.JOURNAL_ILLEGAL_TRANSITION,
+             lambda: J.set_item_status(rd5, r5, "i1", J.ITEM_COMPLETE)))
+check("PENDING -> BLOCKED is legal (dependency blocking never needs a turn)",
+      J.set_item_status(rd5, r5, "i1", J.ITEM_BLOCKED,
+                        reason_code=blocking.DEPENDENCY_BLOCKED)["items"]["i1"]["status"]
+      == "BLOCKED")
+r4 = J.set_item_status(rd4, r4, "i1", J.ITEM_COMPLETE)
+check("a terminal ITEM cannot be re-entered",
+      raises(blocking.RUN_ALREADY_TERMINAL,
+             lambda: J.set_item_status(rd4, r4, "i1", J.RUNNING)))
+check("an unknown item id is refused",
+      raises(blocking.JOURNAL_MALFORMED,
+             lambda: J.set_item_status(rd4, r4, "ghost", J.RUNNING)))
+check("an unknown item STATUS is refused by the schema",
+      raises(blocking.JOURNAL_MALFORMED, lambda: J.validate(
+          {**r4, "items": {"i1": {"status": "WEIRD", "attempts": 0, "reason_code": None,
+                                  "detail": "", "reconciliation_file": None}}})))
+check("an item entry with an unexpected key is refused",
+      raises(blocking.JOURNAL_MALFORMED, lambda: J.validate(
+          {**r4, "items": {"i1": {"status": "PENDING", "attempts": 0, "reason_code": None,
+                                  "detail": "", "reconciliation_file": None, "x": 1}}})))
+r4c = J.cancel(rd4, r4, reason="stop")
+check("cancellation is durable", J.read(rd4)["cancellation"]["reason"] == "stop")
+check("cancellation is idempotent and one-way",
+      J.cancel(rd4, r4c, reason="again")["cancellation"] == r4c["cancellation"])
+check("a malformed cancellation block is refused",
+      raises(blocking.JOURNAL_MALFORMED, lambda: J.validate({**r4, "cancellation": {"at": "x"}})))
+r4t = J.transition(rd4, r4c, J.FAILED, terminal_reason=blocking.RUN_CANCELLED)
+check("a TERMINAL run cannot be cancelled",
+      raises(blocking.RUN_ALREADY_TERMINAL, lambda: J.cancel(rd4, r4t)))
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
 PY
