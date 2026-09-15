@@ -274,6 +274,105 @@ pol3 = MP.MutationPolicy({"allowed_tools": ["execute_code"]})
 check("M4-AC-11 a granted tool with no argument policy fails closed",
       not pol3.decide("execute_code", {"code": "1"}).allowed)
 
+# --- ERRATA-002 / audit finding F-A7: `workdir` is REQUIRED -----------------
+#
+# M4-D11 permitted an absent `workdir` and called it "the session default", on
+# the stated reasoning that the session cwd is still scope-checked. Nothing
+# scope-checks the session cwd. The result was F-A2's shape one argument over:
+# the directory the policy REFUSES when named is the one it ACCEPTED when the
+# argument was omitted. The ambient cwd is not in the ExecutionContract, is not
+# digest-covered, and does not survive a restart, so it can never be authority.
+print("--- ERRATA-002 / F-A7: terminal.workdir is required ---")
+root_w = fresh("workdir")
+sub_w = Path(root_w, "src"); sub_w.mkdir(exist_ok=True)
+# write/workdir roots are the SUBDIRECTORY, so the repo root is deliberately
+# out of scope while remaining the ambient cwd.
+cbw = envelope_for(root_w, write_sub="src", max_timeout=120)
+RM.install(cbw, require_preflight=False)
+os.environ["TERMINAL_CWD"] = root_w          # ambient cwd, deliberately OUT of scope
+wcanary = Path(root_w, "fa7-canary.txt")
+wpwd = Path(root_w, "fa7-pwd.out")
+WCMD = f"bash -c 'pwd -P > {wpwd}; touch {wcanary}'"
+cbw["capability_envelope"]["allowed_commands"] = [WCMD]
+RM.install(cbw, require_preflight=False)
+for f in (wcanary, wpwd):
+    if f.exists(): f.unlink()
+
+# (3) omitted workdir is refused ... and (4) leaves no execution canary
+r = call("terminal", {"command": WCMD, "timeout": 30})
+check("F-A7 (3) an allowed command with an OMITTED workdir is refused", refused(r), f"({r[:160]})")
+check("F-A7 (4) the omitted-workdir refusal left NO execution canary",
+      not wcanary.exists() and not wpwd.exists())
+check("F-A7 (5) an ambient cwd outside scope is not an implicit authority channel",
+      refused(r) and not wpwd.exists())
+
+# (2) explicit out-of-scope workdir is refused -- the SAME directory as the ambient cwd
+r = call("terminal", {"command": WCMD, "timeout": 30, "workdir": root_w})
+check("F-A7 (2) an explicit OUT-OF-SCOPE workdir is refused", refused(r), f"({r[:160]})")
+check("F-A7 (2) and it left no canary either", not wcanary.exists())
+
+# (1) explicit in-scope workdir executes, in that directory
+r = call("terminal", {"command": WCMD, "timeout": 30, "workdir": str(sub_w)})
+check("F-A7 (1) an explicit IN-SCOPE workdir EXECUTES", not refused(r), f"({r[:160]})")
+check("F-A7 (1) and the command really ran in the DECLARED directory",
+      wpwd.exists() and wpwd.read_text().strip() == os.path.realpath(str(sub_w)),
+      f"({wpwd.read_text().strip() if wpwd.exists() else 'no output'})")
+
+# the asymmetry itself: named vs omitted must now agree, at policy level
+polw = MP.MutationPolicy(cbw["capability_envelope"])
+named = polw.decide("terminal", {"command": WCMD, "timeout": 30, "workdir": root_w}).allowed
+omitted = polw.decide("terminal", {"command": WCMD, "timeout": 30}).allowed
+check("F-A7 the named/omitted asymmetry is closed: both refuse the out-of-scope root",
+      named is False and omitted is False, f"(named={named} omitted={omitted})")
+
+# (6) the decision is a pure function of (args, contract), not of ambient cwd
+verdicts = set()
+for ambient in (str(sub_w), root_w, tmp):
+    os.environ["TERMINAL_CWD"] = ambient
+    cwd0 = os.getcwd()
+    os.chdir(ambient)                         # the PROCESS's own cwd varies too
+    try:
+        verdicts.add((polw.decide("terminal", {"command": WCMD, "timeout": 30}).allowed,
+                      polw.decide("terminal", {"command": WCMD, "timeout": 30,
+                                               "workdir": str(sub_w)}).allowed,
+                      polw.decide("terminal", {"command": WCMD, "timeout": 30,
+                                               "workdir": root_w}).allowed))
+    finally:
+        os.chdir(cwd0)
+os.environ["TERMINAL_CWD"] = root_w
+check("F-A7 (6) restart/new-process cwd differences do not change the decision",
+      verdicts == {(False, True, False)}, f"(observed {sorted(verdicts)})")
+
+# workdir must be a canonicalized, non-empty string inside the roots
+check("F-A7 a non-string workdir is refused",
+      not polw.decide("terminal", {"command": WCMD, "timeout": 30, "workdir": 17}).allowed)
+check("F-A7 an empty-string workdir is refused",
+      not polw.decide("terminal", {"command": WCMD, "timeout": 30, "workdir": ""}).allowed)
+check("F-A7 a traversal workdir is refused AFTER canonicalization",
+      not polw.decide("terminal", {"command": WCMD, "timeout": 30,
+                                   "workdir": str(sub_w / ".." / "..")}).allowed)
+wlink = Path(root_w, "src", "escape-link")
+if not wlink.exists():
+    os.symlink(tmp, wlink)
+check("F-A7 a symlink workdir escaping the roots is refused after canonicalization",
+      not polw.decide("terminal", {"command": WCMD, "timeout": 30, "workdir": str(wlink)}).allowed)
+
+# (7) the neighbouring controls are untouched by this correction
+check("F-A7 (7) background is still refused",
+      not polw.decide("terminal", {"command": WCMD, "timeout": 30,
+                                   "workdir": str(sub_w), "background": True}).allowed)
+check("F-A7 (7) pty is still refused",
+      not polw.decide("terminal", {"command": WCMD, "timeout": 30,
+                                   "workdir": str(sub_w), "pty": True}).allowed)
+check("F-A7 (7) an omitted timeout is still refused (F-A2 intact)",
+      not polw.decide("terminal", {"command": WCMD, "workdir": str(sub_w)}).allowed)
+check("F-A7 (7) a timeout above the ceiling is still refused",
+      not polw.decide("terminal", {"command": WCMD, "timeout": 99999,
+                                   "workdir": str(sub_w)}).allowed)
+check("F-A7 (7) an undeclared command is still refused",
+      not polw.decide("terminal", {"command": WCMD + "; touch x", "timeout": 30,
+                                   "workdir": str(sub_w)}).allowed)
+
 # ===================== M4-AC-12 / AC-13: reconciliation ===================
 print("--- M4-AC-12 / AC-13: reconciliation against a Diana-owned view ---")
 root3 = fresh("recon")

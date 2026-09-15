@@ -197,16 +197,33 @@ def decide_command(args: object, allowed_commands, command_policy: dict | None =
     if args.get("notify"):
         return Verdict(False, "notification callbacks are not permitted in this envelope")
 
+    # M4-D11 as corrected by ERRATA-002 (audit finding F-A7). `workdir` used to
+    # be optional, on the stated reasoning that "an absent workdir is safe to
+    # default because the session cwd is still scope-checked". That reasoning was
+    # false: NOTHING scope-checks the session cwd. The result was an asymmetry in
+    # which naming a directory got it refused while omitting the argument ran the
+    # command in that same directory -- F-A2's shape, one argument over.
+    #
+    # The ambient process/session cwd is not part of the approved
+    # ExecutionContract and is not a durable authority binding: it is inherited
+    # from whatever process happens to be running and does not survive a restart
+    # or a resume. Diana must never infer permission from it. So `workdir` is
+    # REQUIRED and omission fails closed -- the declared roots are the only
+    # channel by which a working directory can be authorized.
     workdir = args.get("workdir")
-    if workdir is not None:
-        if not isinstance(workdir, str) or not workdir:
-            return Verdict(False, "terminal.workdir is not a non-empty string")
-        roots = policy.get("workdir_roots")
-        if not roots:
-            return Verdict(False, "terminal.workdir supplied but no workdir_roots are declared")
-        allowed, why = _read_scope.decide(workdir, {"allowed_roots": list(roots), "denied_subpaths": []})
-        if not allowed:
-            return Verdict(False, f"workdir outside declared roots: {workdir!r} ({why})")
+    if workdir is None:
+        return Verdict(False, "terminal.workdir must be declared explicitly; "
+                              "the ambient session cwd is not an authority channel")
+    if not isinstance(workdir, str) or not workdir:
+        return Verdict(False, "terminal.workdir is not a non-empty string")
+    roots = policy.get("workdir_roots")
+    if not roots:
+        return Verdict(False, "terminal.workdir supplied but no workdir_roots are declared")
+    # `decide` canonicalizes before containment (spec C2) and denies on any
+    # resolution failure, so traversal and symlink escape are covered here.
+    allowed, why = _read_scope.decide(workdir, {"allowed_roots": list(roots), "denied_subpaths": []})
+    if not allowed:
+        return Verdict(False, f"workdir outside declared roots: {workdir!r} ({why})")
 
     timeout = args.get("timeout")
     ceiling = policy.get("max_timeout_s", DEFAULT_MAX_TIMEOUT_S)
@@ -216,8 +233,9 @@ def decide_command(args: object, allowed_commands, command_policy: dict | None =
         # Hermes's environment, not from anything Diana declared. So omitting
         # the argument does not mean "the declared ceiling"; it means "Hermes's
         # bound instead of ours", which is exactly the quiet divergence M4-D11
-        # refuses to allow. An absent `workdir` is safe to default because the
-        # session cwd is still scope-checked; an absent timeout is not.
+        # refuses to allow. `workdir` is refused on omission for the same reason
+        # (ERRATA-002 / F-A7); the claim that once stood here -- that an absent
+        # workdir was safe because the session cwd is scope-checked -- was false.
         return Verdict(False, f"terminal.timeout must be declared explicitly (ceiling {ceiling}s)")
     if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout < 1:
         return Verdict(False, "terminal.timeout is not a positive integer")
