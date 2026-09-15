@@ -63,6 +63,20 @@ JOURNAL_DIGEST_MISMATCH = "journal-digest-mismatch"
 JOURNAL_ILLEGAL_TRANSITION = "journal-illegal-transition"
 JOURNAL_PATH_UNSAFE = "journal-path-unsafe"
 JOURNAL_STALE = "journal-stale"
+
+# --- Work items, dependencies, cancellation (M5 ERRATA-001) ---
+# Orchestration, not capability. Each has its own code because an operator
+# returning to an unattended run reads the code, and "the graph was wrong" and
+# "a dependency failed" are different facts with different remedies.
+WORK_ITEMS_MALFORMED = "work-items-malformed"
+WORK_ITEMS_DIGEST_MISMATCH = "work-items-digest-mismatch"
+WORK_ITEM_DUPLICATE_ID = "work-item-duplicate-id"
+WORK_ITEM_SELF_DEPENDENCY = "work-item-self-dependency"
+WORK_ITEM_UNKNOWN_DEPENDENCY = "work-item-unknown-dependency"
+WORK_ITEM_CYCLE = "work-item-cycle"
+WORK_ITEM_NOT_ELIGIBLE = "work-item-not-eligible"
+DEPENDENCY_BLOCKED = "dependency-blocked"
+RUN_CANCELLED = "run-cancelled"
 RUN_ALREADY_TERMINAL = "run-already-terminal"
 RUN_ID_MISMATCH = "run-id-mismatch"
 TARGET_MOVED = "target-moved"

@@ -50,9 +50,11 @@ import journal as _journal  # noqa: E402
 import mutation_policy as _policy  # noqa: E402
 import ownership as _ownership  # noqa: E402
 import runpolicy as _runpolicy  # noqa: E402
+import workitems as _workitems  # noqa: E402
 
 CONTRACT_NAME = "contract.json"
 POLICY_NAME = "run-policy.json"
+WORK_ITEMS_NAME = "work-items.json"
 
 
 # --- target identity ------------------------------------------------------
@@ -107,7 +109,7 @@ def require_fresh(record: dict, *, allow_dirty_drift: bool) -> dict:
 
 # --- authority re-binding -------------------------------------------------
 
-def load_authority(run_directory, record: dict) -> tuple[dict, dict]:
+def load_authority(run_directory, record: dict) -> tuple[dict, dict, dict]:
     """Re-verify BOTH documents against the digests the journal binds.
 
     The journal names the digests; the files must match them. That is what makes
@@ -115,7 +117,7 @@ def load_authority(run_directory, record: dict) -> tuple[dict, dict]:
     valid contract changes its digest, and the journal still names the old one.
     """
     directory = _journal.open_dir(run_directory)
-    for name in (CONTRACT_NAME, POLICY_NAME):
+    for name in (CONTRACT_NAME, POLICY_NAME, WORK_ITEMS_NAME):
         path = directory / name
         if path.is_symlink():
             raise blocking.Blocked(
@@ -139,7 +141,30 @@ def load_authority(run_directory, record: dict) -> tuple[dict, dict]:
         raise blocking.Blocked(
             blocking.RUN_ID_MISMATCH,
             f"run policy names run {policy['run_id']!r}, journal names {record['run_id']!r}")
-    return contract_block, policy
+
+    # ERRATA-001 M5-E1-D2: the item set is re-verified exactly as the other two
+    # approved documents are. A tampered graph would otherwise be the one way to
+    # change what may run without touching the envelope at all.
+    try:
+        items_doc = json.loads((directory / WORK_ITEMS_NAME).read_bytes().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise blocking.Blocked(
+            blocking.WORK_ITEMS_MALFORMED, f"unreadable work items: {exc}") from None
+    _workitems.validate(items_doc)
+    actual_items = _workitems.digest(items_doc)
+    if actual_items != record["work_items_digest"]:
+        raise blocking.Blocked(
+            blocking.WORK_ITEMS_DIGEST_MISMATCH,
+            f"{actual_items} != {record['work_items_digest']}")
+    if items_doc["run_id"] != record["run_id"]:
+        raise blocking.Blocked(
+            blocking.RUN_ID_MISMATCH,
+            f"work items name run {items_doc['run_id']!r}, journal names {record['run_id']!r}")
+    if set(items_doc and _workitems.ids(items_doc)) != set(record["items"]):
+        raise blocking.Blocked(
+            blocking.WORK_ITEMS_MALFORMED,
+            "the journal's item status set does not match the approved item set")
+    return contract_block, policy, items_doc
 
 
 def reestablish_enforcement(contract_block: dict) -> object:
@@ -193,5 +218,6 @@ def load_run(run_directory, *, expected_run_id: str | None = None) -> dict:
             f"run is {record['state']} ({record['terminal']['reason_code']}); "
             "a terminal run is read, never resumed")
 
-    contract_block, policy = load_authority(run_directory, record)
-    return {"record": record, "contract": contract_block, "policy": policy}
+    contract_block, policy, items_doc = load_authority(run_directory, record)
+    return {"record": record, "contract": contract_block, "policy": policy,
+            "items": items_doc}

@@ -54,7 +54,7 @@ import blocking  # noqa: E402
 import contract as _contract  # noqa: E402
 import runpolicy as _runpolicy  # noqa: E402
 
-JOURNAL_VERSION = 1
+JOURNAL_VERSION = 2   # ERRATA-001 added items and cancellation
 JOURNAL_NAME = "journal.json"
 
 # --- the frozen state machine (M5-D8) ------------------------------------
@@ -102,9 +102,15 @@ RECORD_KEYS = (
     "run_id",
     "contract_digest",
     "run_policy_digest",
+    # ERRATA-001: the item set is digest-bound exactly as the contract and the
+    # run policy are, and re-verified on every resume (M5-E1-D2).
+    "work_items_digest",
     "state",
     "target_binding",
     "attempts",
+    # ERRATA-001: Diana-owned item status (M5-E1-D4) and cancellation (M5-E1-D11).
+    "items",
+    "cancellation",
     "terminal",
     "history",
 )
@@ -114,6 +120,25 @@ TARGET_BINDING_KEYS = ("repo_root", "git_commit", "dirty", "observed_at")
 
 def _utc_now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# --- item status (ERRATA-001 M5-E1-D4, M5-E1-D15) ------------------------
+PENDING = "PENDING"
+RUNNING = "RUNNING"
+ITEM_COMPLETE = "COMPLETE"
+ITEM_BLOCKED = "BLOCKED"
+ITEM_STATES = frozenset({PENDING, RUNNING, ITEM_COMPLETE, ITEM_BLOCKED})
+ITEM_TERMINAL = frozenset({ITEM_COMPLETE, ITEM_BLOCKED})
+
+# Exactly the arrows an item may take. RUNNING leads only to a terminal state,
+# and terminal item states have no outgoing arrows at all -- M5-D8's discipline
+# one level down, enforced at the single place item status changes.
+ITEM_TRANSITIONS = {
+    PENDING: frozenset({RUNNING, ITEM_BLOCKED}),
+    RUNNING: frozenset({ITEM_COMPLETE, ITEM_BLOCKED}),
+    ITEM_COMPLETE: frozenset(),
+    ITEM_BLOCKED: frozenset(),
+}
 
 
 # --- crash-atomic persistence (M5-D4) ------------------------------------
@@ -196,12 +221,15 @@ def open_dir(run_directory, *, create: bool = False) -> Path:
 # --- the record ----------------------------------------------------------
 
 def new_record(*, run_id: str, contract_digest: str, run_policy_digest: str,
-               target_binding: dict) -> dict:
+               target_binding: dict, work_items_digest: str, items: dict) -> dict:
     record = {
         "journal_version": JOURNAL_VERSION,
         "run_id": run_id,
         "contract_digest": contract_digest,
         "run_policy_digest": run_policy_digest,
+        "work_items_digest": work_items_digest,
+        "items": dict(items),
+        "cancellation": None,
         "state": APPROVED,
         "target_binding": dict(target_binding),
         "attempts": [],
@@ -227,7 +255,7 @@ def validate(record: object) -> None:
             f"journal_version {record['journal_version']!r} != {JOURNAL_VERSION}")
     if not isinstance(record["run_id"], str) or not record["run_id"]:
         raise blocking.Blocked(blocking.JOURNAL_MALFORMED, "run_id must be a non-empty string")
-    for key in ("contract_digest", "run_policy_digest"):
+    for key in ("contract_digest", "run_policy_digest", "work_items_digest"):
         value = record[key]
         if not isinstance(value, str) or not value.startswith("sha256:"):
             raise blocking.Blocked(blocking.JOURNAL_MALFORMED, f"{key} is not a sha256 digest")
@@ -246,6 +274,31 @@ def validate(record: object) -> None:
             raise blocking.Blocked(blocking.JOURNAL_MALFORMED, "attempt entry shape invalid")
     if not isinstance(record["history"], list) or not record["history"]:
         raise blocking.Blocked(blocking.JOURNAL_MALFORMED, "history must be a non-empty list")
+    items = record["items"]
+    if not isinstance(items, dict) or not items:
+        raise blocking.Blocked(blocking.JOURNAL_MALFORMED, "items must be a non-empty object")
+    for item_id, entry in items.items():
+        if not isinstance(item_id, str) or not item_id:
+            raise blocking.Blocked(blocking.JOURNAL_MALFORMED, "item id must be a non-empty string")
+        if not isinstance(entry, dict) or set(entry) != {
+                "status", "attempts", "reason_code", "detail", "reconciliation_file"}:
+            raise blocking.Blocked(
+                blocking.JOURNAL_MALFORMED, f"item entry shape invalid for {item_id!r}")
+        if entry["status"] not in ITEM_STATES:
+            raise blocking.Blocked(
+                blocking.JOURNAL_MALFORMED,
+                f"unknown item status {entry['status']!r} for {item_id!r}")
+        if not isinstance(entry["attempts"], int) or isinstance(entry["attempts"], bool):
+            raise blocking.Blocked(
+                blocking.JOURNAL_MALFORMED, f"item attempts must be an integer for {item_id!r}")
+
+    cancellation = record["cancellation"]
+    if cancellation is not None:
+        if not isinstance(cancellation, dict) or set(cancellation) != {"at", "reason"}:
+            raise blocking.Blocked(blocking.JOURNAL_MALFORMED, "cancellation shape invalid")
+        if not isinstance(cancellation["reason"], str):
+            raise blocking.Blocked(blocking.JOURNAL_MALFORMED, "cancellation reason must be a string")
+
     terminal = record["terminal"]
     if terminal is not None:
         if not isinstance(terminal, dict) or set(terminal) != {"outcome", "reason_code", "detail", "at"}:
@@ -500,3 +553,86 @@ def has_outstanding_obligation(record: dict) -> bool:
         return True
     last = open_attempt(record)
     return bool(last and not last.get("reconciled"))
+
+
+# --- item and cancellation transitions (ERRATA-001) ----------------------
+
+def set_item_status(run_directory, record: dict, item_id: str, to_status: str, *,
+                    reason_code: str | None = None, detail: str = "",
+                    reconciliation_file: str | None = None,
+                    bump_attempt: bool = False) -> dict:
+    """Move one item's status, refusing anything the item machine forbids.
+
+    Terminal item states are refused here rather than at each caller, for the
+    same reason the run's terminal check lives in `transition`: one choke point
+    is auditable, and a rule enforced in five places is a rule enforced in four.
+    """
+    entry = record["items"].get(item_id)
+    if entry is None:
+        raise blocking.Blocked(blocking.JOURNAL_MALFORMED, f"unknown item {item_id!r}")
+    current = entry["status"]
+    if current in ITEM_TERMINAL:
+        raise blocking.Blocked(
+            blocking.RUN_ALREADY_TERMINAL,
+            f"item {item_id!r} is {current}; a terminal item is never re-entered")
+    if to_status not in ITEM_TRANSITIONS[current]:
+        raise blocking.Blocked(
+            blocking.JOURNAL_ILLEGAL_TRANSITION,
+            f"item {item_id!r}: {current} -> {to_status} is not permitted")
+    updated = json.loads(json.dumps(record))
+    target = updated["items"][item_id]
+    target["status"] = to_status
+    if reason_code is not None:
+        target["reason_code"] = reason_code
+    if detail:
+        target["detail"] = detail
+    if reconciliation_file is not None:
+        target["reconciliation_file"] = reconciliation_file
+    if bump_attempt:
+        target["attempts"] = int(target["attempts"]) + 1
+    updated["history"] = list(updated["history"]) + [
+        {"from": record["state"], "to": record["state"], "at": _utc_now(),
+         "note": f"item {item_id}: {current} -> {to_status}"}
+    ]
+    write(run_directory, updated)
+    return updated
+
+
+def apply_item_status(run_directory, record: dict, items: dict, note: str) -> dict:
+    """Persist a whole item-status map at once (used by blocked propagation)."""
+    updated = json.loads(json.dumps(record))
+    updated["items"] = json.loads(json.dumps(items))
+    updated["history"] = list(updated["history"]) + [
+        {"from": record["state"], "to": record["state"], "at": _utc_now(), "note": note}
+    ]
+    write(run_directory, updated)
+    return updated
+
+
+def cancel(run_directory, record: dict, reason: str = "") -> dict:
+    """Record a durable, one-way cancellation (M5-E1-D11).
+
+    Written BEFORE it takes effect, like every other transition, so a crash
+    between the request and the effect leaves the cancellation in force rather
+    than losing it. Cancelling an already-terminal run is refused: the run has
+    an outcome it earned, and cancellation does not reach back into it
+    (M5-E1-D13's ordering rule).
+    """
+    if record["state"] in TERMINAL_STATES:
+        raise blocking.Blocked(
+            blocking.RUN_ALREADY_TERMINAL,
+            f"run is {record['state']}; a terminal run cannot be cancelled")
+    if record.get("cancellation") is not None:
+        return record        # idempotent: already cancelled, and it is one-way
+    updated = json.loads(json.dumps(record))
+    updated["cancellation"] = {"at": _utc_now(), "reason": reason}
+    updated["history"] = list(updated["history"]) + [
+        {"from": record["state"], "to": record["state"], "at": _utc_now(),
+         "note": "cancellation recorded"}
+    ]
+    write(run_directory, updated)
+    return updated
+
+
+def is_cancelled(record: dict) -> bool:
+    return record.get("cancellation") is not None

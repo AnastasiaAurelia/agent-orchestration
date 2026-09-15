@@ -65,7 +65,7 @@ def approve(root, **kw):
     return U.approve(task="m5 acceptance", repo_root=str(root), runs_base=str(RUNS), **kw)
 
 def scripted(fn):
-    def driver(cb): fn(cb)
+    def driver(cb, item_id=None): fn(cb)
     driver.record = {"scripted": True}
     return driver
 
@@ -74,8 +74,8 @@ def fix_driver():
     return scripted(lambda cb: Path(cb["target"]["repo_root"], "src", "calc.py").write_text(FIXES))
 def noop_driver():
     return scripted(lambda cb: None)
-DONE = lambda cb, recon: bool(recon.get("paths_touched"))
-NEVER = lambda cb, recon: False
+DONE = lambda cb, recon, item=None: bool(recon.get("paths_touched"))
+NEVER = lambda cb, recon, item=None: False
 
 # Run a real child process that dies mid-turn, uncatchably.
 CHILD = textwrap.dedent("""\
@@ -85,7 +85,7 @@ CHILD = textwrap.dedent("""\
         sys.path.insert(0, str(Path(sys.argv[1], sub)))
     import unattended as U
     rd, mode, root = sys.argv[2], sys.argv[3], sys.argv[4]
-    def driver(cb):
+    def driver(cb, item_id=None):
         p = Path(cb["target"]["repo_root"])
         (p/"src"/"calc.py").write_text('def add(a, b):\\n    return a + b\\n')
         if mode in ("escape", "escape_pre"):
@@ -95,7 +95,7 @@ CHILD = textwrap.dedent("""\
         if mode == "clean_exit": return
         os.kill(os.getpid(), signal.SIGKILL)
     driver.record = {"scripted": True, "mode": mode}
-    U.execute(rd, turn_driver=driver, is_work_finished=lambda cb, r: True)
+    U.execute(rd, turn_driver=driver, is_work_finished=lambda cb, r, i=None: True)
     """)
 def crash_child(rd, mode, root):
     script = tmp / "crash_child.py"; script.write_text(CHILD)
@@ -105,8 +105,9 @@ def crash_child(rd, mode, root):
 print("=== M5-AC-1 / AC-2: durable, crash-atomic write-ahead state ===")
 root = fresh("ac1"); ap = approve(root); rd = Path(ap["run_directory"])
 names = sorted(p.name for p in rd.iterdir())
-check("M5-AC-1 contract, run policy and journal are durable at approval",
-      names == ["contract.json", "journal.json", "run-policy.json"], f"({names})")
+check("M5-AC-1 contract, run policy, work items and journal are durable at approval",
+      names == ["contract.json", "journal.json", "run-policy.json", "work-items.json"],
+      f"({names})")
 check("M5-AC-1 the journal starts in APPROVED", J.read(rd)["state"] == "APPROVED")
 rc = crash_child(rd, "escape_pre", root)
 check("M5-AC-1 a pre-turn snapshot is durable before any mutation",
@@ -138,7 +139,7 @@ gitview = subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
                          capture_output=True, text=True).stdout
 check("M5-AC-5 git alone CANNOT see the gitignored escape",
       "build/artifact.bin" not in gitview, f"({gitview!r})")
-def must_not_run(cb): raise AssertionError("a new turn started before the obligation was discharged")
+def must_not_run(cb, item_id=None): raise AssertionError("a new turn started before the obligation was discharged")
 res = U.execute(rd, turn_driver=scripted(must_not_run), is_work_finished=DONE)
 check("M5-AC-3 a FRESH process reconciled the crashed run and BLOCKED",
       res["outcome"] == "BLOCKED" and res["reason_code"] == "reconciliation-mismatch",
@@ -162,8 +163,15 @@ rec = J.read(rd)
 check("M5-AC-4 a crash after the turn leaves the same outstanding obligation",
       J.has_outstanding_obligation(rec), f"(state={rec['state']})")
 res_c = U.execute(rd, turn_driver=scripted(must_not_run), is_work_finished=DONE)
-check("M5-AC-4 and it is discharged on resume, reaching a terminal state",
-      res_c["outcome"] in ("COMPLETE", "BLOCKED", "FAILED"), f"({res_c['outcome']})")
+# ERRATA-001 section 4: the old form accepted ANY terminal state, so it passed
+# whenever the system merely stopped. The constructed scenario is a single
+# in-scope mutation with no out-of-envelope write and a predicate reporting the
+# work finished, so the ONE correct outcome is COMPLETE/work-finished.
+check("M5-AC-4 the resume reaches the EXACT expected terminal outcome, not merely a terminal one",
+      res_c["outcome"] == "COMPLETE" and res_c["reason_code"] == "work-finished",
+      f"({res_c['outcome']}/{res_c['reason_code']})")
+check("M5-AC-4 the crashed attempt's diff was inside the envelope",
+      all(a["within_envelope"] for a in res_c["report"]["attempts"]))
 
 print("\n=== M5-AC-7: resume re-establishes enforcement BEFORE anything else ===")
 import hermes_patches as P
@@ -248,7 +256,7 @@ print("\n=== M5-AC-11: the envelope is unchanged across the whole run ===")
 root = fresh("ac11"); ap = approve(root, max_attempts=3); rd = Path(ap["run_directory"])
 digest0 = ap["contract_digest"]; bytes0 = (rd / "contract.json").read_bytes()
 seen = []
-def multi(cb):
+def multi(cb, item_id=None):
     seen.append(C.digest(cb))
     Path(cb["target"]["repo_root"], "src", "calc.py").write_text(
         f"def add(a, b):\n    return a - b  # attempt {len(seen)}\n")
@@ -521,7 +529,7 @@ rec2 = J.transition(rd2, J.read(rd2), J.ARMED)
 os.symlink(str(outside), str(rd2 / "pre-turn-snapshot-001.json"))
 rec2 = J.start_attempt(rd2, rec2, snapshot_file="pre-turn-snapshot-001.json")
 rec2 = J.transition(rd2, rec2, J.TURN_ACTIVE)
-cb2, pol2 = R.load_authority(rd2, rec2)
+cb2, pol2, _items2 = R.load_authority(rd2, rec2)
 check("M5-A2 a SYMLINKED pre-turn snapshot is refused, not followed",
       raises(blocking.JOURNAL_PATH_UNSAFE,
              lambda: U.discharge_obligation(rd2, rec2, cb2, pol2)))
@@ -585,7 +593,7 @@ else:
             os.kill(os.getpid(), signal.SIGKILL)
         threading.Thread(target=suicide, daemon=True).start()
         U.execute(rd, turn_driver=RD.RemediationDriver(hermes_home=home),
-                  is_work_finished=lambda cb, r: False)
+                  is_work_finished=lambda cb, r, i=None: False)
         """))
     rc = subprocess.run([sys.executable, str(live_child), diana, str(rd), hermes_home, "120"],
                         capture_output=True, text=True)
@@ -598,7 +606,7 @@ else:
     check("M5-AC-21 durable state survived the kill", J.exists(rd))
 
     # A FRESH process resumes under the ORIGINAL contract and finishes the work.
-    def finished(cb, recon):
+    def finished(cb, recon, item_id=None):
         return subprocess.run(["python3", "check.py"], cwd=cb["target"]["repo_root"],
                               capture_output=True).returncode == 0
     res_live = U.execute(rd, turn_driver=RD.RemediationDriver(hermes_home=hermes_home),
@@ -653,6 +661,200 @@ else:
     check("M5-AC-21 the run is terminal and cannot be resumed again",
           raises(blocking.RUN_ALREADY_TERMINAL,
                  lambda: U.execute(rd, turn_driver=noop_driver(), is_work_finished=DONE)))
+
+print("\n=== M5-AC-23..29: work items, dependencies, cancellation (ERRATA-001) ===")
+import workitems as W
+
+def approve_items(root, items, **kw):
+    kw.setdefault("allowed_commands", ("python3 check.py",))
+    kw.setdefault("write_roots", (str(root / "src"),))
+    kw.setdefault("max_attempts", 8); kw.setdefault("total_seconds", 900)
+    return U.approve(task="m5 items", repo_root=str(root), runs_base=str(RUNS),
+                     items=items, **kw)
+
+# --- M5-AC-23 + M5-AC-24: blocked item, independent continues, dependent never runs
+root = fresh("items"); called = []
+ap = approve_items(root, [{"id": "A", "task": "a", "depends_on": []},
+                          {"id": "B", "task": "b", "depends_on": ["A"]},
+                          {"id": "B2", "task": "b2", "depends_on": ["B"]},
+                          {"id": "C", "task": "c", "depends_on": []}])
+rd = Path(ap["run_directory"])
+def item_driver(cb, item_id):
+    called.append(item_id)
+    if item_id == "A":
+        raise RuntimeError("item A cannot be completed")   # envelope HOLDS
+    Path(cb["target"]["repo_root"], "src", f"{item_id}.py").write_text("ok = 1\n")
+res_i = U.execute(rd, turn_driver=item_driver, is_work_finished=lambda cb, r, i: True)
+rec_i = J.read(rd)
+st = {k: v["status"] for k, v in rec_i["items"].items()}
+check("M5-AC-23 the failing item A is BLOCKED", st["A"] == "BLOCKED", f"({st})")
+check("M5-AC-23 the INDEPENDENT item C still executed and COMPLETED",
+      st["C"] == "COMPLETE" and "C" in called, f"({st}, called={called})")
+check("M5-AC-24 the dependent item B is BLOCKED with dependency-blocked",
+      st["B"] == "BLOCKED" and rec_i["items"]["B"]["reason_code"] == "dependency-blocked",
+      f"({rec_i['items']['B']})")
+check("M5-AC-24 B's turn driver was PROVABLY never invoked", "B" not in called, f"({called})")
+check("M5-AC-24 TRANSITIVE blocking reached B2 through B",
+      st["B2"] == "BLOCKED" and rec_i["items"]["B2"]["reason_code"] == "dependency-blocked"
+      and "B2" not in called, f"({st}, called={called})")
+check("M5-AC-24 the run is BLOCKED, and NOT COMPLETE with work unfinished",
+      res_i["outcome"] == "BLOCKED", f"({res_i['outcome']}/{res_i['reason_code']})")
+check("M5-AC-24 the report names each blocked item and its dependencies",
+      {b["item_id"] for b in res_i["report"]["blocked_items"]} >= {"A", "B", "B2"}
+      and all(b["envelope_at_the_time"]["risk"] == "ELEVATED"
+              for b in res_i["report"]["blocked_items"]))
+check("M5-AC-24 a dependency-blocked item's report says a human must fix the blocker first",
+      any("depend" in b["human_decision_required"].lower()
+          for b in res_i["report"]["blocked_items"] if b["item_id"] == "B"))
+
+# COMPLETE is structurally impossible while an item is unfinished (M5-E1-D14)
+check("M5-E1-D14 a run with a non-COMPLETE item can never report COMPLETE",
+      not W.all_complete(ap["items"], rec_i["items"]) and res_i["outcome"] != "COMPLETE")
+
+# --- M5-AC-25: cycle and corrupt graph, rejected before anything executes
+root = fresh("graph")
+def approve_bad(items):
+    return code_of(lambda: approve_items(root, items))
+def code_of(fn):
+    try: fn(); return None
+    except blocking.Blocked as e: return e.code
+    except Exception as e: return type(e).__name__
+check("M5-AC-25 a SELF-dependency is rejected",
+      approve_bad([{"id": "X", "task": "", "depends_on": ["X"]}]) == "work-item-self-dependency")
+check("M5-AC-25 an UNKNOWN dependency id is rejected",
+      approve_bad([{"id": "X", "task": "", "depends_on": ["nope"]}])
+      == "work-item-unknown-dependency")
+check("M5-AC-25 a DUPLICATE item id is rejected",
+      approve_bad([{"id": "X", "task": "", "depends_on": []},
+                   {"id": "X", "task": "", "depends_on": []}]) == "work-item-duplicate-id")
+check("M5-AC-25 a 2-CYCLE is rejected",
+      approve_bad([{"id": "X", "task": "", "depends_on": ["Y"]},
+                   {"id": "Y", "task": "", "depends_on": ["X"]}]) == "work-item-cycle")
+check("M5-AC-25 a LONGER cycle is rejected",
+      approve_bad([{"id": "X", "task": "", "depends_on": ["Z"]},
+                   {"id": "Y", "task": "", "depends_on": ["X"]},
+                   {"id": "Z", "task": "", "depends_on": ["Y"]}]) == "work-item-cycle")
+check("M5-AC-25 an empty item set is rejected", approve_bad([]) is not None)
+check("M5-AC-25 a valid DAG with a diamond is accepted",
+      approve_bad([{"id": "X", "task": "", "depends_on": []},
+                   {"id": "Y", "task": "", "depends_on": ["X"]},
+                   {"id": "Z", "task": "", "depends_on": ["X"]},
+                   {"id": "W", "task": "", "depends_on": ["Y", "Z"]}]) is None)
+check("M5-AC-25 the graph is validated BEFORE anything is armed",
+      not any(p.name.startswith("pre-turn-snapshot") for p in RUNS.rglob("*")
+              if "graph" in str(p)))
+# a TAMPERED work-items document is refused by digest
+root = fresh("tamper"); ap_t = approve_items(root, [{"id": "A", "task": "a", "depends_on": []},
+                                                    {"id": "B", "task": "b", "depends_on": ["A"]}])
+rd_t = Path(ap_t["run_directory"])
+doc = json.loads((rd_t / "work-items.json").read_bytes())
+doc["items"][1]["depends_on"] = []          # cut B's dependency on A
+(rd_t / "work-items.json").write_bytes(json.dumps(doc).encode())
+check("M5-AC-25 a TAMPERED dependency graph is refused by digest",
+      raises(blocking.WORK_ITEMS_DIGEST_MISMATCH, lambda: R.load_run(rd_t)))
+
+# --- M5-AC-26: a COMPLETE item is not replayed after restart
+root = fresh("replay"); calls2 = []
+ap_r = approve_items(root, [{"id": "P", "task": "p", "depends_on": []},
+                            {"id": "Q", "task": "q", "depends_on": ["P"]}],
+                     max_attempts=1)
+rd_r = Path(ap_r["run_directory"])
+def d1(cb, item_id):
+    calls2.append(item_id)
+    Path(cb["target"]["repo_root"], "src", f"{item_id}.py").write_text("ok\n")
+res_r1 = U.execute(rd_r, turn_driver=d1, is_work_finished=lambda cb, r, i: True)
+check("M5-AC-26 the first item completed and the budget then stopped the run",
+      J.read(rd_r)["items"]["P"]["status"] == "COMPLETE" and calls2 == ["P"],
+      f"({calls2}, {res_r1['outcome']})")
+# restart: a FRESH read of durable state, with a driver that must not see P again
+replayed = []
+def d2(cb, item_id):
+    replayed.append(item_id)
+    raise AssertionError(f"item {item_id} was re-executed after restart")
+res_r2 = code_of(lambda: U.execute(rd_r, turn_driver=d2, is_work_finished=lambda cb, r, i: True))
+check("M5-AC-26 the COMPLETE item was NOT re-executed after restart",
+      "P" not in replayed, f"(replayed={replayed})")
+check("M5-AC-26 and it is still COMPLETE in durable state",
+      J.read(rd_r)["items"]["P"]["status"] == "COMPLETE")
+
+# --- M5-AC-27: durable cancellation
+root = fresh("cancel"); calls3 = []
+ap_c = approve_items(root, [{"id": "A", "task": "a", "depends_on": []},
+                            {"id": "B", "task": "b", "depends_on": []}])
+rd_c = Path(ap_c["run_directory"])
+U.cancel(rd_c, reason="operator changed their mind")
+check("M5-AC-27 cancellation is durably recorded", J.read(rd_c)["cancellation"] is not None)
+def d3(cb, item_id):
+    calls3.append(item_id)
+res_c1 = U.execute(rd_c, turn_driver=d3, is_work_finished=lambda cb, r, i: True)
+check("M5-AC-27 NO turn executed after cancellation", calls3 == [], f"({calls3})")
+check("M5-AC-27 the run terminates FAILED with run-cancelled",
+      res_c1["outcome"] == "FAILED" and res_c1["reason_code"] == "run-cancelled",
+      f"({res_c1['outcome']}/{res_c1['reason_code']})")
+check("M5-AC-27 cancellation survives restart (the run is terminal and stays cancelled)",
+      raises(blocking.RUN_ALREADY_TERMINAL,
+             lambda: U.execute(rd_c, turn_driver=d3, is_work_finished=lambda cb, r, i: True))
+      and J.read(rd_c)["cancellation"] is not None)
+check("M5-AC-27 no fourth top-level outcome was invented",
+      J.read(rd_c)["state"] in ("COMPLETE", "FAILED", "BLOCKED"))
+check("M5-AC-27 the report records the cancellation", res_c1["report"]["cancellation"] is not None)
+# cancelling a terminal run is refused; cancellation is one-way and idempotent
+check("M5-AC-27 a TERMINAL run cannot be cancelled after the fact",
+      raises(blocking.RUN_ALREADY_TERMINAL, lambda: U.cancel(rd_c)))
+root = fresh("cancel2")
+ap_c2 = approve_items(root, [{"id": "A", "task": "a", "depends_on": []}])
+rd_c2 = Path(ap_c2["run_directory"])
+U.cancel(rd_c2, reason="one")
+first = J.read(rd_c2)["cancellation"]
+U.cancel(rd_c2, reason="two")
+check("M5-AC-27 cancellation is idempotent and one-way (the first record stands)",
+      J.read(rd_c2)["cancellation"] == first)
+
+# --- M5-AC-28: cancellation does not skip an owed reconciliation
+root = fresh("cancelrecon")
+ap_x = approve_items(root, [{"id": "A", "task": "a", "depends_on": []}])
+rd_x = Path(ap_x["run_directory"])
+rc = crash_child(rd_x, "escape", root)      # dies mid-turn leaving an escape
+check("M5-AC-28 the crashed run has an outstanding obligation",
+      J.has_outstanding_obligation(J.read(rd_x)))
+U.cancel(rd_x, reason="cancelled while an obligation was outstanding")
+res_x = U.execute(rd_x, turn_driver=scripted(must_not_run),
+                  is_work_finished=lambda cb, r, i: True)
+check("M5-AC-28 the owed reconciliation was STILL discharged despite cancellation",
+      (rd_x / "reconciliation-001.json").is_file())
+check("M5-AC-28 the out-of-envelope mutation was still DETECTED",
+      res_x["outcome"] == "BLOCKED" and res_x["reason_code"] == "reconciliation-mismatch",
+      f"({res_x['outcome']}/{res_x['reason_code']})")
+check("M5-AC-28 an envelope violation outranks the cancellation in the outcome",
+      "build/artifact.bin" in (res_x["detail"] or ""), f"({res_x['detail']})")
+
+# --- M5-AC-29: Hermes cannot alter item, dependency or cancellation state
+root = fresh("agentstate")
+ap_a = approve_items(root, [{"id": "A", "task": "a", "depends_on": []},
+                            {"id": "B", "task": "b", "depends_on": ["A"]}])
+rd_a = Path(ap_a["run_directory"])
+loaded_a = R.load_run(rd_a); R.reestablish_enforcement(loaded_a["contract"])
+before_items = (rd_a / "work-items.json").read_bytes()
+before_journal = (rd_a / "journal.json").read_bytes()
+for target, label in ((rd_a / "work-items.json", "work-items.json"),
+                      (rd_a / "journal.json", "journal.json")):
+    r = call("write_file", {"path": str(target), "content": "{}"})
+    check(f"M5-AC-29 a Hermes write to {label} is refused", refused(r), f"({r[:120]})")
+    r = call("patch", {"mode": "patch",
+                       "patch": f"*** Update File: {target}\n-a\n+b\n"})
+    check(f"M5-AC-29 a Hermes V4A patch of {label} is refused", refused(r), f"({r[:120]})")
+check("M5-AC-29 work-items.json is byte-unchanged",
+      (rd_a / "work-items.json").read_bytes() == before_items)
+check("M5-AC-29 the journal is byte-unchanged",
+      (rd_a / "journal.json").read_bytes() == before_journal)
+check("M5-AC-29 the item statuses and graph are unchanged",
+      {k: v["status"] for k, v in J.read(rd_a)["items"].items()} == {"A": "PENDING", "B": "PENDING"}
+      and J.read(rd_a)["cancellation"] is None)
+check("M5-AC-29 a Hermes terminal command cannot reach the run directory either",
+      refused(call("terminal", {"command": f"rm {rd_a}/journal.json", "timeout": 10,
+                                "workdir": str(root / "src")})))
+check("M5-AC-29 the run directory is outside BOTH read_scope and write_scope",
+      refused(call("read_file", {"path": str(rd_a / "journal.json")})))
 
 print("\n=== M5-AC-22: regression invariant M5-REG-1..4 ===")
 git = lambda *a: subprocess.run(["git", "-C", repo_dir, *a], capture_output=True, text=True).stdout

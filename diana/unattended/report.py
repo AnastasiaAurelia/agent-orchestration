@@ -58,35 +58,70 @@ def _attempt_summary(attempt: dict, run_directory: Path) -> dict:
     }
 
 
-def build(record: dict, contract_block: dict, policy: dict, run_directory) -> dict:
+def build(record: dict, contract_block: dict, policy: dict, run_directory,
+          items_doc: dict | None = None) -> dict:
     """Reconstruct the whole run from Diana-owned durable state alone."""
     run_directory = Path(run_directory)
     terminal = record.get("terminal") or {}
     attempts = [_attempt_summary(a, run_directory) for a in record.get("attempts", [])]
 
+    envelope = contract_block["capability_envelope"]
+    envelope_view = {
+        "allowed_tools": envelope.get("allowed_tools"),
+        "write_scope": (envelope.get("write_scope") or {}).get("allowed_roots"),
+        "allowed_commands": envelope.get("allowed_commands"),
+        "risk": contract_block.get("risk"),
+        "depth": contract_block.get("depth"),
+    }
     blocked_items = []
-    if record["state"] == _journal.BLOCKED:
+    for item_id, entry in sorted((record.get("items") or {}).items()):
+        if entry.get("status") != "BLOCKED":
+            continue
+        blocked_items.append({
+            # M5-D17: every blocked item states what the envelope permitted at
+            # the moment it was refused, not just that it was refused.
+            "envelope_at_the_time": envelope_view,
+            "paths_outside_write_scope": sorted(
+                {p for a in attempts for p in a["paths_outside_write_scope"]}),
+            "what_was_attempted": declared_task(declared_map(items_doc), item_id, contract_block),
+            "item_id": item_id,
+            "refused_by": "diana",
+            "reason_code": entry.get("reason_code"),
+            "detail": entry.get("detail", ""),
+            "depends_on": declared_map(items_doc).get(item_id, {}).get("depends_on", []),
+            "human_decision_required": _human_decision_for(entry.get("reason_code")),
+        })
+    if record["state"] == _journal.BLOCKED and not blocked_items:
         # What was attempted, which control refused it, with which reason code,
         # what the envelope permitted at that moment, and what a human must decide.
-        envelope = contract_block["capability_envelope"]
         blocked_items.append({
             "what_was_attempted": contract_block.get("task"),
+            "item_id": None,
             "refused_by": "diana",
             "reason_code": terminal.get("reason_code"),
             "detail": terminal.get("detail"),
-            "envelope_at_the_time": {
-                "allowed_tools": envelope.get("allowed_tools"),
-                "write_scope": (envelope.get("write_scope") or {}).get("allowed_roots"),
-                "allowed_commands": envelope.get("allowed_commands"),
-                "risk": contract_block.get("risk"),
-                "depth": contract_block.get("depth"),
-            },
+            "depends_on": [],
+            "envelope_at_the_time": envelope_view,
             "paths_outside_write_scope": sorted(
                 {p for a in attempts for p in a["paths_outside_write_scope"]}),
             "human_decision_required":
                 _human_decision_for(terminal.get("reason_code")),
         })
 
+    # ERRATA-001: the item view is reconstructed from Diana-owned state too, so
+    # an operator returning to the run sees which unit stopped and why, not just
+    # that the run stopped.
+    declared = {i["id"]: i for i in ((items_doc or {}).get("items") or [])}
+    item_view = [
+        {"id": item_id,
+         "task": declared.get(item_id, {}).get("task", ""),
+         "depends_on": declared.get(item_id, {}).get("depends_on", []),
+         "status": entry.get("status"),
+         "attempts": entry.get("attempts"),
+         "reason_code": entry.get("reason_code"),
+         "detail": entry.get("detail", "")}
+        for item_id, entry in sorted((record.get("items") or {}).items())
+    ]
     return {
         "document_type": DOCUMENT_TYPE,
         "schema_version": SCHEMA_VERSION,
@@ -102,14 +137,30 @@ def build(record: dict, contract_block: dict, policy: dict, run_directory) -> di
             "deadline_at": policy["deadline_at"],
         },
         "attempts": attempts,
+        "items": item_view,
+        "cancellation": record.get("cancellation"),
         "blocked_items": blocked_items,
         "state_history": record.get("history", []),
     }
 
 
+def declared_map(items_doc):
+    return {i["id"]: i for i in ((items_doc or {}).get("items") or [])}
+
+
+def declared_task(declared, item_id, contract_block):
+    return declared.get(item_id, {}).get("task") or contract_block.get("task")
+
+
 def _human_decision_for(reason_code: str | None) -> str:
     """Plain-language next step. Deliberately a closed mapping, not free text."""
     return {
+        "dependency-blocked":
+            "This item never ran: an item it declares a dependency on did not complete. Fix or "
+            "re-approve the blocking item first; nothing about this item's own work is known.",
+        "run-cancelled":
+            "The run was cancelled by an operator. Any work already done was still reconciled; "
+            "approve a new run if the remaining items are still wanted.",
         "reconciliation-mismatch":
             "Inspect the paths changed outside write_scope and decide whether to keep or revert "
             "them, then approve a new run if the work should continue.",
