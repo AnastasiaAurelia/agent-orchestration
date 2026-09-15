@@ -478,6 +478,65 @@ check("M5-AC-20 the only git M5 runs is read-only (rev-parse/status)",
           for tok in [])
       or ("git\", \"-C" in m5_src))
 
+print("\n=== AUDIT REGRESSIONS: M5-A1 rollback, M5-A2 artifact path ===")
+# M5-A1: a journal saved earlier in the SAME run is genuinely Diana-written, so
+# its digest verifies. Restoring it rewinds `attempts` and resets the retry
+# budget. Detected because per-attempt artifacts are never removed.
+root = fresh("a1"); ap = approve(root, max_attempts=3); rd = Path(ap["run_directory"])
+rec = J.transition(rd, J.read(rd), J.ARMED)
+def _close(rec, n):
+    Path(rd, f"pre-turn-snapshot-{n:03d}.json").write_text(json.dumps({"files": {}, "git": ""}))
+    rec = J.start_attempt(rd, rec, snapshot_file=f"pre-turn-snapshot-{n:03d}.json")
+    rec = J.transition(rd, rec, J.TURN_ACTIVE); rec = J.transition(rd, rec, J.RECONCILING)
+    Path(rd, f"reconciliation-{n:03d}.json").write_text(
+        json.dumps({"within_envelope": True, "paths_touched": []}))
+    rec = J.update_attempt(rd, rec, state="CLOSED", reconciled=True, within_envelope=True,
+                           reconciliation_file=f"reconciliation-{n:03d}.json")
+    return J.transition(rd, rec, J.RECONCILED)
+rec = _close(rec, 1)
+saved = (rd / "journal.json").read_bytes()          # the attacker's copy
+rec = J.transition(rd, rec, J.ARMED); rec = _close(rec, 2)
+check("M5-A1 two attempts are recorded before the rollback", J.attempts_used(J.read(rd)) == 2)
+(rd / "journal.json").write_bytes(saved)            # ROLLBACK, digest still valid
+check("M5-A1 a rolled-back journal is REFUSED even though its digest verifies",
+      raises(blocking.JOURNAL_STALE, lambda: J.read(rd)))
+check("M5-A1 ... and the run cannot be resumed on it",
+      raises(blocking.JOURNAL_STALE,
+             lambda: U.execute(rd, turn_driver=noop_driver(), is_work_finished=DONE)))
+# The legitimate window -- snapshot written before the attempt is journaled -- is
+# NOT a false positive, or every crashed run would become unresumable.
+root = fresh("a1b"); ap = approve(root); rd_b = Path(ap["run_directory"])
+rec_b = J.transition(rd_b, J.read(rd_b), J.ARMED)
+Path(rd_b, "pre-turn-snapshot-001.json").write_text(json.dumps({"files": {}, "git": ""}))
+check("M5-A1 an un-journaled pre-turn snapshot (the M5-D5 window) is NOT a rollback",
+      J.read(rd_b)["state"] == "ARMED")
+
+# M5-A2: the snapshot NAME is digest-protected; the FILE is not. Replacing it
+# with a symlink needs no digest change and would make Diana reconcile against a
+# "before" state an attacker chose.
+root = fresh("a2"); ap = approve(root); rd2 = Path(ap["run_directory"])
+outside = tmp / f"outside-snapshot-{uuid.uuid4().hex[:6]}.json"
+outside.write_text(json.dumps({"files": {}, "git": ""}))
+rec2 = J.transition(rd2, J.read(rd2), J.ARMED)
+os.symlink(str(outside), str(rd2 / "pre-turn-snapshot-001.json"))
+rec2 = J.start_attempt(rd2, rec2, snapshot_file="pre-turn-snapshot-001.json")
+rec2 = J.transition(rd2, rec2, J.TURN_ACTIVE)
+cb2, pol2 = R.load_authority(rd2, rec2)
+check("M5-A2 a SYMLINKED pre-turn snapshot is refused, not followed",
+      raises(blocking.JOURNAL_PATH_UNSAFE,
+             lambda: U.discharge_obligation(rd2, rec2, cb2, pol2)))
+check("M5-A2 the refusal drives the run to a terminal BLOCKED state",
+      J.read(rd2)["state"] == "BLOCKED"
+      and J.read(rd2)["terminal"]["reason_code"] == "journal-path-unsafe",
+      f"({J.read(rd2)['state']})")
+check("M5-A2 an artifact name containing a path separator is refused",
+      raises(blocking.JOURNAL_PATH_UNSAFE,
+             lambda: J.read_artifact(rd2, "../../etc/passwd")))
+check("M5-A2 an absolute artifact name is refused",
+      raises(blocking.JOURNAL_PATH_UNSAFE, lambda: J.read_artifact(rd2, "/etc/passwd")))
+check("M5-A2 a legitimate plain artifact still reads",
+      J.read_artifact(rd_b, "pre-turn-snapshot-001.json") == {"files": {}, "git": ""})
+
 print("\n=== M5-AC-21: end-to-end LIVE unattended run, interrupted and resumed ===")
 import hermes_live as HL
 try:

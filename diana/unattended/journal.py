@@ -307,7 +307,93 @@ def read(run_directory) -> dict:
     if actual != outer["digest"]:
         raise blocking.Blocked(
             blocking.JOURNAL_DIGEST_MISMATCH, f"{actual} != {outer['digest']}")
+    _require_not_rolled_back(directory, record)
     return record
+
+
+def _artifact_index(name: str, prefix: str) -> int | None:
+    if not name.startswith(prefix) or not name.endswith(".json"):
+        return None
+    try:
+        return int(name[len(prefix):-len(".json")])
+    except ValueError:
+        return None
+
+
+def _require_not_rolled_back(directory: Path, record: dict) -> None:
+    """Refuse a journal that an EARLIER, genuinely-valid copy has replaced.
+
+    AUDIT FINDING M5-A1. The digest proves a record is one Diana wrote; it does
+    NOT prove it is the LATEST one Diana wrote. Restoring a journal saved earlier
+    in the same run therefore passes every integrity check while rewinding
+    `attempts` -- which resets the retry budget of M5-D16, the one bound that
+    stops an unattended run retrying forever.
+
+    The rollback is detectable because per-attempt artifacts are never removed:
+    a reconciliation record for attempt N proves attempt N was recorded, so a
+    journal claiming fewer attempts than the artifacts on disk is stale. The
+    snapshot bound is one higher because M5-D5 writes the snapshot BEFORE the
+    attempt is journaled, so exactly one un-journaled snapshot is legitimate.
+    """
+    attempts = len(record.get("attempts") or [])
+    try:
+        names = [entry.name for entry in directory.iterdir()]
+    except OSError:
+        return
+    max_recon = max((i for i in (_artifact_index(n, "reconciliation-") for n in names)
+                     if i is not None), default=0)
+    max_snap = max((i for i in (_artifact_index(n, "pre-turn-snapshot-") for n in names)
+                    if i is not None), default=0)
+    if max_recon > attempts:
+        raise blocking.Blocked(
+            blocking.JOURNAL_STALE,
+            f"reconciliation record for attempt {max_recon} exists but the journal records "
+            f"only {attempts} attempt(s): the journal is an earlier copy")
+    if max_snap > attempts + 1:
+        raise blocking.Blocked(
+            blocking.JOURNAL_STALE,
+            f"pre-turn snapshot for attempt {max_snap} exists but the journal records "
+            f"only {attempts} attempt(s): the journal is an earlier copy")
+
+
+def artifact_path(run_directory, name: str) -> Path:
+    """Resolve a per-attempt artifact name, refusing anything but a plain file.
+
+    AUDIT FINDING M5-A2. `discharge_obligation` read the pre-turn snapshot by
+    joining the journal's `snapshot_file` onto the run directory and opening it.
+    The NAME is digest-protected, but the FILE is not: replacing
+    `pre-turn-snapshot-001.json` with a symlink needs no digest change at all,
+    and Diana would then reconcile against a "before" state chosen by whoever
+    planted the link -- which is the audit reading a state the attacker supplied.
+    The same reasoning as `open_dir`'s, applied one level down.
+    """
+    if not isinstance(name, str) or not name:
+        raise blocking.Blocked(blocking.JOURNAL_MALFORMED, "artifact name is not a string")
+    if name != os.path.basename(name) or name in (".", ".."):
+        raise blocking.Blocked(
+            blocking.JOURNAL_PATH_UNSAFE, f"artifact name is not a plain basename: {name!r}")
+    directory = open_dir(run_directory)
+    path = directory / name
+    if path.is_symlink():
+        raise blocking.Blocked(
+            blocking.JOURNAL_PATH_UNSAFE, f"artifact is a symlink: {path}")
+    if not path.is_file():
+        raise blocking.Blocked(blocking.JOURNAL_MALFORMED, f"artifact is missing: {path}")
+    st = path.lstat()
+    if not stat.S_ISREG(st.st_mode):
+        raise blocking.Blocked(
+            blocking.JOURNAL_PATH_UNSAFE, f"artifact is not a regular file: {path}")
+    return path
+
+
+def read_artifact(run_directory, name: str) -> dict:
+    """Read a per-attempt artifact as JSON, through the safety check above."""
+    path = artifact_path(run_directory, name)
+    try:
+        return json.loads(path.read_bytes().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise blocking.Blocked(
+            blocking.JOURNAL_MALFORMED, f"unreadable artifact {name}: {exc}") from None
 
 
 def exists(run_directory) -> bool:

@@ -169,18 +169,19 @@ def discharge_obligation(run_directory, record: dict, contract_block: dict,
     quiescence = _ownership.require_quiescent(
         record["run_id"], grace_seconds=float(policy["quiescence_grace_seconds"]))
 
-    snapshot_path = Path(run_directory) / attempt["snapshot_file"]
+    # AUDIT FINDING M5-A2: read through the safety check, so a snapshot replaced
+    # by a symlink cannot make Diana reconcile against a "before" state someone
+    # else chose.
     try:
-        before = json.loads(snapshot_path.read_bytes().decode("utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        before = _journal.read_artifact(run_directory, attempt["snapshot_file"])
+    except blocking.Blocked as exc:
         # Without the pre-turn snapshot the diff cannot be computed at all, and
         # "I cannot tell what happened" is never "nothing happened" (M5-D9).
         record = _journal.transition(
             run_directory, record, _journal.BLOCKED,
-            terminal_reason=blocking.JOURNAL_MALFORMED,
-            terminal_detail=f"pre-turn snapshot unreadable: {exc}")
-        raise blocking.Blocked(
-            blocking.JOURNAL_MALFORMED, f"pre-turn snapshot unreadable: {exc}") from None
+            terminal_reason=exc.code,
+            terminal_detail=f"pre-turn snapshot unusable: {exc.detail}"[:400])
+        raise
 
     root = contract_block["target"]["repo_root"]
     after = {"files": _reconcile.snapshot(root), "git": _reconcile.git_status(root)}
