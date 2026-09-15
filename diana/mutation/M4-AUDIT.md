@@ -254,6 +254,69 @@ snapshot (proving it was never read), that repointing the link *is* detected, th
 fifo and a fifo in the tree do not hang the snapshot (20s watchdog on a worker thread), and that
 the walk does not descend into a symlinked directory.
 
+### F-A7 — an absent `workdir` was permitted, and ambient cwd was never authority
+
+Found by **M5's empirical Phase 0**, after M4 had been approved and merged. Resolved by
+[`HERMES-RUNTIME-M4-ERRATA-002.md`](../../docs/architecture/HERMES-RUNTIME-M4-ERRATA-002.md),
+which corrects `M4-D11`'s `workdir` clause only and leaves `HERMES-RUNTIME-M4.md`
+byte-identical.
+
+`decide_command` evaluated the `workdir` rule under `if workdir is not None:`, so an omitted
+argument skipped the check entirely and the command ran in whatever directory the ambient
+process or session supplied. Measured on the real M4 shape, with `write_scope` and
+`workdir_roots` set to `<root>/src`:
+
+```
+{command: <allowed>, timeout: 20, workdir: "<root>"}  ->  Verdict(deny)   # named: refused
+{command: <allowed>, timeout: 20}                     ->  Verdict(allow)  # omitted: allowed
+                                                      #  and it executed in "<root>"
+```
+
+**The directory the policy refuses when it is named is the one it accepted when the argument
+was omitted.** That is F-A2's shape one argument further along, and the implementation's own
+comment asserted the reasoning that the measurement falsifies: *"An absent `workdir` is safe to
+default because the session cwd is still scope-checked."* Nothing scope-checks the session cwd.
+
+**Why it is an authority defect, not a convenience default.** The ambient session working
+directory is not in the `ExecutionContract`, is not covered by any digest, and was never shown
+to the approving user. It is also not durable: it does not survive a restart or a resume, so a
+control that reads it decides on state that changes when nobody is looking. That is what made
+M5's Phase 0 — whose subject is duration — the thing that found it.
+
+The severity is bounded and stated rather than inflated: M4's carried assumptions already say
+the command allowlist is not a sandbox and an allowed command may write wherever the Diana
+process can, so no new capability was reachable. What was wrong is that the run's **declared**
+working-directory bound differed from its **actual** one, which is exactly what M4-D11 exists
+to prevent.
+
+**Fix.** `workdir` is required; omission is refused; a supplied value must be a non-empty
+string, canonicalized, and inside the declared roots. The canonicalization and containment were
+already correct — they were simply unreachable on the omission path, so the whole correction is
+the removal of one guard and the refusal that replaces it. `mutation_policy.py` is an
+**M4-owned file** created by `7e2395e`, so ERRATA-001 §3's permitted-replacement set of
+**pre-existing** production files is unchanged and not widened.
+
+`remediation_driver.py`'s prompt additionally names the required `workdir` and timeout ceiling.
+That is **presentation, not enforcement** (M2-D2) — the dispatch-boundary policy is what
+refuses, and the adversarial assertions bypass the model entirely to prove it. It keeps
+M4-AC-17 achievable, exactly as the F-A2 round did.
+
+**Locked by** eighteen assertions covering ERRATA-002 §7's seven obligations, including that
+the refusal leaves no execution canary, that the named/omitted asymmetry is closed, that the
+decision is invariant across three processes with three different ambient working directories,
+that traversal and a symlink escape are refused after canonicalization, and that `timeout`,
+`background`, `pty` and exact-match command membership are untouched.
+
+**Observation, recorded and deliberately not acted on.** `diana/gate/diana-gate.py`'s
+`REVIEW_PATHS` — the deterministic "always requires human review regardless of self-declared
+risk" list — covers the Security Track's enforcement surface but **not** the Hermes runtime
+boundary: `mutation_policy.py`, `hermes_patches.py` and `contract.py` are all absent from it.
+So a change to the M1–M4 enforcement surface does not deterministically force `REQUIRE_HUMAN`
+the way a change to `security_reducer.py` does. Closing that gap means editing `diana-gate.py`,
+which is itself a `REVIEW_PATH` and a pre-existing production module outside M4's
+permitted-replacement set, so it is **not** done here. It is recorded for the governance track
+alongside the `REQUIRE_HUMAN` limitation in §8.
+
 ## 5. Verdict
 
 **Not approved at the time of writing.** Recorded here for the audit trail:
@@ -444,3 +507,76 @@ This is the same class of gap as the project's founding architectural finding �
 not enforcement* — one level up: `risk-tiers.md` states "Protected-branch merge is always
 human-approved even when the underlying change is SAFE", and for now that sentence is policy text
 whose mechanism is the owner's own judgement.
+
+## 9. Focused audit of the F-A7 fix
+
+Performed against the **post-fix** sources, adversarially, with the explicit goal of falsifying
+the fix's claims rather than confirming them. Its nature is stated plainly, as §2 did: this is a
+**focused fresh-pass audit, not an independent third-party review.** §7's lesson stands — the
+first independent reviewer to examine M4 found two defects a self-audit had signed off — and it
+applies to this fix, which is now the newest and least-reviewed code in the milestone.
+
+### A. Falsification — the new assertions are not vacuous
+
+The M4 audit's own standard is that an assertion must fail when the defect is present. The
+pre-fix control flow was restored exactly (omission skipping the whole `workdir` block, with
+`timeout` handling preserved) and the suite re-run. **Six assertions failed**, each for the right
+reason:
+
+```
+FAIL  F-A7 (3) an OMITTED workdir is refused        ({"output": "", "exit_code": 0, "error": null})
+FAIL  F-A7 (4) the refusal left NO execution canary
+FAIL  F-A7 (5) ambient cwd is not an implicit authority channel
+FAIL  F-A7 (2) and it left no canary either
+FAIL  F-A7 the named/omitted asymmetry is closed    (named=False omitted=True)
+FAIL  F-A7 (6) restart/new-process cwd differences do not change the decision  (observed [(True, True, False)])
+```
+
+The third line is the defect stated in one measurement: `named=False omitted=True`. The first
+shows the command **actually executed** (`exit_code: 0`) rather than merely being permitted. The
+fix was then restored and the suite returned 146/0.
+
+### B. The rule holds at BOTH enforcement entries, proven behaviorally
+
+M4-D1 names two entries, and `mutation_policy` is consulted at both
+(`hermes_patches.py:224` for `handle_function_call`, `:264` for the dispatch guard). Checking only
+the first would have repeated M1's audit lesson about a control that is real but reachable around.
+Driven directly through `agent.tool_executor._dispatch_authorized_once`:
+
+```
+omitted workdir      -> refused=True   handler_ran=False
+out-of-scope workdir -> refused=True   handler_ran=False
+in-scope workdir     -> refused=False  handler_ran=True
+canary created by any refused call?  False
+```
+
+`handler_ran=False` is the M4-D13 property: enforcement precedes the effect, proven by a canary
+rather than by a log.
+
+### C. Checks that found nothing
+
+- `decide_command` is the **sole** route for `terminal`: it is reached only from
+  `MutationPolicy.decide`, which refuses any granted tool it does not understand (M4-D8), and it
+  has no other caller anywhere in `diana/`.
+- An absent or empty `workdir_roots` **refuses** rather than degrading to allow, so a contract
+  that declared `terminal` without command policy fails closed.
+- `workdir_roots` genuinely derives from `write_scope` (`remediate.py:65`), so ERRATA-002 §4's
+  wording matches the code rather than describing an intention.
+- Canonicalization was already correct and needed no new code: traversal and a symlink escape are
+  both refused through the existing `read_scope.decide` (spec C2), asserted by the new suite.
+- `timeout`, `background`, `pty` and exact-match command membership are untouched — asserted
+  positively rather than assumed from the diff's shape.
+
+### D. Residual weaknesses, recorded rather than resolved
+
+- **An allowed command string may itself change directory.** `bash -c 'cd /elsewhere && …'` is a
+  *different string* and so is refused by exact match unless Diana declared it — but if Diana
+  declares such a command, `workdir` bounds where the process starts, not where it goes. This is
+  M4's existing carried assumption ("the command allowlist is only as good as what Diana
+  declares"; "it is not a sandbox"), unchanged. The fix closes an **ambient** authority channel;
+  it does not turn the allowlist into a sandbox.
+- **`REVIEW_PATHS` does not cover the Hermes runtime boundary** (recorded under F-A7 above).
+- **The prompt change is presentation.** If a future driver stops naming the bounds, enforcement is
+  unaffected but M4-AC-17 may become dependent on the model guessing. The enforcement assertions
+  do not depend on the prompt; the end-to-end criterion does.
+- **This fix has had no independent review.**

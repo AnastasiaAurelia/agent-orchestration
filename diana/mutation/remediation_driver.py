@@ -66,12 +66,25 @@ class RemediationDriver:
             return self.prompt
         root = contract_block["target"]["repo_root"]
         commands = contract_block["capability_envelope"]["allowed_commands"]
+        policy = contract_block["capability_envelope"].get("command_policy") or {}
+        roots = policy.get("workdir_roots") or [root]
+        workdir = roots[0]
+        ceiling = policy.get("max_timeout_s", 300)
         return (
             f"The Python project at {root} has a failing verification.\n"
             f"Run exactly this command to see the failure: {commands[0]}\n\n"
             "Read the source, find the defect, fix it with the patch or write_file tool, "
             f"then run `{commands[0]}` again to confirm it passes.\n"
             f"You may ONLY run this exact command: {commands[0]}\n"
+            # ERRATA-002 / F-A7: `workdir` and `timeout` are both REQUIRED, and a
+            # terminal call omitting either is refused before dispatch. Naming them
+            # here is presentation, not enforcement (M2-D2): the policy at the
+            # dispatch boundary is what actually refuses, and the adversarial cases
+            # bypass the model entirely to prove it. Telling the model the bounds it
+            # must work within keeps the milestone's thesis achievable without
+            # granting it any say in what those bounds are (M1 D14).
+            f"Every terminal call MUST pass workdir={workdir!r} and an explicit "
+            f"integer timeout of at most {ceiling} seconds; omitting either is refused.\n"
             "Do not modify the verification script itself; fix the code it tests."
         )
 
