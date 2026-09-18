@@ -50,6 +50,27 @@ REVIEWER = _topology.REVIEWER
 # command_policy, and therefore no terminal, no patch, no write_file.
 REVIEWER_TOOLS = ("read_file", "search_files")
 
+# Independent-review finding R-1. `prove_subset` answers "is this within the
+# APPROVAL?" and nothing else. It cannot answer "is this the boundary THIS ROLE
+# was frozen with", because a role's envelope is by construction a subset of the
+# approval -- so a REVIEWER projection carrying `terminal` passes every subset
+# axis and was measured executing a command through the real dispatch funnel.
+#
+# This is the same lesson M6-A3 recorded, one level up: a probe proves the
+# boundary is live, a subset proof proves it is not too wide for the approval,
+# and NEITHER proves it is the right boundary for the actor about to act. That
+# third question is what `prove_role_shape` answers.
+def _reviewer_envelope(parent_envelope: dict) -> dict:
+    return {"allowed_tools": sorted(REVIEWER_TOOLS)}
+
+
+def _builder_envelope(parent_envelope: dict) -> dict:
+    # M6-D12: the builder projection IS the approved envelope, exactly.
+    return {k: v for k, v in parent_envelope.items()}
+
+
+ROLE_ENVELOPE = {BUILDER: _builder_envelope, REVIEWER: _reviewer_envelope}
+
 
 def derive(role: str, contract_block: dict, topology_doc: dict) -> dict:
     """The projected envelope + read_scope for `role`, proven ⊆ the parent.
@@ -61,22 +82,50 @@ def derive(role: str, contract_block: dict, topology_doc: dict) -> dict:
     parent_env = contract_block["capability_envelope"]
     parent_read = contract_block["read_scope"]
 
-    if role == BUILDER:
-        # M6-D3/M6-D12: the builder projection IS the approved envelope. It is
-        # still proven, not assumed -- an identity projection that silently
-        # stopped being the identity is exactly what a containment check is for.
-        projected_env = {k: v for k, v in parent_env.items()}
-        projected_read = dict(parent_read)
-    elif role == REVIEWER:
-        projected_env = {"allowed_tools": sorted(REVIEWER_TOOLS)}
-        projected_read = dict(parent_read)
-    else:  # pragma: no cover - require_role already refused everything else
+    builder = ROLE_ENVELOPE.get(role)
+    if builder is None:  # pragma: no cover - require_role refused everything else
         raise blocking.Blocked(blocking.ACTOR_UNKNOWN, f"no projection for role {role!r}")
 
-    projection = {"role": role, "capability_envelope": projected_env,
-                  "read_scope": projected_read}
+    projection = {"role": role, "capability_envelope": builder(parent_env),
+                  "read_scope": dict(parent_read)}
     prove_subset(projection, contract_block)
+    prove_role_shape(projection, contract_block)
     return projection
+
+
+def prove_role_shape(projection: dict, contract_block: dict) -> None:
+    """Raise Blocked unless the projection is EXACTLY this role's frozen envelope.
+
+    Independent-review finding R-1. Subset-of-the-approval is necessary and not
+    sufficient: every role's envelope is a subset, so "is it a subset" cannot
+    distinguish the REVIEWER's frozen `{read_file, search_files}` from a
+    REVIEWER that has quietly acquired `terminal`. Both are legal subsets; only
+    one is the role M6-R1 froze.
+
+    Compared by value against the frozen definition rather than by a rule about
+    it, so a projection that has been built, rebuilt, wrapped or supplied from
+    anywhere must still be byte-for-byte the envelope the specification names.
+    """
+    role = projection["role"]
+    builder = ROLE_ENVELOPE.get(role)
+    if builder is None:
+        raise blocking.Blocked(
+            blocking.ACTOR_UNKNOWN, f"no frozen envelope for role {role!r}")
+    expected_env = builder(contract_block["capability_envelope"])
+    actual_env = projection["capability_envelope"]
+    if actual_env != expected_env:
+        raise blocking.Blocked(
+            blocking.ACTOR_PROJECTION_NOT_SUBSET,
+            f"{role}: projection is not this role's frozen envelope; "
+            f"expected tools {sorted(expected_env.get('allowed_tools') or ())} "
+            f"with keys {sorted(expected_env)}, got "
+            f"{sorted(actual_env.get('allowed_tools') or ())} "
+            f"with keys {sorted(actual_env)}")
+    expected_read = dict(contract_block["read_scope"])
+    if projection["read_scope"] != expected_read:
+        raise blocking.Blocked(
+            blocking.ACTOR_PROJECTION_NOT_SUBSET,
+            f"{role}: projection's read_scope is not the approved read_scope")
 
 
 def _root_within(child_root: str, parent_scope: dict) -> tuple[bool, str]:

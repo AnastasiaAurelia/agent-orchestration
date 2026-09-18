@@ -197,36 +197,61 @@ def install_projection(role: str, contract_block: dict, topology_doc: dict) -> d
     # rely on that alone -- so a `derive` that had been replaced, wrapped, or
     # simply changed installed whatever it returned. The behavioral probe did
     # not save it either: a probe covers ONE forbidden tool, and a widened
-    # envelope can satisfy that probe while growing on a different axis (the
-    # attack widened `read_scope` to `/` and added `delegate_task` while
-    # `write_file` still refused for want of a write_scope). The boundary is
-    # re-proven here, against the contract, immediately before it is installed.
+    # envelope can satisfy that probe while growing on a different axis.
     _projection.prove_subset(projected, contract_block)
+    # Independent-review finding R-1: subset-of-the-approval is necessary and
+    # NOT sufficient. Every role's envelope is a subset of the approval, so the
+    # subset proof cannot tell the REVIEWER's frozen envelope from a REVIEWER
+    # that has acquired `terminal` -- which was measured running a command
+    # through the real funnel. This proves it is the role's frozen boundary.
+    _projection.prove_role_shape(projected, contract_block)
     envelope = projected["capability_envelope"]
 
     _patches.install_confinement(projected["read_scope"])
     _patches.install_capability(envelope["allowed_tools"], policy=_policy.MutationPolicy(envelope))
 
-    if not _patches.confinement_live() or not _patches.capability_live():
-        raise blocking.Blocked(
-            blocking.ACTOR_PROJECTION_NOT_PROVEN,
-            f"{role}: the boundary is not live after installing the projection")
+    # Independent-review finding R-3: from here on the boundary has already been
+    # REPLACED, so every remaining failure path must leave the process in a
+    # state that grants nothing. Returning silently would leave an unproven
+    # projection live; re-raising without clearing would leave it live too. An
+    # empty allowed-tools set refuses every tool at the same choke point, which
+    # is the only fail-closed state available -- `uninstall()` would restore
+    # Hermes's UNPATCHED dispatch, which is fail-OPEN and must never be the
+    # response to a failed proof.
+    try:
+        if not _patches.confinement_live() or not _patches.capability_live():
+            raise blocking.Blocked(
+                blocking.ACTOR_PROJECTION_NOT_PROVEN,
+                f"{role}: the boundary is not live after installing the projection")
 
-    forbidden = FORBIDDEN_PROBE[role]
-    denied = _selftest._drive_real_dispatch(forbidden)
-    if denied["executed"]:
-        raise blocking.Blocked(
-            blocking.ACTOR_PROJECTION_NOT_PROVEN,
-            f"{role}: {forbidden} reached its handler through the real dispatch funnel")
-    permitted = _selftest._drive_real_dispatch(PERMITTED_PROBE)
-    if not permitted["executed"]:
-        raise blocking.Blocked(
-            blocking.ACTOR_PROJECTION_NOT_PROVEN,
-            f"{role}: {PERMITTED_PROBE} did not reach its handler, so this install "
-            "refuses everything and proves nothing")
+        forbidden = FORBIDDEN_PROBE[role]
+        denied = _selftest._drive_real_dispatch(forbidden)
+        if denied["executed"]:
+            raise blocking.Blocked(
+                blocking.ACTOR_PROJECTION_NOT_PROVEN,
+                f"{role}: {forbidden} reached its handler through the real dispatch funnel")
+        permitted = _selftest._drive_real_dispatch(PERMITTED_PROBE)
+        if not permitted["executed"]:
+            raise blocking.Blocked(
+                blocking.ACTOR_PROJECTION_NOT_PROVEN,
+                f"{role}: {PERMITTED_PROBE} did not reach its handler, so this install "
+                "refuses everything and proves nothing")
+    except BaseException:
+        deny_all()
+        raise
     return {"role": role, "projection": projected,
             "proof": {"forbidden_probe": forbidden, "forbidden_executed": False,
                       "permitted_probe": PERMITTED_PROBE, "permitted_executed": True}}
+
+
+def deny_all() -> None:
+    """Put the capability boundary into a state that grants nothing.
+
+    Independent-review finding R-3. The empty allowed-tools set is refused by
+    the SAME guard every tool call passes through, so this is the existing
+    boundary parameterised to deny rather than a second mechanism.
+    """
+    _patches.install_capability((), policy=None)
 
 
 # --- Diana-owned actor selection ------------------------------------------

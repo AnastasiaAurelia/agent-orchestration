@@ -175,13 +175,22 @@ resumed_code = code_of(lambda: A.execute(rd2, builder=build_only(root),
 attack("A11 backend switch after budget exhaustion buys more attempts",
        resumed_code == blocking.RUN_ALREADY_TERMINAL and len(J.read(rd2)["attempts"]) == spent,
        f"({resumed_code}, {spent} -> {len(J.read(rd2)['attempts'])})")
-policy = json.loads((rd2 / "run-policy.json").read_text())
+# Independent-review finding V-1: this used to edit the policy of the run above,
+# which was already TERMINAL -- so it returned `run-already-terminal`, the
+# assertion accepted that as well as the digest code, and the run-policy digest
+# was never exercised at all. A NON-terminal run is the only setup that reaches
+# the control, and exactly one reason code is the frozen outcome.
+root_pol = fresh("policy"); appr_pol = approve(root_pol, max_attempts=2)
+rd_pol = Path(appr_pol["run_directory"])
+policy = json.loads((rd_pol / "run-policy.json").read_text())
 policy["max_attempts"] = 99
-(rd2 / "run-policy.json").write_text(json.dumps(policy))
-attack("A12 actor switch with an edited run policy (budget raised on disk)",
-       code_of(lambda: A.execute(rd2, builder=build_only(root),
-                                 reviewer=E.ScriptedReviewer([PASS_V()]), verify=verify))
-       in (blocking.RUN_POLICY_DIGEST_MISMATCH, blocking.RUN_ALREADY_TERMINAL))
+(rd_pol / "run-policy.json").write_text(json.dumps(policy))
+pol_code = code_of(lambda: A.execute(rd_pol, builder=build_only(root_pol),
+                                     reviewer=E.ScriptedReviewer([PASS_V()]), verify=verify))
+attack("A12 budget raised on disk on a NON-terminal run (run-policy digest)",
+       pol_code == blocking.RUN_POLICY_DIGEST_MISMATCH, f"(got {pol_code})")
+attack("A12b no attempt was started under the forged budget",
+       J.read(rd_pol)["attempts"] == [])
 root = fresh("replay")
 appr3 = approve(root, max_attempts=8,
                 items=[{"id": "A", "task": "fix", "depends_on": []},
