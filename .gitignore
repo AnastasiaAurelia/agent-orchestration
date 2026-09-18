@@ -62,6 +62,10 @@
 !diana/unattended/fixtures/
 !diana/unattended/fixtures/*/
 !diana/unattended/fixtures/*/*.py
+!diana/multiactor/
+!diana/multiactor/*.py
+!diana/multiactor/*.sh
+!diana/multiactor/*.md
 !diana/runtime/
 !diana/runtime/*.py
 !diana/runtime/*.sh

@@ -246,8 +246,16 @@ def discharge_obligation(run_directory, record: dict, contract_block: dict,
 # --- one attempt (ARMED -> TURN_ACTIVE -> RECONCILING -> RECONCILED) ------
 
 def run_attempt(run_directory, record: dict, contract_block: dict, policy: dict,
-                turn_driver, item_id: str | None = None) -> dict:
-    """Arm, snapshot durably, run the turn, then discharge the obligation."""
+                turn_driver, item_id: str | None = None,
+                actor: str | None = None) -> dict:
+    """Arm, snapshot durably, run the turn, then discharge the obligation.
+
+    M6-D16: every actor turn is an attempt against the ONE run-level budget, so
+    an actor does not get a loop of its own -- it gets a turn in this one.
+    `actor` is passed straight to `start_attempt`, which resolves and records it
+    before the turn begins (M6-D4). `actor=None` keeps M5's exact behavior for a
+    run that declared no topology, and is refused for one that did (M6-E1-D5).
+    """
     if record["state"] != _journal.ARMED:
         raise blocking.Blocked(
             blocking.JOURNAL_ILLEGAL_TRANSITION,
@@ -263,7 +271,8 @@ def run_attempt(run_directory, record: dict, contract_block: dict, policy: dict,
     before = {"files": _reconcile.snapshot(root), "git": _reconcile.git_status(root)}
     _write_json(Path(run_directory) / snapshot_file, before)
 
-    record = _journal.start_attempt(run_directory, record, snapshot_file=snapshot_file)
+    record = _journal.start_attempt(run_directory, record, snapshot_file=snapshot_file,
+                                    actor=actor)
 
     # Stamp BEFORE the turn so every process the turn spawns is ownable (M5-D14).
     _ownership.stamp_environment(record["run_id"])

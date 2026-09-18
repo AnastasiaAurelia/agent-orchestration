@@ -87,6 +87,27 @@ ATTEMPT_BUDGET_EXHAUSTED = "attempt-budget-exhausted"
 RUN_DEADLINE_EXCEEDED = "run-deadline-exceeded"
 ENFORCEMENT_NOT_REESTABLISHED = "enforcement-not-reestablished"
 
+# --- Multi-actor / reviewer (M6-D10, M6-D13, M6-R5, M6-E1-D4/D5) ---
+#
+# M6 grants no capability, so none of these is a new authority. Each exists
+# because M6's failure-semantics rule 5 requires an unprovable actor to fail
+# closed in its OWN direction: an operator returning to a multi-actor run reads
+# the code, and "the role was not recorded", "the role does not exist" and "the
+# projection was wider than the approval" are three different facts with three
+# different remedies. One over-broad code would make them look alike, which is
+# M1's AC-1 reasoning carried into M6.
+ACTOR_TOPOLOGY_MALFORMED = "actor-topology-malformed"
+ACTOR_TOPOLOGY_DIGEST_MISMATCH = "actor-topology-digest-mismatch"
+ACTOR_UNKNOWN = "actor-unknown"
+ACTOR_NOT_RECORDED = "actor-not-recorded"
+ACTOR_PROJECTION_NOT_SUBSET = "actor-projection-not-subset"
+ACTOR_PROJECTION_NOT_PROVEN = "actor-projection-not-proven"
+ACTOR_HANDOFF_REFUSED = "actor-handoff-refused"
+REVIEW_VERDICT_ABSENT = "review-verdict-absent"
+REVIEW_VERDICT_MALFORMED = "review-verdict-malformed"
+REVIEW_VERDICT_SELF_CONTRADICTORY = "review-verdict-self-contradictory"
+REVIEW_VERDICT_WRONG_ACTOR = "review-verdict-wrong-actor"
+
 # --- Run-time process failures (spec: failure-semantics table) ---
 REPO_PROFILE_FAILED = "repo-profile-failed"
 SCANNER_RAISED = "scanner-raised"
