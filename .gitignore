@@ -35,6 +35,7 @@
 !docs/architecture/HERMES-RUNTIME-M4-ERRATA-002.md
 !docs/architecture/HERMES-RUNTIME-M5.md
 !docs/architecture/HERMES-RUNTIME-M5-ERRATA-001.md
+!docs/architecture/HERMES-RUNTIME-M6.md
 
 !diana/runtime_verify/
 !diana/runtime_verify/*.py
