@@ -104,6 +104,47 @@ kernel's lock is atomic (no read-then-write window two processes can both win) a
 process death however it dies (no stale-lock heuristic, and none of M5-D14's PID-recycling exposure).
 *Regression:* `M6-AC-19 [M6-A4]` (four assertions plus a falsifier), and `A17`/`A17b`.
 
+### M6-A5 — the run lease was entry-point-scoped *(found by independent review as R-2; fixed under ERRATA-002)*
+
+Appended after the fact. **Nothing above this line has been rewritten**: the record of what M6-A4 was
+believed to have established stands as it was written, because the point of this entry is that it was
+believed too broadly.
+
+M6-A4 closed M6's own entry point. The independent reviewer attacked the **fix** rather than the
+original defect and found that `unattended.execute`, `discharge_obligation` and `run_attempt` are
+public and unchanged from M5, and take no lease. Measured on a run durably `TURN_ACTIVE` with the
+lease held by another process: the peer proved quiescence — the owning executor is invisible to
+`owned_pids` by design (Phase 0 F16) — wrote `reconciliation-001.json`, closed the attempt with
+`reconciled: true`, and drove the journal to `ARMED`, restoring retry eligibility, before refusing on
+`actor-not-recorded`. A refusal that arrives after those effects is not a refusal.
+
+*Why M6-A4 read as sufficient:* it was tested by starting a second **M6 executor**, which does take
+the lease. The case that mattered was a peer using the older, lower entry point — which the M6 suite
+never exercised because M6's own loop never calls it that way.
+
+*Fix (M6-ERRATA-002):* the lease moved from the entry point to the **effects**. The choke point was
+derived from call paths rather than assumed: `discharge_obligation` and `run_attempt` each gain a
+lease check as their first statement, before any transition, snapshot write or diff. `cancel` is
+deliberately left unguarded (M5-E1-D11/D12 make it safe concurrently, and it must stay available on
+a wedged run). The primitive is a new file, `diana/runtime/runlease.py`, placed where both packages
+already depend so no M5 module imports an M6 one.
+
+*The measurement that decided the design:* a second `flock(LOCK_EX | LOCK_NB)` on a different
+descriptor **in the same process** returns `EAGAIN`, so a guard that acquired would have deadlocked
+the legitimate owner. The guard therefore **probes and never acquires**; ownership is the recorded
+holder's pid plus `/proc` start time.
+
+*Regression:* `test-m6-lease.sh` (32/0, 3 falsifiers) asserts the absence of every effect
+individually, plus crash release, stale-file recovery, `fork` retention and the unchanged M5 path;
+`test-m6-thirdpass.sh` re-attacks it from a real second process.
+
+### The general lesson of both review findings
+
+R-1 and M6-A5 are the same shape: **a fix was checked against the case that produced it, not against
+the property it claimed to establish.** M6-A3 proved "not wider than the approval" and was read as
+"is the right boundary". M6-A4 proved "no second M6 executor" and was read as "one live actor per
+run". Both gaps were found by attacking the fix.
+
 ### Two harness errors, recorded because they were nearly reported as findings
 
 `A8` asserted that a REVIEWER projection naming `terminal` must be refused — but `terminal` **is** in

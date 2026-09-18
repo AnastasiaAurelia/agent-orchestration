@@ -193,35 +193,50 @@ falsify("V-1 an untouched policy lets the SAME call proceed, so the digest check
                   verify=verify) is not None
         and J.read(rd2)["terminal"]["outcome"] == "COMPLETE")
 
-print("\n=== R-2: PINNED known limitation — the run lock is entry-point-scoped ===")
-# Roadmap invariant 6: a declared limitation is pinned by a test, at a location,
-# so it cannot silently widen OR silently close without this test changing.
-import runlock as RL
+print("\n=== R-2: CLOSED by M6-ERRATA-002 — the lease lives at the effects ===")
+import runlease as RLS
 root = fresh("pin"); ap = approve(root); rd = Path(ap["run_directory"])
 rec = J.transition(rd, J.read(rd), J.ARMED, note="armed")
 (rd / "pre-turn-snapshot-001.json").write_text(json.dumps(
     {"files": RC.snapshot(str(root)), "git": RC.git_status(str(root))}))
 rec = J.start_attempt(rd, rec, snapshot_file="pre-turn-snapshot-001.json", actor="BUILDER")
-rec = J.transition(rd, rec, J.TURN_ACTIVE, note="in flight")
-lock = RL.RunLock(rd); lock.acquire()
-check("R-2 (setup) the run is locked and has an in-flight attempt",
-      J.read(rd)["state"] == "TURN_ACTIVE" and J.has_outstanding_obligation(J.read(rd)) is True)
-m6_code = code_of(lambda: A.execute(rd, builder=build_only(root),
-                                    reviewer=E.ScriptedReviewer([PASS_V()]), verify=verify))
-check("R-2 M6's OWN entry point is refused by the lock",
-      m6_code == blocking.ACTOR_HANDOFF_REFUSED, f"({m6_code})")
+J.transition(rd, rec, J.TURN_ACTIVE, note="in flight")
+# A REAL peer process must hold the lease. Holding it in THIS process would make
+# the caller the owner, and an owner reusing its own lease is exactly what
+# M6-E2-AC-4 requires to keep working -- the opposite of what is under test.
+owner = subprocess.Popen(
+    [sys.executable, "-c",
+     "import sys,time;"
+     f"sys.path.insert(0,{str(Path(diana, 'runtime'))!r});"
+     f"import runlease;l=runlease.RunLease({str(rd)!r});l.acquire();"
+     "print('LEASED',flush=True);time.sleep(300)"],
+    stdout=subprocess.PIPE, text=True, start_new_session=True)
+assert owner.stdout.readline().strip() == "LEASED"
+check("R-2 (setup) a foreign process holds the lease on a TURN_ACTIVE run",
+      RLS.probe(rd)["held"] is True and RLS.probe(rd)["is_self"] is False
+      and J.read(rd)["state"] == "TURN_ACTIVE")
 m5_code = code_of(lambda: U.execute(rd, turn_driver=build_only(root),
                                     is_work_finished=lambda *a, **k: True))
-discharged = (rd / "reconciliation-001.json").exists()
+# R-2 was a KNOWN GAP pinned here while it was open. ERRATA-002 closed it by
+# moving the lease from the entry point to the effects, so the assertion is
+# INVERTED rather than deleted; what it used to do is recorded in M6-AUDIT.md.
+check("R-2 [CLOSED by ERRATA-002] M5's public unattended.execute is refused on a "
+      "run leased by another process",
+      m5_code == blocking.ACTOR_HANDOFF_REFUSED, f"(code={m5_code})")
 attempt = J.read(rd)["attempts"][0]
-check("R-2 [KNOWN GAP, pinned] M5's unattended.execute is NOT stopped by M6's lock and "
-      "discharges the locked run's in-flight obligation before refusing on the actor rule",
-      m5_code == blocking.ACTOR_NOT_RECORDED and discharged is True
-      and attempt["reconciled"] is True,
-      f"(code={m5_code}, reconciled={attempt['reconciled']}, recon_file={discharged})")
-print("      ^ this PASS records a limitation, not a guarantee. Closing it requires an")
-print("        erratum widening unattended.py's permitted change; see M6-REVIEW.md R-2.")
-lock.release()
+check("R-2 [CLOSED] the refused peer discharged nothing: no reconciliation record, "
+      "attempt still open, journal still TURN_ACTIVE",
+      not (rd / "reconciliation-001.json").exists()
+      and attempt["reconciled"] is False and attempt["state"] == "OPEN"
+      and J.read(rd)["state"] == "TURN_ACTIVE",
+      f"(reconciled={attempt['reconciled']}, state={J.read(rd)['state']})")
+import signal as _sig, time as _time
+os.kill(owner.pid, _sig.SIGKILL); owner.wait(timeout=20); _time.sleep(0.3)
+falsify("R-2 [CLOSED] once the lease is released the SAME call proceeds, so the refusal "
+        "was the lease and not the entry point being disabled",
+        U.discharge_obligation(rd, J.read(rd), ap["contract"],
+                               json.loads((rd / "run-policy.json").read_text()))["blocked"]
+        is False)
 
 print(f"\n{passed} passed, {failed} failed, {falsifiers} falsifiers")
 sys.exit(1 if failed else 0)

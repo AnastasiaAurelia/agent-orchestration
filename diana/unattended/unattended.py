@@ -47,6 +47,7 @@ for _sub in ("runtime", "adapters", "mutation", "profile", "advisory"):
 sys.path.insert(0, str(_HERE))
 
 import blocking  # noqa: E402
+import runlease as _runlease  # noqa: E402
 import contract as _contract  # noqa: E402
 import journal as _journal  # noqa: E402
 import ownership as _ownership  # noqa: E402
@@ -186,6 +187,14 @@ def discharge_obligation(run_directory, record: dict, contract_block: dict,
     audit that behaves differently depending on whether anybody was watching is
     not an audit.
     """
+    # M6-ERRATA-002 (M6-E2-D2), for independent-review finding R-2. FIRST
+    # statement, before `open_attempt`, before any transition, before quiescence,
+    # before the snapshot is read and before any diff is computed: a peer that
+    # does not own this run's lease must leave NO trace, and a refusal that
+    # arrives after reconciliation or after the attempt is closed is too late.
+    # A run with no lease file is M5's standalone case and proceeds unchanged.
+    _runlease.require_lease(run_directory)
+
     attempt = _journal.open_attempt(record)
     if attempt is None:
         raise blocking.Blocked(
@@ -256,6 +265,12 @@ def run_attempt(run_directory, record: dict, contract_block: dict, policy: dict,
     before the turn begins (M6-D4). `actor=None` keeps M5's exact behavior for a
     run that declared no topology, and is refused for one that did (M6-E1-D5).
     """
+    # M6-ERRATA-002 (M6-E2-D2). FIRST statement, because this function's first
+    # effect is writing the pre-turn snapshot -- which happens BEFORE the actor
+    # check inside `start_attempt` would refuse an M6 run, and would therefore
+    # leave a peer's file behind in a run it does not own.
+    _runlease.require_lease(run_directory)
+
     if record["state"] != _journal.ARMED:
         raise blocking.Blocked(
             blocking.JOURNAL_ILLEGAL_TRANSITION,

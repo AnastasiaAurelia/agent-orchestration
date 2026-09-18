@@ -573,10 +573,26 @@ falsify("M6-AC-19 [M6-A4] once the holder releases, the SAME call succeeds -- th
         A.execute(rd_l, builder=build_only(root), reviewer=E.ScriptedReviewer([PASS_V()]),
                   verify=verify) is not None
         and J.read(rd_l)["terminal"]["outcome"] == "COMPLETE")
-check("M6-AC-19 [M6-A4][static pin] the lock is the kernel's flock, so it is released "
-      "by process death rather than by a stale-PID heuristic -- behavioral counterpart: "
-      "the concurrent-process attack in test-m6-audit.sh",
-      "fcntl.flock" in Path(diana, "multiactor", "runlock.py").read_text())
+# Was a grep of runlock.py for "fcntl.flock". M6-ERRATA-002 moved the primitive
+# to diana/runtime/runlease.py and left runlock.py a thin caller, which broke the
+# grep -- correctly, since a string's location was never the property. Asserted
+# behaviorally instead: a REAL holder process is killed and the lease is proven
+# released, which is what "released by process death" actually means.
+import runlease as _RLS
+_holder = subprocess.Popen(
+    [py_bin, "-c",
+     "import sys,time;"
+     f"sys.path.insert(0,{str(Path(diana, 'runtime'))!r});"
+     f"import runlease;l=runlease.RunLease({str(rd_l)!r});l.acquire();"
+     "print('LEASED',flush=True);time.sleep(120)"],
+    stdout=subprocess.PIPE, text=True, start_new_session=True)
+assert _holder.stdout.readline().strip() == "LEASED"
+check("M6-AC-19 [M6-A4] a real holder process holds the lease",
+      _RLS.probe(rd_l)["held"] is True and _RLS.probe(rd_l)["is_self"] is False)
+os.kill(_holder.pid, signal.SIGKILL); _holder.wait(timeout=20); time.sleep(0.3)
+check("M6-AC-19 [M6-A4] process death releases the lease, with no stale-PID heuristic "
+      "and no process-group or name-pattern action",
+      _RLS.probe(rd_l)["held"] is False and (rd_l / "executor.lock").is_file())
 
 print("\n--- M6-AC-19: quiescence is proven before reconciliation, across actors ---")
 root = fresh("quiescence"); appr = approve(root, max_attempts=6); rd = appr["run_directory"]
