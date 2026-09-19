@@ -216,6 +216,42 @@ os.mkfifo(rd / "executor.lock")
 check("F-1 a non-regular file planted as the lease is refused, never opened",
       code_of(lambda: RLS.probe(rd)) == blocking.ACTOR_HANDOFF_REFUSED)
 
+# F-2 (final focused review): every _open_lock failure must carry the FROZEN
+# reason code, at every call site. `probe` and `require_lease` wrapped their own
+# calls; `RunLease.acquire` did not, so a lease path replaced by a directory or
+# made unreadable escaped as a raw OSError -- fail-closed, but uncoded, and
+# M1's AC-1 discipline is that an operator reads the code.
+import errno as _errno, shutil as _shutil
+root = fresh("coded"); appr = approve(root); rd = Path(appr["run_directory"])
+_lock = rd / "executor.lock"
+def _plant(kind):
+    if _lock.is_symlink() or _lock.exists():
+        if _lock.is_dir() and not _lock.is_symlink(): _shutil.rmtree(_lock)
+        else: _lock.unlink()
+    if kind == "directory": _lock.mkdir()
+    else: _lock.write_text("{}"); os.chmod(_lock, 0o000)
+def _outcome(fn):
+    try:
+        fn(); return "no refusal"
+    except blocking.Blocked as exc: return f"Blocked[{exc.code}]"
+    except OSError as exc: return f"raw OSError({_errno.errorcode.get(exc.errno)})"
+for _kind in ("directory", "unreadable file"):
+    _plant(_kind)
+    for _entry, _fn in (("probe", lambda: RLS.probe(rd)),
+                        ("require_lease", lambda: RLS.require_lease(rd)),
+                        ("RunLease.acquire", lambda: RL.RunLock(rd).acquire())):
+        check(f"F-2 a {_kind} lease via {_entry} yields the frozen reason code, not a raw OSError",
+              _outcome(_fn) == f"Blocked[{blocking.ACTOR_HANDOFF_REFUSED}]",
+              f"({_outcome(_fn)})")
+    try: os.chmod(_lock, 0o600)
+    except OSError: pass
+if _lock.is_dir() and not _lock.is_symlink(): _shutil.rmtree(_lock)
+elif _lock.exists(): _lock.unlink()
+falsify("F-2 with a NORMAL lease file the same three entries succeed, so the refusals "
+        "above are the planted object and not a blanket failure",
+        (lambda l: (l.acquire(), RLS.probe(rd)["is_self"] is True, l.release())[1])(RL.RunLock(rd))
+        is True)
+
 root = fresh("replaced"); appr = approve(root); rd = in_flight(root, appr)
 cbr = appr["contract"]; polr = json.loads((rd / "run-policy.json").read_text())
 mine = RL.RunLock(rd); mine.acquire()

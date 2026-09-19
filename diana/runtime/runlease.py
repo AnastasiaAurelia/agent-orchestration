@@ -112,7 +112,18 @@ def _open_lock(path: Path, *, create: bool = False) -> int:
             raise blocking.Blocked(
                 blocking.ACTOR_HANDOFF_REFUSED,
                 f"the run lease at {path} is a symlink; a lease file is never followed") from None
-        raise
+        # Final-review finding F-2. Every other open failure is converted HERE
+        # rather than at each caller: `probe` and `require_lease` wrapped their
+        # own calls, but `RunLease.acquire` did not, so a lease path replaced by
+        # a directory or made unreadable escaped as a raw OSError instead of a
+        # reason code. Fail-closed either way, but M1's AC-1 discipline is that
+        # an operator reads the CODE, and an uncoded refusal is one a caller
+        # cannot classify. The errno is kept in the detail so it stays
+        # diagnosable rather than flattened.
+        raise blocking.Blocked(
+            blocking.ACTOR_HANDOFF_REFUSED,
+            f"the run lease at {path} could not be opened "
+            f"({errno.errorcode.get(exc.errno, exc.errno)}): {exc.strerror}") from None
     try:
         st = os.fstat(fd)
         if not _stat.S_ISREG(st.st_mode):

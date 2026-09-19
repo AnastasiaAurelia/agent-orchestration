@@ -365,3 +365,82 @@ M2-AC-4's provider sensitivity (M4 audit §6), it predates M6, and M2 touches no
 Playwright MCP server not starting, under load from parallel suites. It passes on a clean retry, the
 suite and its sources are byte-identical to the M6 freeze, and it imports nothing M6 changed.
 Infrastructure flake, recorded rather than silently re-run.
+
+
+---
+
+## 12. Focused final review of the F-1 lease fix
+
+Scope: `diana/runtime/runlease.py`, the two ERRATA-002 guards, and the F-1 regressions only. Nothing
+was taken on the previous reviewer's word; every case below is behavioral.
+
+**`_open_lock` — sound.** Flags are `O_RDWR | O_NOFOLLOW | (O_CREAT on acquire)`, mode `0600`;
+`ELOOP`/`EMLINK` become the symlink refusal, then `fstat` + `S_ISREG` gates the fd, which is closed on
+any failure. Measured against real filesystem objects: a normal file acquires; a symlink present from
+the start is refused at both `probe` and `acquire`; a symlink swapped in **after** a valid lease is
+refused for owner and peer alike; FIFO, directory and unix socket are refused; a hardlink to another
+regular file, deletion, and an atomic `rename`-over are all caught by the owner. A device node could
+not be hardlinked as an unprivileged user (`EXDEV`) and is covered by the same `S_ISREG` gate as the
+FIFO and socket cases.
+
+**Inode binding — sound, and the mechanism is stronger than it first looks.** The obvious objection
+is inode-number reuse, and it is real: unlink-and-recreate with no open descriptor reused the same
+inode **200/200 times** on this ext4 filesystem. It cannot reach the bound inode, though, because
+**the owner's own open fd pins it** — with the fd held and the file unlinked, 500 newly created files
+never collided with it, and the number only became reusable after the owner closed. So
+`(st_dev, st_ino)` is a sound identity *for exactly the owner's fd lifetime*, which is exactly the
+window in which it is consulted. A real owner refused after 300 replacement cycles.
+
+**TOCTOU — what is actually guaranteed.** With the lease file untouched, 200 consecutive peer probes
+all reported held: there is **no timing window a peer can hit without replacing the file**, because
+the owner holds `flock` on the same inode and `EAGAIN` is not racy. The residual window is therefore
+not a timing race at all — it requires unlink/replace, and that is the documented residual. The
+guarantee is narrower than "mutual exclusion": it is *no process advances a run while another holds
+the lease, absent the ability to remove or replace files in the run directory*.
+
+**fd / fork / exec — one residual, bounded and pinned.** The lease fd is **not inheritable across
+exec** (Python sets `CLOEXEC` by default), so a command the executor spawns cannot keep a run locked
+— measured: the lease frees when the owner exits despite a live `sleep` child. A `dup()` shares the
+open file description and so cannot steal the lease; a separately opened fd in the same process is
+refused, which is precisely why `require_lease` probes rather than acquires. A **`fork`ed** descendant
+does retain the lease after the owner exits; the wedge is fail-closed and bounded by that
+descendant's lifetime, and the run frees when it dies. Pinned by test.
+
+**Peer bypass — refused with zero side effects.** With a real owner process holding the lease on a
+`TURN_ACTIVE` run, peers via `unattended.execute`, `discharge_obligation` and `run_attempt` each got
+exactly `actor-handoff-refused`, and all eight required absences held: journal bytes unchanged, state
+still `TURN_ACTIVE`, attempt still `OPEN`, `reconciled` still false, no reconciliation artifact, no
+new snapshot, no new attempt, target unchanged. After killing the owner: the stale file did not
+block, a fresh executor acquired, quiescence was proven before the diff, the obligation was
+discharged exactly once, and the same `run_id`, contract bytes and budget remained in force with the
+crashed attempt's journaled actor intact.
+
+### Defect found and fixed — F-2 (implementation)
+
+`_open_lock` converted only `ELOOP`/`EMLINK`; every other open failure was re-raised raw. `probe` and
+`require_lease` wrapped their own calls, but **`RunLease.acquire` did not**, so a lease path replaced
+by a directory (`EISDIR`) or made unreadable (`EACCES`) escaped as a bare `OSError` rather than a
+reason code. Fail-closed in effect — no lease is granted — but it breaks M1's AC-1 discipline that an
+operator reads the *code*, and a caller catching `blocking.Blocked` would not classify it.
+
+*Fix:* the conversion moved into `_open_lock`, so all three call sites are consistent; the errno name
+is kept in the detail so the failure stays diagnosable. *Regression:* six assertions covering
+directory and unreadable-file leases across `probe`, `require_lease` and `acquire`, plus a falsifier
+proving a normal lease still succeeds at all three.
+
+### Vacuity — F-1/F-2 tests only
+
+Each control was **removed and the test re-run**: dropping `O_NOFOLLOW` makes the peer succeed and
+write `reconciliation-001.json` for a live run; clearing the inode binding lets the owner act on a
+lease it cannot prove; the FIFO case reaches the `S_ISREG` gate. And the setup does not pre-guarantee
+refusal — the identical call against a run with no lease at all succeeds, so every refusal came from
+the lease guard and not from the fixture. No literal `True`, no `else True`, no empty quantifier, no
+comment-matching grep, no multi-code acceptance, and no falsifier that mutates only the harness.
+
+### The unlink/recreate residual — why it may remain
+
+It is truly outside the inherited threat model, on all three of the required grounds. ERRATA-002
+M6-E2-D8 states it. The same adversary was measured removing `journal.json`, which M5 already treats
+as undetectable-but-fail-closed. And nothing in the code, the tests or the documents describes the
+lease as containment — `runlease.py`'s own docstring says it "answers one question -- may this process
+act on this run right now -- and constrains nothing about what a process does once admitted".
