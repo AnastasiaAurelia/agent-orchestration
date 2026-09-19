@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Diana — the product entry point (M7).
+#
+#   diana-do "fix the failing tests, but don't touch auth"
+#   diana-do approve sha256:<digest>
+#   diana-do status <run-id>
+#   diana-do result <run-id>
+#
+# One stable invocation. No Python module path, no runtime class, no journal
+# API, no M1-M6 terminology required to use it.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HERMES_HOME="${DIANA_HERMES_HOME:-$HOME/.hermes/hermes-agent}"
+PY_BIN="python3"; [ -x "$HERMES_HOME/venv/bin/python3" ] && PY_BIN="$HERMES_HOME/venv/bin/python3"
+export HERMES_SAFE_MODE="${HERMES_SAFE_MODE:-1}"
+exec "$PY_BIN" "$HERE/diana/product/product.py" "$@"
