@@ -21,6 +21,7 @@
 !install.sh
 !verify.sh
 !test-verify.sh
+!diana-do
 !uninstall.sh
 !.mcp.json
 
@@ -69,6 +70,10 @@
 !diana/multiactor/*.py
 !diana/multiactor/*.sh
 !diana/multiactor/*.md
+!diana/product/
+!diana/product/*.py
+!diana/product/*.sh
+!diana/product/*.md
 !diana/runtime/
 !diana/runtime/*.py
 !diana/runtime/*.sh
