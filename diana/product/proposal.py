@@ -14,9 +14,9 @@ digest, and that M7-REG-2 forbids adding the parameter. A proposal therefore
 *cannot* predict the digest that will be persisted -- measured, not argued.
 
 So approval binds a PROPOSAL digest over the authority-bearing objects
-(M7-E1-D1): every contract field except `created_at`, plus the work-item digest
-and the actor-topology digest. `created_at` is excluded because it is
-provenance -- nothing reads a contract's `created_at` to decide anything -- and
+(M7-E1-D1): every contract field except `created_at`, plus the work-item digest,
+the actor-topology digest, and normalized run policy (ERRATA-002). Contract
+`created_at` is excluded because it is provenance -- nothing reads a contract's `created_at` to decide anything -- and
 its exclusion is asserted by test rather than assumed.
 
 ## Why target freshness needs no new mechanism
@@ -51,10 +51,13 @@ for _sub in ("runtime", "unattended", "mutation", "multiactor", "adapters", "pro
 sys.path.insert(0, str(_HERE))
 
 import contract as _contract  # noqa: E402
+import blocking as _blocking  # noqa: E402
 import recovery as _recovery  # noqa: E402
 import remediate as _remediate  # noqa: E402
 import topology as _topology  # noqa: E402
 import workitems as _workitems  # noqa: E402
+import runpolicy as _runpolicy  # noqa: E402
+import journal as _journal  # noqa: E402
 import actors as _actors  # noqa: E402
 import intent as _intent  # noqa: E402
 import refusal as _ref  # noqa: E402
@@ -82,13 +85,25 @@ def authority_view(contract_block: dict) -> dict:
     return {k: contract_block[k] for k in AUTHORITY_FIELDS}
 
 
-def digest_of(contract_block: dict, items_doc: dict, topology_doc: dict | None) -> str:
+def policy_authority(policy: dict) -> dict:
+    """M7-E2-D1: actual M5 policy, normalized to its approved duration."""
+    _runpolicy.validate(policy)
+    return {
+        k: policy[k] for k in ("policy_version", "run_id", "max_attempts",
+                               "quiescence_grace_seconds")
+    } | {"total_seconds": int((_runpolicy.parse_iso(policy["deadline_at"])
+                              - _runpolicy.parse_iso(policy["created_at"])).total_seconds())}
+
+
+def digest_of(contract_block: dict, items_doc: dict, topology_doc: dict | None,
+              policy_doc: dict) -> str:
     """The proposal digest (M7-E1-D1), over the same canonical serialization
     the contract itself is hashed with, so the two cannot disagree about bytes."""
     return _contract.digest({
         "authority": authority_view(contract_block),
         "work_items": _workitems.digest(items_doc),
         "actors": _topology.digest(topology_doc) if topology_doc else None,
+        "run_policy": policy_authority(policy_doc),
     })
 
 
@@ -100,6 +115,12 @@ def _derive(intent_doc: dict, repo_root: str, run_id: str,
             _ref.WORKFLOW_NO_PRODUCT_PATH,
             f"understood as {intent_doc['workflow']}, which is a certified class but has "
             "no bounded-run product path in M7; only a bounded repair can be started here")
+    for name, value in (("max_attempts", max_attempts), ("total_seconds", total_seconds)):
+        if type(value) is not int or value < 1:
+            raise _ref.Refused(_ref.PROPOSAL_MALFORMED,
+                               f"{name} must be a positive integer")
+    policy = _runpolicy.build(run_id=run_id, max_attempts=max_attempts,
+                              total_seconds=total_seconds)
     observed = _recovery.observe_target(repo_root)
     contract_block = _remediate.build_contract(
         task=intent_doc["goal"], repo_root=repo_root,
@@ -110,7 +131,7 @@ def _derive(intent_doc: dict, repo_root: str, run_id: str,
     items_doc = _workitems.build(run_id=run_id, items=intent_doc["items"])
     topology_doc = _topology.build(run_id=run_id)
     return {"contract": contract_block, "items": items_doc, "topology": topology_doc,
-            "observed": observed}
+            "observed": observed, "policy": policy}
 
 
 def build(goal: str, repo_root: str, *, base: str | None = None,
@@ -124,7 +145,7 @@ def build(goal: str, repo_root: str, *, base: str | None = None,
     proposal = {
         "document_version": DOCUMENT_VERSION,
         "proposal_digest": digest_of(derived["contract"], derived["items"],
-                                     derived["topology"]),
+                                     derived["topology"], derived["policy"]),
         "run_id": run_id,
         "repo_root": repo_root,
         "intent": {k: v for k, v in intent_doc.items() if k != "_withheld"},
@@ -133,6 +154,7 @@ def build(goal: str, repo_root: str, *, base: str | None = None,
         "predicted_contract": derived["contract"],
         "predicted_items": derived["items"],
         "predicted_topology": derived["topology"],
+        "predicted_policy": derived["policy"],
     }
     path = proposals_dir(base) / f"{proposal['proposal_digest'].split(':', 1)[1]}.json"
     path.write_text(json.dumps(proposal, indent=2, sort_keys=True))
@@ -160,12 +182,20 @@ def load(proposal_digest: str, base: str | None = None) -> dict:
     return proposal
 
 
+def rederive(proposal: dict) -> dict:
+    """One derivation used for both the identity check and run creation."""
+    budget = proposal["budget"]
+    if not isinstance(budget, dict) or set(budget) != {"max_attempts", "total_seconds"}:
+        raise _ref.Refused(_ref.PROPOSAL_MALFORMED, "unexpected or missing budget fields")
+    return _derive(proposal["intent"], proposal["repo_root"], proposal["run_id"],
+                   budget["max_attempts"], budget["total_seconds"])
+
+
 def recompute(proposal: dict) -> str:
-    """Re-derive the proposal against the LIVE repository and return its digest."""
-    derived = _derive(proposal["intent"], proposal["repo_root"], proposal["run_id"],
-                      proposal["budget"]["max_attempts"],
-                      proposal["budget"]["total_seconds"])
-    return digest_of(derived["contract"], derived["items"], derived["topology"])
+    """Re-derive the complete proposal identity against the LIVE repository."""
+    derived = rederive(proposal)
+    return digest_of(derived["contract"], derived["items"], derived["topology"],
+                     derived["policy"])
 
 
 def approve(proposal_digest: str, *, base: str | None = None,
@@ -178,8 +208,24 @@ def approve(proposal_digest: str, *, base: str | None = None,
     """
     proposal = load(proposal_digest, base)
 
+    # Audit finding M7-A2: a proposal pins its `run_id`, so approving one twice
+    # called `approve()` again for a run that already exists -- which rewrites
+    # contract, policy, work-items and journal, resetting a live run's state
+    # (measured: ARMED -> APPROVED, progress destroyed). An approval creates a
+    # run; it never re-creates one. A second approval is refused here, before
+    # anything is written, and re-running an existing run is the runtime's own
+    # resume path rather than an approval.
+    existing = _contract.run_dir(proposal["run_id"], runs_base)
+    if Path(existing).exists():
+        raise _ref.Refused(
+            _ref.PROPOSAL_ALREADY_APPROVED,
+            f"this proposal was already approved and run {proposal['run_id']} exists; "
+            "approving again would reset it. Propose again for new work")
+
     # M7-E1-D3: re-derive against the live repository BEFORE anything is created.
-    current = recompute(proposal)
+    derived = rederive(proposal)
+    current = digest_of(derived["contract"], derived["items"], derived["topology"],
+                        derived["policy"])
     if current != proposal_digest:
         raise _ref.Refused(
             _ref.PROPOSAL_STALE,
@@ -187,28 +233,54 @@ def approve(proposal_digest: str, *, base: str | None = None,
             f"describes is no longer the authority that would be granted (now {current}). "
             "No run was created. Propose again and approve the new proposal")
 
-    intent_doc = proposal["intent"]
-    repo_root = proposal["repo_root"]
+    _intent.validate(proposal["intent"], proposal["repo_root"])
+    approved_contract = derived["contract"]
+    envelope = approved_contract["capability_envelope"]
+    approved_policy = policy_authority(derived["policy"])
     result = _actors.approve(
-        task=intent_doc["goal"], repo_root=repo_root,
-        allowed_commands=tuple(intent_doc["commands"]),
-        write_roots=tuple(str(Path(repo_root) / p) for p in intent_doc["write_paths"]),
-        runs_base=runs_base, run_id=proposal["run_id"],
-        max_attempts=proposal["budget"]["max_attempts"],
-        total_seconds=proposal["budget"]["total_seconds"],
-        items=intent_doc["items"])
+        task=approved_contract["task"],
+        repo_root=approved_contract["target"]["repo_root"],
+        allowed_commands=tuple(envelope["allowed_commands"]),
+        write_roots=tuple(envelope["write_scope"]["allowed_roots"]),
+        runs_base=runs_base, run_id=approved_contract["run_id"],
+        max_attempts=approved_policy["max_attempts"],
+        total_seconds=approved_policy["total_seconds"],
+        items=derived["items"]["items"])
 
     # M7-E1-D4: the prediction must have been true. `created_at` is the ONE
     # field allowed to differ; anything else means the run that was created is
     # not the run that was approved, and it must stop rather than be excused.
-    persisted = result["contract"]
+    run_directory = result["run_directory"]
+    try:
+        record = _journal.read(run_directory)
+        persisted, persisted_policy, persisted_items = _recovery.load_authority(
+            run_directory, record)
+        persisted_topology = _actors.load_topology(run_directory, record, persisted)
+        actual_policy = policy_authority(persisted_policy)
+        displayed_policy = policy_authority(proposal["predicted_policy"])
+    except (_blocking.Blocked, KeyError, TypeError, ValueError) as exc:
+        raise _ref.Refused(
+            _ref.CONTRACT_PREDICTION_FAILED,
+            f"created authority could not be verified: {exc}; run directory "
+            f"{run_directory} exists and must not be executed") from None
     predicted = proposal["predicted_contract"]
-    differing = [k for k in AUTHORITY_FIELDS if persisted[k] != predicted[k]]
+    differing = [k for k in AUTHORITY_FIELDS
+                 if persisted[k] != approved_contract[k] or persisted[k] != predicted[k]]
+    if actual_policy != approved_policy or displayed_policy != approved_policy:
+        differing.append("run_policy")
+    for name, actual, expected, displayed, digester in (
+        ("work_items", persisted_items, derived["items"], proposal["predicted_items"],
+         _workitems.digest),
+        ("actors", persisted_topology, derived["topology"], proposal["predicted_topology"],
+         _topology.digest),
+    ):
+        if digester(actual) != digester(expected) or digester(actual) != digester(displayed):
+            differing.append(name)
     if differing:
         raise _ref.Refused(
             _ref.CONTRACT_PREDICTION_FAILED,
             f"the created run differs from the approved proposal on {differing}; "
-            f"run directory {result['run_directory']} exists and must not be executed")
+            f"run directory {run_directory} exists and must not be executed")
     return {"proposal_digest": proposal_digest, "run_id": result["run_id"],
             "run_directory": result["run_directory"],
             "contract_digest": result["contract_digest"], "approved": True}

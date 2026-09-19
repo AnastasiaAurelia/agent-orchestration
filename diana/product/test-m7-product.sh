@@ -220,7 +220,8 @@ def derive(run_id=rid, created_at=None):
         dirty=obs["dirty"], allowed_commands=tuple(i3["commands"]),
         write_roots=tuple(str(root3/p) for p in i3["write_paths"]), run_id=run_id,
         created_at=created_at)
-    return cb, P.digest_of(cb, W.build(run_id=run_id, items=i3["items"]), T.build(run_id=run_id))
+    return cb, P.digest_of(cb, W.build(run_id=run_id, items=i3["items"]), T.build(run_id=run_id),
+        P._runpolicy.build(run_id=run_id, max_attempts=6, total_seconds=3600))
 cb_a, d_a = derive(created_at="2026-01-01T00:00:00Z")
 cb_b, d_b = derive(created_at="2027-09-09T09:09:09Z")
 check("M7-E1-AC-1 the proposal digest is reproducible for the same intent and target",
@@ -234,7 +235,8 @@ for field, mutate in (("task", lambda c: c.update(task="something else")),
                       ("read_scope", lambda c: c["read_scope"].update(allowed_roots=["/"])),
                       ("target", lambda c: c["target"].update(git_commit="deadbeef"))):
     mutated_cb = json.loads(json.dumps(cb_a)); mutate(mutated_cb)
-    md = P.digest_of(mutated_cb, W.build(run_id=rid, items=i3["items"]), T.build(run_id=rid))
+    md = P.digest_of(mutated_cb, W.build(run_id=rid, items=i3["items"]), T.build(run_id=rid),
+        P._runpolicy.build(run_id=rid, max_attempts=6, total_seconds=3600))
     check(f"M7-E1-AC-2 changing {field} DOES change the proposal digest", md != d_a)
 base_d = derive()[1]
 g3("commit","--allow-empty","-qm","B")
@@ -398,10 +400,13 @@ check("M7-AC-16 the widening answer is YES for an out-of-area write, and it is C
 check("M7-AC-16 the widening answer is computed from paths, not asserted",
       V.blocked_widens({"paths_outside_write_scope": ["x"], "reason_code": "hermes-turn-failed"}) is True
       and V.blocked_widens({"paths_outside_write_scope": [], "reason_code": "attempt-budget-exhausted"}) is False)
-falsify("M7-AC-16 a budget-exhausted block does NOT claim widening, so the answer varies "
-        "with the evidence rather than always saying yes",
-        "would that widen what you approved?  no" in cli(root8, "result", rid8).stdout
-        or J.read(rd8)["state"] != "BLOCKED")
+exhausted8 = J.read(rd8)["terminal"]
+# M6 records exhausted runs as FAILED, not BLOCKED. Inspect the actual reason
+# and decision function; a non-BLOCKED fallback proves nothing about widening.
+falsify("M7-AC-16 real budget exhaustion does not require wider write scope, unlike "
+        "the out-of-area write above",
+        exhausted8["reason_code"] == blocking.ATTEMPT_BUDGET_EXHAUSTED
+        and V.blocked_widens(exhausted8) is False)
 print("\n--- 'continue' cannot widen ---")
 cont = cli(root9, "approve", d9, edits={"item-1": ["src/core/calc.py", FIX]})
 check("M7-AC-17 re-approving a used proposal does not resume or widen the blocked run",

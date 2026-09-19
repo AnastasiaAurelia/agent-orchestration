@@ -92,10 +92,20 @@ def commands_for(repo_root) -> tuple[str, ...]:
 
 
 def is_forbidden_write(rel_path: str) -> bool:
-    normalised = rel_path.replace("\\", "/").lstrip("./")
-    if not normalised.endswith("/"):
-        normalised_dir = normalised + "/"
-    else:
-        normalised_dir = normalised
-    return any(normalised_dir.startswith(p) or normalised == p.rstrip("/")
-               for p in FORBIDDEN_WRITE_PREFIXES)
+    """Is this repo-relative path one no proposal may make writable?
+
+    Audit finding M7-A1: this used `lstrip("./")`, which strips those two
+    CHARACTERS rather than a leading `./` prefix -- so `.github` became
+    `github` and `.git` became `git`, and neither matched its own forbidden
+    entry. Every dot-prefixed protected path was therefore proposable. The
+    prefix is now removed as a prefix.
+    """
+    normalised = rel_path.replace("\\", "/").strip()
+    while normalised.startswith("./"):
+        normalised = normalised[2:]
+    normalised = normalised.rstrip("/")
+    if not normalised:
+        return True
+    normalised_dir = normalised + "/"
+    return any(normalised_dir.startswith(prefix) or normalised == prefix.rstrip("/")
+               for prefix in FORBIDDEN_WRITE_PREFIXES)

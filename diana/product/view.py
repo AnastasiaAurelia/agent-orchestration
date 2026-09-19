@@ -81,6 +81,9 @@ def plan_view(proposal: dict) -> str:
     lines.append(f"  Can run     {', '.join(repr(c) for c in commands) if commands else '(nothing)'}")
     lines.append(f"  Cannot      anything not listed above — no network, no deploy, "
                  f"no merge, no credentials")
+    lines.append(f"  Limits      {proposal['budget']['max_attempts']} attempts, "
+                 f"{proposal['budget']['total_seconds']} seconds from run creation")
+    lines.append(f"  Stop grace  {proposal['predicted_policy']['quiescence_grace_seconds']} seconds")
     lines += ["", "APPROVAL REQUIRED",
               f"  Risk {contract['risk']} · needs your explicit approval before anything runs.",
               f"  This approves starting this run only. It is not a merge, deploy or "
