@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -137,9 +138,16 @@ def _backends(kind: str, contract_block):
 
 
 def cmd_propose(args) -> int:
-    proposal = _proposal.build(args.goal, args.repo, base=args.proposals_base)
+    proposal = _proposal.build(args.goal, args.repo or os.getcwd(), base=args.proposals_base)
     print(_view.plan_view(proposal))
-    print(f"  To start it:   diana-do approve {proposal['proposal_digest']}")
+    # The launcher is not installed on PATH. Preserve storage and target context
+    # with absolute, shell-quoted paths so this line works from another cwd.
+    command = [str(_HERE.parent.parent / "diana-do"), "approve",
+               proposal["proposal_digest"], "--repo", proposal["repo_root"],
+               "--proposals-base", str(_proposal.proposals_dir(args.proposals_base).resolve().parent)]
+    if args.executor != "hermes":
+        command += ["--executor", args.executor]
+    print(f"  To start it:   {shlex.join(command)}")
     print(f"  To do nothing: ignore this. Nothing has run and no run exists yet.\n")
     return EXIT_OK
 
@@ -151,7 +159,7 @@ def cmd_show(args) -> int:
 
 def cmd_approve(args) -> int:
     approved = _proposal.approve(args.digest, base=args.proposals_base,
-                                 runs_base=_runs_base())
+                                 runs_base=_runs_base(), expected_repo=args.repo)
     run_directory = approved["run_directory"]
     print(f"\nAPPROVED  run {approved['run_id']}\n")
     loaded = _recovery.load_run(run_directory)
@@ -191,9 +199,9 @@ def cmd_result(args) -> int:
 def _shared() -> argparse.ArgumentParser:
     """Options accepted in the same place whichever verb is used."""
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--repo", default=os.getcwd())
-    common.add_argument("--proposals-base", default=None)
-    common.add_argument("--executor", choices=("hermes", "deterministic"), default="hermes")
+    common.add_argument("--repo", default=argparse.SUPPRESS)
+    common.add_argument("--proposals-base", default=argparse.SUPPRESS)
+    common.add_argument("--executor", choices=("hermes", "deterministic"), default=argparse.SUPPRESS)
     return common
 
 
@@ -225,6 +233,11 @@ def main(argv: list[str]) -> int:
         if not getattr(args, "fn", None):
             parser.print_help()
             return EXIT_OK
+    # Suppressed shared defaults prevent subparser defaults from erasing options
+    # supplied before the verb, especially an explicit expected repository.
+    for name, default in (("repo", None), ("proposals_base", None), ("executor", "hermes")):
+        if not hasattr(args, name):
+            setattr(args, name, default)
     try:
         return args.fn(args)
     except _ref.Refused as exc:

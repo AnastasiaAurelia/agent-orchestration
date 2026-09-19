@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -52,6 +53,7 @@ sys.path.insert(0, str(_HERE))
 
 import contract as _contract  # noqa: E402
 import blocking as _blocking  # noqa: E402
+import read_scope as _read_scope  # noqa: E402
 import recovery as _recovery  # noqa: E402
 import remediate as _remediate  # noqa: E402
 import topology as _topology  # noqa: E402
@@ -164,12 +166,12 @@ def build(goal: str, repo_root: str, *, base: str | None = None,
 
 def load(proposal_digest: str, base: str | None = None) -> dict:
     """Load a proposal BY DIGEST. Free text cannot address one (M7-E1-D5/D7)."""
-    if not isinstance(proposal_digest, str) or not proposal_digest.startswith("sha256:") \
-            or len(proposal_digest) != len("sha256:") + 64:
+    if not isinstance(proposal_digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", proposal_digest) is None:
         raise _ref.Refused(
             _ref.APPROVAL_NOT_A_DIGEST,
-            f"{proposal_digest!r} is not a proposal digest. Approval takes the digest "
-            "shown with the proposal; agreeable words are not an approval")
+            f"{proposal_digest!r} is not a proposal digest: expected sha256: followed "
+            "by exactly 64 lowercase hexadecimal characters. Copy the complete "
+            "To start it command; agreeable words are not an approval")
     path = proposals_dir(base) / f"{proposal_digest.split(':', 1)[1]}.json"
     try:
         proposal = json.loads(path.read_text())
@@ -199,7 +201,7 @@ def recompute(proposal: dict) -> str:
 
 
 def approve(proposal_digest: str, *, base: str | None = None,
-            runs_base: str | None = None) -> dict:
+            runs_base: str | None = None, expected_repo: str | None = None) -> dict:
     """Approve a proposal by digest and create the run (M7-E1-D3/D4).
 
     Category A only: start this exact bounded Diana run. It is not a GitHub,
@@ -233,8 +235,24 @@ def approve(proposal_digest: str, *, base: str | None = None,
             f"describes is no longer the authority that would be granted (now {current}). "
             "No run was created. Propose again and approve the new proposal")
 
-    _intent.validate(proposal["intent"], proposal["repo_root"])
     approved_contract = derived["contract"]
+    # Optional context is an equality assertion, never a replacement target or
+    # lookup namespace. A digest can authorize only its re-derived repository.
+    #
+    # Compared with `read_scope.canonicalize` -- the SAME function that produced
+    # the value stored in the contract -- rather than a bare `os.path.realpath`.
+    # They differ: canonicalize also expands `~`, so a quoted `--repo '~/proj'`
+    # realpaths to `<cwd>/~/proj` and was refused as a mismatch even when it
+    # named the right repository. Comparing a value against the function that
+    # created it is the only way the two cannot disagree.
+    if expected_repo is not None:
+        requested = _read_scope.canonicalize(expected_repo)
+        if requested != approved_contract["target"]["repo_root"]:
+            raise _ref.Refused(
+                _ref.APPROVAL_DIGEST_MISMATCH,
+                f"this proposal is for {approved_contract['target']['repo_root']}, "
+                f"not the explicitly requested repository {requested}")
+    _intent.validate(proposal["intent"], proposal["repo_root"])
     envelope = approved_contract["capability_envelope"]
     approved_policy = policy_authority(derived["policy"])
     result = _actors.approve(
