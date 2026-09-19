@@ -194,6 +194,45 @@ falsify("M6-E2-AC-8 once the descendant dies the lease frees, so the refusal abo
         "the retained lease and not a permanent block",
         RLS.probe(rd)["held"] is False)
 
+print("\n=== F-1 (final review) — the lease FILE itself is attacked ===")
+root = fresh("symlink"); appr = approve(root); rd = in_flight(root, appr)
+cbf = appr["contract"]; polf = json.loads((rd / "run-policy.json").read_text())
+holder = lease_holder_process(rd)
+decoy = tmp / f"decoy-{uuid.uuid4().hex[:6]}.lock"; decoy.write_text("{}")
+(rd / "executor.lock").unlink(); (rd / "executor.lock").symlink_to(decoy)
+sym_code = code_of(lambda: U.discharge_obligation(rd, J.read(rd), cbf, polf))
+check("F-1 a SYMLINKED lease file does not let a peer discharge a live run -- os.open "
+      "follows links, so the probe used to lock the decoy and report the run free "
+      "(M5-A2's shape, one level over)",
+      sym_code == blocking.ACTOR_HANDOFF_REFUSED, f"({sym_code})")
+check("F-1 and the attempt is untouched by the symlink attempt",
+      not (rd / "reconciliation-001.json").exists()
+      and J.read(rd)["attempts"][0]["reconciled"] is False
+      and J.read(rd)["state"] == "TURN_ACTIVE")
+os.kill(holder.pid, signal.SIGKILL); holder.wait(timeout=20); time.sleep(0.3)
+
+root = fresh("fifo"); appr = approve(root); rd = in_flight(root, appr)
+os.mkfifo(rd / "executor.lock")
+check("F-1 a non-regular file planted as the lease is refused, never opened",
+      code_of(lambda: RLS.probe(rd)) == blocking.ACTOR_HANDOFF_REFUSED)
+
+root = fresh("replaced"); appr = approve(root); rd = in_flight(root, appr)
+cbr = appr["contract"]; polr = json.loads((rd / "run-policy.json").read_text())
+mine = RL.RunLock(rd); mine.acquire()
+before_repl = code_of(lambda: RLS.require_lease(rd))
+(rd / "executor.lock").unlink()
+(rd / "executor.lock").write_text(json.dumps({"pid": 1, "start_time": 1}))
+after_repl = code_of(lambda: U.discharge_obligation(rd, J.read(rd), cbr, polr))
+check("F-1 the OWNER proceeds while its lease file is intact", before_repl is None)
+check("F-1 and REFUSES once that file is replaced underneath it, rather than acting "
+      "on a lease it can no longer prove",
+      after_repl == blocking.ACTOR_HANDOFF_REFUSED
+      and not (rd / "reconciliation-001.json").exists(), f"({after_repl})")
+mine.release()
+falsify("F-1 a run whose lease file is untouched still discharges, so the checks above "
+        "are the file identity and not a blanket refusal",
+        U.discharge_obligation(rd, J.read(rd), cbr, polr)["blocked"] is False)
+
 print("\n=== M6-E2-AC-10 — a run with no lease file is M5's case, unchanged ===")
 root = fresh("m5style")
 m5 = U.approve(task="m5 style", repo_root=str(root), allowed_commands=("true",),

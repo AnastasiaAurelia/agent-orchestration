@@ -286,3 +286,82 @@ Two things keep this short of unqualified acceptance. **R-2 is open** and is a r
 the specification states flatly. And **this review is now itself un-reviewed**: I wrote fixes for R-1
 and R-3, which means the code I checked is no longer entirely code I did not write. A third pass over
 `prove_role_shape` and `deny_all` by someone else is the remaining honest gap.
+
+
+---
+
+## 11. Final release review — three unreviewed controls, and the regression accounting
+
+A third reviewer examined only the controls no independent reviewer had yet seen
+(`prove_role_shape`, `deny_all`, `runlease.py` and its two guards) and reconciled the suite
+accounting. Verdicts:
+
+**`prove_role_shape` — sound.** All 19 near-miss projections refused: extra tool, missing tool,
+terminal, patch, write_file, delegate_task, command added, write_scope added, unknown field, altered
+command policy, read_scope widened *and* narrowed, each role's envelope offered as the other's, a
+builder minus/plus a tool, a wider write root, a raised timeout, and an empty envelope. Structurally
+different forms are refused too — tuple-vs-list, reordered tools, duplicated tools, and (with a
+multi-root scope) reordered `allowed_roots` and `denied_subpaths`. The one accepted variant is
+`max_timeout_s: 300` vs `300.0`, which is the same authority written differently and grants nothing.
+A projection dict with no `role` key raises `KeyError` rather than `Blocked` — before any install, so
+the previous boundary stands; noted, not a defect.
+
+**`deny_all` — sound, and now proven on the funnel the earlier passes never drove.** Both real
+dispatch paths were derived from the pinned implementation: `_dispatch_authorized_once` (which 13
+inline tools bypass `handle_function_call` on) and `model_tools.handle_function_call`. Every prior M6
+pass drove only the first. Under deny-all, forced failures at the liveness flag, the forbidden probe
+and the permitted probe each leave `allowed_tools == []`, and `write_file`, `patch`, `terminal`,
+`delegate_task`, an unknown `future_tool_9000` **and** `read_file` are refused on **both** funnels
+with Diana's capability refusal. `uninstall()` is never called (AST-checked), both guards stay
+installed, and `handle_function_call` is still Diana's wrapper. A subsequent valid REVIEWER
+projection grants exactly the frozen reviewer authority on both funnels, and a later BUILDER recovers.
+
+**`runlease` — one defect, fixed (F-1).** The guard is the first executable statement of both
+`discharge_obligation` and `run_attempt` (AST-verified). The real-process peer attack holds on all
+three entry points with zero side effects. But `os.open` follows symlinks: replacing `executor.lock`
+with a link to an unrelated file made the probe lock **that** file, report the run free, and a peer
+was measured **writing `reconciliation-001.json` for a live run** — R-2 re-opened through the lease
+file itself. This is M5-A2's shape one level over: the lease's *name* was trusted and the *file*
+behind it was not checked.
+
+*Fix:* `_open_lock` uses `O_NOFOLLOW` and requires a regular file (a planted fifo is refused too), and
+this process records the `(st_dev, st_ino)` of the lease it actually locked, so an owner whose lease
+file is replaced underneath it **refuses** rather than acting on a lease it can no longer prove.
+
+*Residual, stated plainly:* a peer that **unlinks and recreates** the lease file still gets through.
+That is inherent to file-based leasing and is not fixable by locking a file — the same adversary can
+unlink the journal, which M5's threat model already records as undetected (M6-E2-D8). What is now
+closed is redirection (symlink, non-regular file) and silent replacement under a live owner.
+
+### The 26 → 22 accounting, reconciled exactly
+
+The historical figure is right and the M6 reports were **under-counting**. The cause: every sweep used
+the shell glob `diana/*/test-*.sh`, which matches one directory level. Four suites live two levels
+deep and were therefore **never executed** in any M6 sweep:
+
+`diana/security/adapters/test-adapters.sh`, `diana/security/dynamic/test-dynamic.sh`,
+`diana/security/reviewer/test-github-review-adapter.sh`, `diana/security/reviewer/test-reviewer.sh`.
+
+| | Total suites | Milestone suites | Pre-existing |
+|---|---|---|---|
+| M5 accepted base `29c5a7f` | 33 | 7 (m1, m2-live-turn, m3-runtime-verify, m4-bounded-mutation, m5-journal, m5-ownership, m5-unattended) | **26** |
+| M6 HEAD | 38 | 12 (those 7 + m6-multiactor, m6-audit, m6-review, m6-lease, m6-thirdpass) | **26** |
+
+26 is unchanged, matching M4's F8 and M5's F15. The reported "22" was 26 minus the four unmatched
+suites. **No suite was dropped, renamed away, deleted or skipped by any milestone** — they were
+missed by the reviewer's own enumeration. All four were then run: 64/0, 60/0, 28/0 and 35/0. Every
+sweep now enumerates with `find`, not a one-level glob.
+
+### Two count observations, investigated rather than accepted
+
+**M2 reports 57 or 59** depending on the run. The suite emits one assertion *per corrupted tool call
+actually applied*, and `ToolCallCorruptor` only substitutes when the live model emits an envelope
+tool; a turn that exhausts its iteration budget applies fewer. The floor is guarded by
+`M2-AC-4 non-envelope calls were forced onto the live path` (`len(applied) >= 3`) and by the
+unconditional `every forced non-envelope call was refused`. This is M5's carried assumption about
+M2-AC-4's provider sensitivity (M4 audit §6), it predates M6, and M2 touches none of M6's files.
+
+**`test-playwright-prototype.sh` failed once** with `MCP request timed out: initialize` — the
+Playwright MCP server not starting, under load from parallel suites. It passes on a clean retry, the
+suite and its sources are byte-identical to the M6 freeze, and it imports nothing M6 changed.
+Infrastructure flake, recorded rather than silently re-run.

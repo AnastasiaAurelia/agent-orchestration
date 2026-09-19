@@ -47,6 +47,7 @@ import errno
 import fcntl
 import json
 import os
+import stat as _stat
 import sys
 from pathlib import Path
 
@@ -55,6 +56,13 @@ import blocking  # noqa: E402
 
 LOCK_NAME = "executor.lock"
 _PROC = Path("/proc")
+
+# Leases this process actually acquired, keyed by lock path -> (st_dev, st_ino).
+# Final-review finding F-1: a process that believes it owns a lease must be able
+# to prove the file at that path is still the one it locked. Without this, a
+# lease file replaced underneath the owner reads as "free", and the owner walks
+# straight past its own guard.
+_ACQUIRED: dict[str, tuple[int, int]] = {}
 
 
 def start_time(pid: int) -> int | None:
@@ -85,6 +93,43 @@ def lock_path(run_directory) -> Path:
     return Path(run_directory) / LOCK_NAME
 
 
+def _open_lock(path: Path, *, create: bool = False) -> int:
+    """Open the lease file, refusing a symlink or a non-regular file.
+
+    Final-review finding F-1. `os.open` follows symlinks, so a lease file
+    replaced by a link to an unrelated file made the probe lock THAT file --
+    which nobody holds -- and a peer was measured discharging a live run's
+    obligation through the hole. This is exactly M5-A2's shape one level over:
+    the lease's NAME is what the guard trusts, and the FILE behind it was not
+    checked. `O_NOFOLLOW` closes it at open time, and the regular-file check
+    covers a fifo or device node planted in its place.
+    """
+    flags = os.O_RDWR | os.O_NOFOLLOW | (os.O_CREAT if create else 0)
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.EMLINK):
+            raise blocking.Blocked(
+                blocking.ACTOR_HANDOFF_REFUSED,
+                f"the run lease at {path} is a symlink; a lease file is never followed") from None
+        raise
+    try:
+        st = os.fstat(fd)
+        if not _stat.S_ISREG(st.st_mode):
+            raise blocking.Blocked(
+                blocking.ACTOR_HANDOFF_REFUSED,
+                f"the run lease at {path} is not a regular file")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _identity(fd: int) -> tuple[int, int]:
+    st = os.fstat(fd)
+    return (st.st_dev, st.st_ino)
+
+
 def _read_holder(fd: int) -> dict | None:
     try:
         os.lseek(fd, 0, os.SEEK_SET)
@@ -106,10 +151,12 @@ def probe(run_directory) -> dict:
     Returns {"held": bool, "holder": dict | None, "is_self": bool}.
     """
     path = lock_path(run_directory)
-    if not path.exists():
+    if not path.exists() and not path.is_symlink():
         return {"held": False, "holder": None, "is_self": False}
     try:
-        fd = os.open(path, os.O_RDWR)
+        fd = _open_lock(path)
+    except blocking.Blocked:
+        raise
     except OSError:
         # Unreadable lease state is not evidence of absence. Fail closed.
         raise blocking.Blocked(
@@ -147,6 +194,30 @@ def require_lease(run_directory) -> dict:
     A run with no lease file is M5's standalone case and proceeds unchanged,
     which is what keeps every M5 caller and every M5 test working untouched.
     """
+    path = lock_path(run_directory)
+    mine = _ACQUIRED.get(str(path))
+    if mine is not None:
+        # This process holds a lease for this run. Prove the file is still the
+        # one it locked before letting it act (finding F-1): a replaced lease
+        # file otherwise reads as free and the owner sails past its own guard,
+        # while a peer holds the replacement.
+        try:
+            fd = _open_lock(path)
+        except (blocking.Blocked, OSError):
+            raise blocking.Blocked(
+                blocking.ACTOR_HANDOFF_REFUSED,
+                f"the lease file this process locked is no longer usable at {path}") from None
+        try:
+            current = _identity(fd)
+        finally:
+            os.close(fd)
+        if current != mine:
+            raise blocking.Blocked(
+                blocking.ACTOR_HANDOFF_REFUSED,
+                f"the lease file at {path} was replaced after this process locked it; "
+                "this run is no longer provably owned")
+        return {"held": True, "holder": _self_record(), "is_self": True}
+
     state = probe(run_directory)
     if not state["held"] or state["is_self"]:
         return state
@@ -167,7 +238,7 @@ class RunLease:
         self.holder: dict | None = None
 
     def acquire(self) -> dict:
-        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        fd = _open_lock(self.path, create=True)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
@@ -182,6 +253,7 @@ class RunLease:
             raise blocking.Blocked(
                 blocking.ACTOR_HANDOFF_REFUSED, f"could not lock the run: {exc}") from None
         self._fd = fd
+        _ACQUIRED[str(self.path)] = _identity(fd)
         self.holder = _self_record()
         os.ftruncate(fd, 0)
         os.lseek(fd, 0, os.SEEK_SET)
@@ -192,6 +264,7 @@ class RunLease:
     def release(self) -> None:
         if self._fd is None:
             return
+        _ACQUIRED.pop(str(self.path), None)
         try:
             fcntl.flock(self._fd, fcntl.LOCK_UN)
         except OSError:
