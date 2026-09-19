@@ -54,7 +54,7 @@ import blocking  # noqa: E402
 import contract as _contract  # noqa: E402
 import runpolicy as _runpolicy  # noqa: E402
 
-JOURNAL_VERSION = 2   # ERRATA-001 added items and cancellation
+JOURNAL_VERSION = 3   # M6-D7 / M6-E1-D5 added durable actor identity
 JOURNAL_NAME = "journal.json"
 
 # --- the frozen state machine (M5-D8) ------------------------------------
@@ -102,6 +102,10 @@ RECORD_KEYS = (
     "run_id",
     "contract_digest",
     "run_policy_digest",
+    # M6-E1-D4: the actor topology is digest-bound exactly as the contract, the
+    # run policy and the item set are. `None` means the run declared no
+    # topology and is M5's single-actor run, unchanged in every respect.
+    "actor_topology_digest",
     # ERRATA-001: the item set is digest-bound exactly as the contract and the
     # run policy are, and re-verified on every resume (M5-E1-D2).
     "work_items_digest",
@@ -116,6 +120,31 @@ RECORD_KEYS = (
 )
 
 TARGET_BINDING_KEYS = ("repo_root", "git_commit", "dirty", "observed_at")
+
+# --- actor identity (M6-D7, M6-E1-D5) ------------------------------------
+#
+# The attempt entry is CLOSED here, where it was open through M5 (Phase 0 F10:
+# `validate` required only `attempt` and `state`, and `update_attempt` wrote
+# arbitrary keys). It is closed now because M6 puts authority-relevant data in
+# it, and roadmap invariant 4 requires a closed schema wherever a decision reads
+# one -- an unknown field recorded rather than refused is a side channel.
+ATTEMPT_KEYS = (
+    "attempt", "state", "started_at", "snapshot_file", "ended_at",
+    "reconciled", "within_envelope", "turn_error", "reconciliation_file",
+    "actor",
+)
+
+# Mirrors `diana/multiactor/topology.FROZEN_ROLES`, which is the source of
+# truth. This module does not import it: journal.py is an M5 module M6 replaces
+# minimally (M6-E1-D1), and a package dependency on M6 would be a wider change
+# than the decision permits. The two are pinned equal by an acceptance
+# assertion, at a location, so they cannot drift (roadmap invariant 6).
+KNOWN_ACTORS = ("BUILDER", "REVIEWER")
+
+# M6-E1-D5: the sole actor of a run that declared no topology. Its projection IS
+# the approved parent envelope, so this default can never describe an install
+# narrower than what actually happened.
+SOLE_ACTOR = "BUILDER"
 
 
 def _utc_now() -> str:
@@ -221,12 +250,14 @@ def open_dir(run_directory, *, create: bool = False) -> Path:
 # --- the record ----------------------------------------------------------
 
 def new_record(*, run_id: str, contract_digest: str, run_policy_digest: str,
-               target_binding: dict, work_items_digest: str, items: dict) -> dict:
+               target_binding: dict, work_items_digest: str, items: dict,
+               actor_topology_digest: str | None = None) -> dict:
     record = {
         "journal_version": JOURNAL_VERSION,
         "run_id": run_id,
         "contract_digest": contract_digest,
         "run_policy_digest": run_policy_digest,
+        "actor_topology_digest": actor_topology_digest,
         "work_items_digest": work_items_digest,
         "items": dict(items),
         "cancellation": None,
@@ -269,9 +300,25 @@ def validate(record: object) -> None:
         raise blocking.Blocked(blocking.JOURNAL_MALFORMED, "target_binding.dirty must be a boolean")
     if not isinstance(record["attempts"], list):
         raise blocking.Blocked(blocking.JOURNAL_MALFORMED, "attempts must be a list")
+    topology_digest = record["actor_topology_digest"]
+    if topology_digest is not None and (
+            not isinstance(topology_digest, str) or not topology_digest.startswith("sha256:")):
+        raise blocking.Blocked(
+            blocking.JOURNAL_MALFORMED, "actor_topology_digest is not a sha256 digest or null")
     for attempt in record["attempts"]:
-        if not isinstance(attempt, dict) or "attempt" not in attempt or "state" not in attempt:
-            raise blocking.Blocked(blocking.JOURNAL_MALFORMED, "attempt entry shape invalid")
+        if not isinstance(attempt, dict) or set(attempt) != set(ATTEMPT_KEYS):
+            missing = sorted(set(ATTEMPT_KEYS) - set(attempt or ()))
+            extra = sorted(set(attempt or ()) - set(ATTEMPT_KEYS))
+            raise blocking.Blocked(
+                blocking.JOURNAL_MALFORMED,
+                f"attempt entry shape invalid: missing={missing} unexpected={extra}")
+        if attempt["actor"] not in KNOWN_ACTORS:
+            # M6-D6: the actor is read from here and nowhere else, so an actor
+            # this vocabulary does not know is refused rather than recorded.
+            raise blocking.Blocked(
+                blocking.ACTOR_UNKNOWN,
+                f"attempt {attempt['attempt']} names actor {attempt['actor']!r}, "
+                f"which is not one of {list(KNOWN_ACTORS)}")
     if not isinstance(record["history"], list) or not record["history"]:
         raise blocking.Blocked(blocking.JOURNAL_MALFORMED, "history must be a non-empty list")
     items = record["items"]
@@ -500,12 +547,41 @@ def transition(run_directory, record: dict, to_state: str, *, note: str = "",
     return updated
 
 
-def start_attempt(run_directory, record: dict, *, snapshot_file: str) -> dict:
-    """Open a new attempt. Called while ARMED, before the turn begins."""
+def resolve_actor(record: dict, actor: str | None) -> str:
+    """M6-E1-D5. The default exists only where ambiguity cannot.
+
+    A run with no declared topology has one implicit actor whose projection is
+    the approved envelope; `None` resolves to it. A run WITH a topology has no
+    unambiguous sole actor, so `None` is refused rather than guessed -- the
+    default is permitted exactly where it cannot be wrong, and refused exactly
+    where risk begins.
+    """
+    if actor is None:
+        if record["actor_topology_digest"] is not None:
+            raise blocking.Blocked(
+                blocking.ACTOR_NOT_RECORDED,
+                "this run declares an actor topology, so an attempt must name its actor")
+        return SOLE_ACTOR
+    if actor not in KNOWN_ACTORS:
+        raise blocking.Blocked(
+            blocking.ACTOR_UNKNOWN,
+            f"{actor!r} is not one of {list(KNOWN_ACTORS)}")
+    return actor
+
+
+def start_attempt(run_directory, record: dict, *, snapshot_file: str,
+                  actor: str | None = None) -> dict:
+    """Open a new attempt. Called while ARMED, before the turn begins.
+
+    M6-D4: the acting role is written HERE, in the same durable write that
+    creates the attempt, so an attempt cannot exist without a provable actor.
+    That is M5-D5's write-ahead rule applied to identity.
+    """
     if record["state"] != ARMED:
         raise blocking.Blocked(
             blocking.JOURNAL_ILLEGAL_TRANSITION,
             f"an attempt may only start from ARMED, not {record['state']!r}")
+    acting = resolve_actor(record, actor)
     updated = json.loads(json.dumps(record))
     updated["attempts"] = list(updated["attempts"]) + [{
         "attempt": len(updated["attempts"]) + 1,
@@ -516,15 +592,33 @@ def start_attempt(run_directory, record: dict, *, snapshot_file: str) -> dict:
         "reconciled": False,
         "within_envelope": None,
         "turn_error": None,
+        # Initialised so the closed key set holds from creation rather than
+        # from first update (M6-E1-D1's note on unattended.py).
+        "reconciliation_file": None,
+        "actor": acting,
     }]
     write(run_directory, updated)
     return updated
 
 
 def update_attempt(run_directory, record: dict, **fields) -> dict:
-    """Update the open attempt. Every write goes through the atomic path."""
+    """Update the open attempt. Every write goes through the atomic path.
+
+    `actor` is deliberately NOT updatable: the acting role is decided once, at
+    `start_attempt`, before the turn runs. An attempt that could be relabelled
+    afterwards would let the record of who acted be chosen once the result was
+    known, which is precisely the impersonation M6-AC-1 refuses.
+    """
     if not record["attempts"]:
         raise blocking.Blocked(blocking.JOURNAL_MALFORMED, "no attempt to update")
+    unknown = sorted(set(fields) - set(ATTEMPT_KEYS))
+    if unknown:
+        raise blocking.Blocked(
+            blocking.JOURNAL_MALFORMED, f"unknown attempt field(s) {unknown}")
+    if "actor" in fields:
+        raise blocking.Blocked(
+            blocking.ACTOR_UNKNOWN,
+            "an attempt's actor is written once at start_attempt and is never updated")
     updated = json.loads(json.dumps(record))
     updated["attempts"][-1].update(fields)
     write(run_directory, updated)

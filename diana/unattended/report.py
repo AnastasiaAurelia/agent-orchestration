@@ -47,6 +47,10 @@ def _attempt_summary(attempt: dict, run_directory: Path) -> dict:
             outside, touched, within = ["<reconciliation record unreadable>"], [], None
     return {
         "attempt": attempt.get("attempt"),
+        # M6-D4 with M5-D17: a multi-actor run whose report cannot say which
+        # actor produced which attempt is not legible to someone who was not
+        # watching, which is the whole requirement the report exists to meet.
+        "actor": attempt.get("actor"),
         "state": attempt.get("state"),
         "started_at": attempt.get("started_at"),
         "ended_at": attempt.get("ended_at"),

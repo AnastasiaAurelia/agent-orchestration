@@ -47,6 +47,7 @@ for _sub in ("runtime", "adapters", "mutation", "profile", "advisory"):
 sys.path.insert(0, str(_HERE))
 
 import blocking  # noqa: E402
+import runlease as _runlease  # noqa: E402
 import contract as _contract  # noqa: E402
 import journal as _journal  # noqa: E402
 import ownership as _ownership  # noqa: E402
@@ -186,6 +187,14 @@ def discharge_obligation(run_directory, record: dict, contract_block: dict,
     audit that behaves differently depending on whether anybody was watching is
     not an audit.
     """
+    # M6-ERRATA-002 (M6-E2-D2), for independent-review finding R-2. FIRST
+    # statement, before `open_attempt`, before any transition, before quiescence,
+    # before the snapshot is read and before any diff is computed: a peer that
+    # does not own this run's lease must leave NO trace, and a refusal that
+    # arrives after reconciliation or after the attempt is closed is too late.
+    # A run with no lease file is M5's standalone case and proceeds unchanged.
+    _runlease.require_lease(run_directory)
+
     attempt = _journal.open_attempt(record)
     if attempt is None:
         raise blocking.Blocked(
@@ -246,8 +255,22 @@ def discharge_obligation(run_directory, record: dict, contract_block: dict,
 # --- one attempt (ARMED -> TURN_ACTIVE -> RECONCILING -> RECONCILED) ------
 
 def run_attempt(run_directory, record: dict, contract_block: dict, policy: dict,
-                turn_driver, item_id: str | None = None) -> dict:
-    """Arm, snapshot durably, run the turn, then discharge the obligation."""
+                turn_driver, item_id: str | None = None,
+                actor: str | None = None) -> dict:
+    """Arm, snapshot durably, run the turn, then discharge the obligation.
+
+    M6-D16: every actor turn is an attempt against the ONE run-level budget, so
+    an actor does not get a loop of its own -- it gets a turn in this one.
+    `actor` is passed straight to `start_attempt`, which resolves and records it
+    before the turn begins (M6-D4). `actor=None` keeps M5's exact behavior for a
+    run that declared no topology, and is refused for one that did (M6-E1-D5).
+    """
+    # M6-ERRATA-002 (M6-E2-D2). FIRST statement, because this function's first
+    # effect is writing the pre-turn snapshot -- which happens BEFORE the actor
+    # check inside `start_attempt` would refuse an M6 run, and would therefore
+    # leave a peer's file behind in a run it does not own.
+    _runlease.require_lease(run_directory)
+
     if record["state"] != _journal.ARMED:
         raise blocking.Blocked(
             blocking.JOURNAL_ILLEGAL_TRANSITION,
@@ -263,7 +286,8 @@ def run_attempt(run_directory, record: dict, contract_block: dict, policy: dict,
     before = {"files": _reconcile.snapshot(root), "git": _reconcile.git_status(root)}
     _write_json(Path(run_directory) / snapshot_file, before)
 
-    record = _journal.start_attempt(run_directory, record, snapshot_file=snapshot_file)
+    record = _journal.start_attempt(run_directory, record, snapshot_file=snapshot_file,
+                                    actor=actor)
 
     # Stamp BEFORE the turn so every process the turn spawns is ownable (M5-D14).
     _ownership.stamp_environment(record["run_id"])
