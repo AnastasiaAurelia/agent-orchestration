@@ -142,9 +142,11 @@ These are real, current, and documented in the specifications rather than soften
 - **Security findings are not certified.** The Security Gate reports **75/75 `UNPROVEN`** — that is an
   honest "no evidence", not 75 failures, and not proof of anything either.
   ([Track A](docs/architecture/DIANA-CERTIFICATION-ROADMAP.md))
-- **Mechanical human merge/deploy approval is unresolved (M5-D20).** `REQUIRE_HUMAN` maps to a passing
-  GitHub check and defers to a code-owner rule that is **not configured**. It is an advisory verdict.
-  ([Track B](docs/architecture/DIANA-HUMAN-APPROVAL-ROADMAP.md))
+- **Deployment approval is still unaddressed.** Merge approval is now mechanically enforced
+  (M5-D20 **discharged** — see below), but there is no deployment gate because there is no
+  deployment: zero environments, and Diana holds no deploy authority. **Merge approval must never be
+  read as deployment approval.**
+  ([Track B](docs/architecture/DIANA-HUMAN-APPROVAL-B5.md))
 - **Linux only, in practice.** Process ownership and quiescence need `/proc`; the run lease needs
   `flock`. macOS and Windows are **unproven**, not merely untested.
 - **The run lease is cooperative exclusion, not containment.** It decides whether a process may act on
@@ -623,7 +625,7 @@ Current main can do the following with real confidence:
 Current main explicitly does not:
 
 - certify any security control — the Security Gate reports 75/75 `UNPROVEN`
-- mechanically enforce human merge approval (M5-D20 is undischarged)
+- gate deployment — there is no deployment, and merge approval is not deploy approval
 - claim macOS or Windows support — `/proc` and `flock` are Linux assumptions
 - automatically merge protected branches
 - certify AO + Codex autonomous writes
