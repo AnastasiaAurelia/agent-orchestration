@@ -1,9 +1,11 @@
 # Track B · Phase B2 — Automation Identity and Credential Provisioning
 
-> **STATUS: B2 IS INCOMPLETE.** B2.0–B2.3 are **complete**. Work is **halted before B2.4**, which
-> retires the human credential and requires explicit human confirmation.
-> **No credential has been revoked or removed. The `AnastasiaAurelia` GitHub CLI OAuth
-> authorization is untouched — not logged out, not revoked.** M5-D20 remains undischarged.
+> **STATUS: B2 IS INCOMPLETE — AND B2.4 DID NOT ACHIEVE CUSTODY.**
+> The GitHub CLI OAuth authorization for `AnastasiaAurelia` **was** provider-revoked, and that is
+> empirically confirmed. But post-revocation verification found a **second, independent owner
+> credential still reachable by the agent** — supplied by VS Code through `GIT_ASKPASS` — and it
+> **successfully performed an authenticated write**. See **§15**.
+> **B2 completion criteria 5 and 6 fail. No custody claim is made.** M5-D20 remains undischarged.
 
 Base: B1 (`9b09e8f`), branch `governance/mechanical-human-approval`.
 B0 and B1 are **not** edited. Findings that correct them are recorded here, in the B0→B1 pattern.
@@ -153,7 +155,7 @@ Administration authority*, and that is achieved here more robustly than by scope
 | **B2.1** provision `DIANA-AGENT` credential | **COMPLETE** (human-performed) — §7 |
 | **B2.2** verify least privilege | **COMPLETE** — §8; the §7.2 deviation is **resolved** in §12 |
 | **B2.3** repoint automation identity | **COMPLETE** — §9 |
-| **B2.4** retire the human credential | **pre-revocation check COMPLETE (§13); HALTED at the human checkpoint.** Nothing revoked. |
+| **B2.4** retire the human credential | **PARTIAL / FAILED.** GitHub CLI authorization revoked and confirmed dead (§15.1); a second owner credential remains reachable (§15.3). |
 | **B2.5** real `DIANA-AGENT` PR proof | **substantially complete** — PR #53, §10; closed unmerged |
 
 ## 4. Custody evidence so far
@@ -629,9 +631,144 @@ this track depends on:
 
 ---
 
+## 15. B2.4 — post-revocation verification
+
+### 15.1 Provider-side revocation of the GitHub CLI authorization — confirmed
+
+The human revoked the GitHub CLI OAuth authorization for `AnastasiaAurelia` from the GitHub web UI.
+**Verified independently of the confirmation**, as required:
+
+```
+gh api user      (no GH_TOKEN)   ->  401  {"message": "Bad credentials"}
+gh auth status                   ->  X Failed to log in to github.com account AnastasiaAurelia
+                                     - The token in keyring is invalid.
+```
+
+**GitHub rejected the token.** That is provider-side invalidation, not local deletion, and it
+satisfies B1-D9/B1-D23 for **this credential**.
+
+### 15.2 The automation path is unaffected
+
+| check | result |
+|---|---|
+| automation identity | **`DIANA-AGENT`** (324038564) |
+| scope | **`public_repo`** only; expiry 2026-10-20 09:14:30 UTC |
+| fetch / push / branch delete | **ok** (a throwaway ref pushed and deleted) |
+| list PRs, read check runs, read reviews | **ok** |
+| repo-local git attribution | **`DIANA-AGENT <324038564+DIANA-AGENT@users.noreply.github.com>`** |
+| Administration | **still unavailable** — `actions/permissions` **403**, `hooks` **404**, `admin: false`, `current_user_can_bypass: "never"` |
+| ruleset / CODEOWNERS / workflows | **unchanged** — `enforcement=active`, `bypass=0`, `approvals=0 code_owner=false last_push=false dismiss=true`; `* @AnastasiaAurelia`; workflows byte-identical to `main` |
+
+**Stale local cleanup**, performed only *after* §15.1 confirmed provider-side invalidation:
+`gh auth logout -h github.com -u AnastasiaAurelia`. `~/.config/gh/hosts.yml` is now `{}` and
+`gh auth status` reports no logged-in host. The automation path continued to work throughout.
+**This cleanup is not counted as revocation evidence** — §15.1 is.
+
+### 15.3 B2-F8 — **a second owner credential survived, and it works**
+
+> **This is a failure of B2.4's objective and is reported as one.**
+
+After revocation *and* after the local logout, an authenticated `git push` **succeeded with no
+`GH_TOKEN` set** — exit code 0, branch created. Investigated rather than assumed:
+
+```
+$ printf 'protocol=https
+host=github.com
+' | git credential fill
+username=149037636          <-- AnastasiaAurelia's GitHub user id
+password=<a credential that is NOT the DIANA-AGENT token>
+```
+
+**Source isolated by falsification.** With VS Code's askpass variables removed:
+
+```
+$ env -u GIT_ASKPASS -u VSCODE_GIT_ASKPASS_NODE -u VSCODE_GIT_ASKPASS_MAIN       -u VSCODE_GIT_IPC_HANDLE GIT_TERMINAL_PROMPT=0 git push …
+fatal: could not read Username for 'https://github.com': terminal prompts disabled
+                                        (no branch created)
+```
+
+With them present, the push succeeds. The credential is therefore supplied by **VS Code's GitHub
+authentication session**, exposed to every child process through:
+
+```
+GIT_ASKPASS             = …/extensions/git/dist/askpass.sh
+VSCODE_GIT_ASKPASS_NODE = …/code
+VSCODE_GIT_ASKPASS_MAIN = …/askpass-main.js
+VSCODE_GIT_IPC_HANDLE   = <socket>
+```
+
+**This is a separate OAuth authorization from the GitHub CLI one.** Revoking GitHub CLI did not
+touch it, and nothing in the frozen inventory looked for it.
+
+**Exactly what does and does not fail:**
+
+| path | owner credential reachable? |
+|---|---|
+| `gh api` / REST API | **no** — `Bad credentials`, then no host configured |
+| `git` transport (fetch/push over HTTPS) | **YES** — via VS Code askpass, as user id `149037636` |
+
+So the **API surface is clean and the git surface is not.** Any process in this environment can ask
+VS Code's askpass socket for a working GitHub credential belonging to the human owner.
+
+> **B2-F9 — B2.0's inventory was incomplete, and the gap was structural rather than accidental.**
+> B2.0 *did* record `GIT_ASKPASS` — and classified it as an unremarkable environment variable rather
+> than as a **credential channel**. The frozen inventory list enumerated credential *stores* (keyring,
+> dotfiles, env vars, config) and no *delegating helper*. An askpass helper holds no secret itself; it
+> brokers one on demand from a process that does. Searching for token-shaped strings can never find
+> it, which is why every surface scan returned clean while a working owner credential was one
+> subprocess call away.
+
+### 15.4 What is required to complete B2.4
+
+**Human action, in a browser as `AnastasiaAurelia`:**
+
+1. **Sign out of GitHub inside VS Code** — Accounts (bottom-left) → the GitHub account → *Sign Out*.
+2. **Revoke the authorization at GitHub**, because signing out locally is not revocation — the same
+   distinction as B2-E1: *Settings → Applications →* revoke the **Visual Studio Code** entry (check
+   both *Authorized OAuth Apps* and *Installed GitHub Apps*).
+
+**Or**, if VS Code's GitHub integration is wanted for human work: run the agent **outside** VS Code's
+environment, so `GIT_ASKPASS` and `VSCODE_GIT_IPC_HANDLE` are not inherited. Unsetting them only for
+the agent process is weaker — it relies on the launcher, not on the credential being absent.
+
+**Re-verification after either fix** — the same falsification that found it:
+
+```
+git push origin origin/main:refs/heads/<probe>      # with no GH_TOKEN  -> MUST fail
+printf 'protocol=https\nhost=github.com\n' | git credential fill   -> MUST yield no credential
+```
+
+### 15.5 Custody claim
+
+**None is made.** B1-D8's assertion requires that no working owner credential be found in the
+inspected environment. One **was** found, and it performed an authenticated write.
+
+The most that may be said at this observation point:
+
+> *The `AnastasiaAurelia` **GitHub CLI** OAuth credential has been provider-invalidated and no longer
+> authenticates. The automation's API path authenticates only as `DIANA-AGENT`, with `public_repo`
+> scope and no administration. **However, a distinct `AnastasiaAurelia` credential brokered by VS
+> Code remains reachable on the git transport and successfully performs authenticated writes.**
+> Custody is therefore **not** established.*
+
+**Not claimed, and not true:** that no owner credential is reachable; that automation cannot act as
+the owner; that the environment is clean.
+
+Two limitations stand regardless of the fix:
+
+- **B2-F2** — the boundary is the **OS user**. Any later owner sign-in on this user re-imports the
+  credential, silently.
+- Absence can never be proven, only searched for — and **B2-F8 is the concrete demonstration**: five
+  successive inventories reported clean while a working owner credential was one subprocess call away.
+
+---
+
 ## 11. Readiness for B3
 
-**Not ready — B2.4 is outstanding, and it is the step that actually establishes custody.**
+**Not ready. B2 is NOT complete** — completion criteria 5 (*no working owner credential in the
+inspected surfaces*) and 6 (*ordinary automation cannot silently authenticate as the owner*) **fail**
+on the git transport, per §15.3. B3 must not begin: its entire purpose is to prove automation cannot
+self-satisfy, and that proof is void while automation can borrow the owner's identity.
 
 Everything B2.4 depends on is now proven: the replacement credential exists, authenticates as
 `DIANA-AGENT`, performs every operation the automation needs, is provably unable to administer the
