@@ -48,6 +48,9 @@
 !docs/architecture/DIANA-HUMAN-APPROVAL-B0.md
 !docs/architecture/DIANA-HUMAN-APPROVAL-B1.md
 !docs/architecture/DIANA-HUMAN-APPROVAL-B2.md
+!docs/architecture/DIANA-HUMAN-APPROVAL-B3.md
+!governance/
+!governance/test-human-approval-b3.sh
 !docs/architecture/DIANA-WORKFLOW-ROADMAP.md
 !docs/architecture/DIANA-DISTRIBUTION-ROADMAP.md
 !docs/architecture/DIANA-POST-M7-ROADMAP.md
