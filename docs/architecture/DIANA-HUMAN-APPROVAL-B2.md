@@ -459,7 +459,40 @@ workflows        : byte-identical to main
 PR #54 was **closed unmerged** and its branch deleted. `mergeStateStatus: CLEAN` with `reviews: 0` was
 observed once more and again **not** acted on — B2-F5 reconfirmed on the replacement credential.
 
-### 12.3 B2-F6 — retirement of the superseded token cannot be verified by the agent
+### 12.3 Superseded token — human-confirmed retired
+
+**Status: retired.** The human deleted the superseded classic PAT (the one expiring
+**2026-10-03 08:27:23 UTC**) from the `DIANA-AGENT` account's token list.
+
+Re-verified immediately afterwards that the replacement is unaffected:
+
+```
+gh api user            ->  DIANA-AGENT
+X-Oauth-Scopes         ->  public_repo
+token expiration       ->  2026-10-20 09:14:30 UTC
+```
+
+Identity, scope and expiry are all unchanged, confirming the surviving credential is the intended
+replacement and that the correct one of the two was deleted.
+
+> **B2-F6 — This retirement is a human attestation, not an agent-verified fact, and it cannot be
+> re-tested.** The superseded secret was overwritten in `~/.config/diana/gh-token` and never copied,
+> so the agent cannot attempt authentication with it to observe a failure. GitHub exposes **no REST
+> endpoint** for a user to list or delete their own classic PATs (`GET /user/tokens` → 404), so the
+> agent can neither enumerate the account's remaining tokens nor confirm the deletion independently.
+>
+> **The evidence available is therefore: (i) the human's confirmation that the token was deleted, and
+> (ii) the agent's verification that the replacement still authenticates with the intended scope.**
+> Together these are strong practical grounds and **not** a proof of revocation. This is the same
+> class of limitation B1-D8 names for custody generally, recorded here rather than rounded up to
+> certainty.
+>
+> The residual risk it leaves is bounded and worth stating precisely: had the deletion not occurred,
+> the exposure would be a `repo`-scoped `DIANA-AGENT` credential, valid until 2026-10-03, unable to
+> administer the repository (`admin: false`, B2-D1) but able to push, open pull requests, and reach
+> any private repository `DIANA-AGENT` might later be added to.
+
+### 12.4 Original statement of the limitation (retained)
 
 > The retired token's value was overwritten in `~/.config/diana/gh-token` and was never copied
 > elsewhere, so **the agent cannot test whether it still authenticates.** GitHub exposes **no REST
@@ -486,9 +519,8 @@ still act as `AnastasiaAurelia` by simply not setting `GH_TOKEN` (B2-F3).
 
 Two decisions belong to the human before B2.4:
 
-1. ~~Regenerate the automation token with `public_repo` only~~ — **done**, §12. The remaining part is
-   **deleting the superseded token** on the `DIANA-AGENT` account (B2-F6), which only the human can do
-   and only the human can confirm.
+1. ~~Regenerate the automation token with `public_repo` only, and delete the superseded one~~ —
+   **done**, §12. Both parts are complete; the deletion is a human attestation (B2-F6).
 2. **How to retire the owner credential** (B2-E1). It is a GitHub CLI OAuth authorization, not a PAT;
    revoking it disables `gh` for that account **everywhere**, not only on this machine. `gh auth
    logout` is local deletion and does **not** satisfy B1-D9/D23.
