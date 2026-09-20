@@ -151,7 +151,7 @@ Administration authority*, and that is achieved here more robustly than by scope
 |---|---|
 | **B2.0** pre-mutation inventory | **COMPLETE** — §1 |
 | **B2.1** provision `DIANA-AGENT` credential | **COMPLETE** (human-performed) — §7 |
-| **B2.2** verify least privilege | **COMPLETE** — §8, with one deviation (§7.2) |
+| **B2.2** verify least privilege | **COMPLETE** — §8; the §7.2 deviation is **resolved** in §12 |
 | **B2.3** repoint automation identity | **COMPLETE** — §9 |
 | **B2.4** retire the human credential | **HALTED — requires explicit human confirmation.** Nothing revoked. |
 | **B2.5** real `DIANA-AGENT` PR proof | **substantially complete** — PR #53, §10; closed unmerged |
@@ -413,6 +413,67 @@ agent did not discover the schema by reading it first — the failures did.
 
 ---
 
+## 12. B2-E3 resolved — replacement credential
+
+The over-scoped credential of §7.2 was **replaced by the human** with a newly generated classic PAT
+before B2.4, per B2-D4's recommendation. The agent never saw either secret. The file at
+`~/.config/diana/gh-token` (mode `600`) now holds the replacement; the previous value was overwritten.
+
+| property | retired token | **replacement** |
+|---|---|---|
+| identity | `DIANA-AGENT` | **`DIANA-AGENT`** (324038564) |
+| `X-OAuth-Scopes` | `gist, read:org, repo` | **`public_repo`** — the only scope |
+| expiry | 2026-10-03 08:27:23 UTC | **2026-10-20 09:14:30 UTC** |
+
+The differing expiry independently confirms these are distinct credentials.
+
+### 12.1 Nine-point verification — all pass
+
+| # | property | result |
+|---|---|---|
+| 1 | `gh api user` reports `DIANA-AGENT` | **pass** — id 324038564 |
+| 2 | scope is `public_repo` only | **pass** — `X-Oauth-Scopes: public_repo` |
+| 3 | metadata / read operations | **pass** — repo, file contents, pull requests |
+| 4 | feature-branch push | **pass** — `governance/b2-e3-proof`, commit `8abb835` attributed to `DIANA-AGENT` |
+| 5 | PR creation and update | **pass** — PR **#54**, author `DIANA-AGENT`, `author_association: COLLABORATOR`; title PATCHed and reverted |
+| 6 | checks and reviews readable | **pass** — reviews, requested reviewers, commit status |
+| 7 | workflow modification **refused** | **pass** — *"refusing to allow a Personal Access Token to create or update workflow … without `workflow` scope"*; branch never created (404) |
+| 8 | administration **unavailable** | **pass** — `actions/permissions` 403; `hooks` 404; `keys` 404; `admin: false`; ruleset reports `current_user_can_bypass: "never"`; a `PUT` to the ruleset was **refused 404** |
+| 9 | ruleset / CODEOWNERS / workflows unchanged | **pass** — see §12.2 |
+
+Both required checks ran green on PR #54 (**Diana Gate: success**, **Diana Security Gate: success**),
+so the replacement credential exercises the full automation path end to end.
+
+### 12.2 Invariants after the refused administration write
+
+A ruleset `PUT` was attempted **deliberately, with the ruleset's existing name as the only field**, so
+that a successful call would have been a no-op. It was refused. Verified afterwards:
+
+```
+ruleset versions : 3, latest 49567930 @ 2026-09-14T02:55:45+07:00   (unchanged)
+pull_request rule: approvals=0  code_owner=false  last_push=false  dismiss=true  bypass=0
+CODEOWNERS       : * @AnastasiaAurelia   (remote and local, byte-identical to main)
+workflows        : byte-identical to main
+```
+
+PR #54 was **closed unmerged** and its branch deleted. `mergeStateStatus: CLEAN` with `reviews: 0` was
+observed once more and again **not** acted on — B2-F5 reconfirmed on the replacement credential.
+
+### 12.3 B2-F6 — retirement of the superseded token cannot be verified by the agent
+
+> The retired token's value was overwritten in `~/.config/diana/gh-token` and was never copied
+> elsewhere, so **the agent cannot test whether it still authenticates.** GitHub exposes **no REST
+> endpoint** for a user to list or delete their own classic PATs (`GET /user/tokens` → 404), so the
+> agent can neither enumerate nor revoke it.
+>
+> **Deleting it is a human UI action on the `DIANA-AGENT` account, and its completion is verifiable
+> only there.** Until then a `repo`-scoped `DIANA-AGENT` credential remains valid until
+> 2026-10-03 — orphaned rather than in use, but live. Its authority ceiling is unchanged
+> (`admin: false`, B2-D1), so it cannot administer the repository; but it *can* push, open pull
+> requests, and reach any private repository `DIANA-AGENT` is later added to.
+
+---
+
 ## 11. Readiness for B3
 
 **Not ready — B2.4 is outstanding, and it is the step that actually establishes custody.**
@@ -425,8 +486,9 @@ still act as `AnastasiaAurelia` by simply not setting `GH_TOKEN` (B2-F3).
 
 Two decisions belong to the human before B2.4:
 
-1. **Regenerate the automation token with `public_repo` only** (B2-E3 / B2-D4)? Recommended, and
-   easier now than after revocation.
+1. ~~Regenerate the automation token with `public_repo` only~~ — **done**, §12. The remaining part is
+   **deleting the superseded token** on the `DIANA-AGENT` account (B2-F6), which only the human can do
+   and only the human can confirm.
 2. **How to retire the owner credential** (B2-E1). It is a GitHub CLI OAuth authorization, not a PAT;
    revoking it disables `gh` for that account **everywhere**, not only on this machine. `gh auth
    logout` is local deletion and does **not** satisfy B1-D9/D23.
