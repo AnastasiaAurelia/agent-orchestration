@@ -1,11 +1,13 @@
 # Track B · Phase B2 — Automation Identity and Credential Provisioning
 
-> **STATUS: B2 IS INCOMPLETE — AND B2.4 DID NOT ACHIEVE CUSTODY.**
-> The GitHub CLI OAuth authorization for `AnastasiaAurelia` **was** provider-revoked, and that is
-> empirically confirmed. But post-revocation verification found a **second, independent owner
-> credential still reachable by the agent** — supplied by VS Code through `GIT_ASKPASS` — and it
-> **successfully performed an authenticated write**. See **§15**.
-> **B2 completion criteria 5 and 6 fail. No custody claim is made.** M5-D20 remains undischarged.
+> **STATUS: B2 IS COMPLETE.** All thirteen completion criteria are met (§16.4).
+> The GitHub CLI OAuth authorization for `AnastasiaAurelia` was provider-revoked and confirmed dead
+> (§15.1). The second owner credential found in §15.3 — brokered by VS Code through `GIT_ASKPASS` —
+> was removed from the agent's reach by relaunching the agent outside VS Code's environment, and its
+> absence is confirmed by three independent falsifications (§16).
+> **A point-in-time custody assertion is made in §16.3, at exactly its real strength and no further.**
+> **M5-D20 remains undischarged** — B2 changes identity and credentials only; no merge rule has
+> changed. **B3 has not begun.**
 
 Base: B1 (`9b09e8f`), branch `governance/mechanical-human-approval`.
 B0 and B1 are **not** edited. Findings that correct them are recorded here, in the B0→B1 pattern.
@@ -155,7 +157,7 @@ Administration authority*, and that is achieved here more robustly than by scope
 | **B2.1** provision `DIANA-AGENT` credential | **COMPLETE** (human-performed) — §7 |
 | **B2.2** verify least privilege | **COMPLETE** — §8; the §7.2 deviation is **resolved** in §12 |
 | **B2.3** repoint automation identity | **COMPLETE** — §9 |
-| **B2.4** retire the human credential | **PARTIAL / FAILED.** GitHub CLI authorization revoked and confirmed dead (§15.1); a second owner credential remains reachable (§15.3). |
+| **B2.4** retire the human credential | **COMPLETE** — CLI authorization revoked (§15.1); the VS Code broker channel closed and falsified (§16) |
 | **B2.5** real `DIANA-AGENT` PR proof | **substantially complete** — PR #53, §10; closed unmerged |
 
 ## 4. Custody evidence so far
@@ -763,12 +765,109 @@ Two limitations stand regardless of the fix:
 
 ---
 
+## 16. B2-F8 resolved — the broker channel is closed
+
+### 16.1 What changed, and what did not
+
+The agent was **relaunched outside VS Code's environment**, the second of the two remediations in
+§15.4. Measured across the process ancestry:
+
+```
+  pid 48739  claude   GH_TOKEN                                        <- agent: clean
+  pid 46468  bash     GIT_ASKPASS, VSCODE_GIT_IPC_HANDLE,
+                      VSCODE_GIT_ASKPASS_{NODE,MAIN,EXTRA_ARGS}       <- launcher: still carries them
+```
+
+The launching shell still holds the broker variables; **the agent process did not inherit them.**
+
+> **B2-D7 — This closes the channel by environment isolation, not by revocation, and the difference
+> matters.** The VS Code GitHub authorization was **not** revoked at the provider and presumably still
+> works for the human inside VS Code — which is the point of choosing this remediation. What changed
+> is that the agent can no longer reach it. **Custody here therefore depends on the launcher
+> continuing to strip those variables**, which is weaker than provider-side revocation: revocation
+> makes a credential worthless everywhere, isolation only makes it unreachable from one process.
+> Any relaunch that inherits the parent shell's environment **silently restores the exposure** — and
+> §15.3 shows it would restore it as a *working write credential*, with no error to notice.
+
+### 16.2 Falsification — the same test that found the defect
+
+Pre-conditions verified in the live agent process: `GH_TOKEN` present; `GITHUB_TOKEN`, `GIT_ASKPASS`,
+`VSCODE_GIT_IPC_HANDLE`, `VSCODE_GIT_ASKPASS_NODE`, `VSCODE_GIT_ASKPASS_MAIN`,
+`VSCODE_GIT_ASKPASS_EXTRA_ARGS`, `SSH_ASKPASS` **all absent**; `gh api user` → `DIANA-AGENT`,
+`X-Oauth-Scopes: public_repo`.
+
+| # | falsification (all with `GH_TOKEN` removed) | required | observed |
+|---|---|---|---|
+| 1 | `git credential fill` | no credential | `fatal: could not read Username` — **no credential returned** |
+| 2 | authenticated `git push` | must fail | `fatal: could not read Username`; **branch not created** |
+| 3 | `gh api user`, `gh api …/collaborators` | must fail | `To get started with GitHub CLI, please run: gh auth login` |
+
+**Robustness check — the test does not depend on its own crutch.** Falsifications 1–2 set
+`GIT_TERMINAL_PROMPT=0`. Repeated **without** it, the push still fails —
+`could not read Username: No such device or address` (no tty) — **and does not hang**. A test that
+only passes because prompting was disabled would prove nothing about unattended execution; this one
+passes either way.
+
+Credential helper chain unchanged: only `!/usr/bin/gh auth git-credential`, and `gh` is logged out
+(`hosts.yml` is `{}`), so it yields nothing without `GH_TOKEN`.
+
+### 16.3 Custody assertion — stated at exactly its strength
+
+> **At the B2.4 observation point, within the inspected normal automation environment, the only
+> working GitHub credential available to normal automation authenticated as `DIANA-AGENT`, with
+> `public_repo` scope and no administration. The previously observed `AnastasiaAurelia` GitHub CLI
+> credential had been provider-invalidated and no longer authenticates. The second `AnastasiaAurelia`
+> credential brokered by VS Code is no longer reachable from the agent process, verified by three
+> independent falsifications on both the API and git transports.**
+
+**Explicitly not claimed:**
+
+- no cryptographic proof of global absence;
+- no proof that no copy of any human credential exists elsewhere;
+- **no protection against the human later reintroducing an owner credential** — by signing in to
+  `gh`, or by launching the agent from a shell that still exports the VS Code broker variables;
+- **not permanent.** This is a point-in-time observation, and B2-D7 makes the standing condition
+  explicit: it holds only while the launcher keeps stripping those variables.
+
+> If `AnastasiaAurelia` later runs GitHub CLI login on the same OS user, or the agent is relaunched
+> inheriting VS Code's environment, the human credential may re-enter agent reach and **invalidate
+> the Track B custody precondition**. Nothing in this repository can detect that.
+
+### 16.4 B2 completion criteria
+
+| # | criterion | |
+|---|---|---|
+| 1 | automation credential works as `DIANA-AGENT` | **met** |
+| 2 | scope `public_repo` only | **met** |
+| 3 | git attribution is `DIANA-AGENT` | **met** |
+| 4 | owner GitHub CLI credential provider-invalidated | **met** — §15.1 |
+| 5 | inspected surfaces expose no working owner credential | **met** — §16.2 |
+| 6 | ordinary automation cannot silently authenticate as the owner | **met** — §16.2, both transports |
+| 7 | Administration unavailable to `DIANA-AGENT` | **met** — `admin: false`, `can_bypass: "never"`, 403/404 |
+| 8 | ruleset unchanged | **met** — `enforcement=active bypass=0 approvals=0 code_owner=false last_push=false dismiss=true` |
+| 9 | CODEOWNERS unchanged | **met** — `* @AnastasiaAurelia` |
+| 10 | workflows unchanged | **met** — byte-identical to `main` |
+| 11 | frozen M1–M7 docs unchanged | **met** — all 15 byte-identical |
+| 12 | B0 / B1 unchanged | **met** — unchanged since the B1 freeze `9b09e8f` |
+| 13 | working tree clean after evidence commit | **met** |
+
+**B2 is COMPLETE.** M5-D20 is **not** discharged: B2 changed identity and credentials only. No merge
+rule, ruleset, CODEOWNERS entry or workflow was altered, and none may be until B3 and B4.
+
+---
+
 ## 11. Readiness for B3
 
-**Not ready. B2 is NOT complete** — completion criteria 5 (*no working owner credential in the
-inspected surfaces*) and 6 (*ordinary automation cannot silently authenticate as the owner*) **fail**
-on the git transport, per §15.3. B3 must not begin: its entire purpose is to prove automation cannot
-self-satisfy, and that proof is void while automation can borrow the owner's identity.
+**B2 is complete, so B3 is unblocked** — but it has not begun, and nothing about B3 is done here.
+
+Two conditions carry into B3 and must be re-checked at its start rather than assumed:
+
+1. **B2-D7** — custody rests on the launcher stripping VS Code's broker variables. B3's premise is
+   that automation cannot manufacture a qualifying approval; that premise is void if the agent is
+   relaunched into an environment where it can act as the owner. **B3 must re-run §16.2's
+   falsification before drawing any conclusion**, not trust this document.
+2. **Token expiry 2026-10-20** (B2-D6). B3 must not be attempted with a credential that may expire
+   mid-run, and expiry must never be worked around by widening scope or reinstating the owner.
 
 Everything B2.4 depends on is now proven: the replacement credential exists, authenticates as
 `DIANA-AGENT`, performs every operation the automation needs, is provably unable to administer the
