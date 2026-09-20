@@ -1,47 +1,200 @@
 # Diana
 
-Diana is a thin, provider-neutral deterministic control and governance layer around nondeterministic coding agents.
+**Diana is a deterministic authority and governance layer around nondeterministic coding agents.**
+A model may propose and act, but permissions, durable state, verification, recovery and approval live
+outside the model.
 
-In practice, Diana does not try to make a coding agent deterministic. It places deterministic policy, scope, evidence, verification, and human authority around a probabilistic worker.
+> Intelligence proposes. Diana governs.
 
-```text
-USER
- │
- ▼
-DIANA
-policy / DoD / memory / governance
- │
- ▼
-Agent Orchestrator
- │
- ├───────────────┐
- ▼               ▼
-Actor A         Actor B
-worktree        worktree
- └──────┬────────┘
-        ▼
- integration
-        ▼
-fresh independent reviewer
-        ▼
-independent verification
-        ▼
-Preflight
-        ▼
-Diana Gate
-        ▼
-Security Gate / GitHub governance
-        ▼
-PR
-        ▼
-HUMAN REVIEW
-        ▼
-HUMAN MERGE
+**Hermes** is the reasoning and execution backend — the thing that reads, writes and runs commands.
+Diana is not tied to trusting one model session: the executor is a replaceable seam, and replacing it
+creates no new authority and no new budget.
+
+---
+
+## What problem this solves
+
+A coding agent that can edit your repository is useful and unaccountable. The usual answers are to
+trust the model, or to watch it. Diana takes a third: **put the permissions outside it.**
+
+Before anything runs, Diana derives a concrete envelope — which files may be read, which may be
+written, which exact commands may run — shows it to you, and requires you to approve that exact
+object. During the run it owns the durable state, the verification and the evidence. Afterwards it
+reports what actually happened from its own records, not from what the model says happened.
+
+The model never grants itself anything. That is the whole design.
+
+---
+
+## What it looks like
+
+```console
+$ diana-do "Fix the failing tests in this repo, but don't touch auth"
+
+GOAL
+  Fix the failing tests in this repo, but don't touch auth
+
+PLAN
+  1. Fix the failing tests in this repo, but don't touch auth
+  then: builder then reviewer
+
+AUTHORITY
+  Can read    . (this repository)
+  Can edit    src/core, tests
+  Cannot edit .git/, .env, .env.*, src/auth  (you excluded this)
+  Can run     'python3 check.py', 'python3 -m pytest -q'
+  Cannot      anything not listed above — no network, no deploy, no merge, no credentials
+  Limits      6 attempts, 3600 seconds from run creation
+
+APPROVAL REQUIRED
+  Risk ELEVATED · needs your explicit approval before anything runs.
+  This approves starting this run only. It is not a merge, deploy or review approval.
+
+  sha256:ceb793210bfa803ca31da2e082c552079b1053a25765a245abcbd67380697741
+
+  To start it:   /path/to/diana-do approve sha256:ceb7932... --repo /path/to/repo ...
 ```
 
-This README is the current operator and architecture guide for the repository on `main`. The canonical branch is `main`. The separate experimental branch `feature/nightshift-capability` is not part of current `main` and is not to be documented as shipped functionality in this README. Do not merge Nightshift into `main`, and do not port Nightshift implementation into the current documentation.
+Approving it runs the work and reports:
+
+```console
+PROGRESS
+  run ed101244-…   state complete
+  ✓ item-1   (2 attempts)
+  active role: reviewer   attempt 2   closed
+
+RESULT
+  COMPLETE
+  files changed        1   src/core/calc.py
+  attempts             2   (2 stayed inside the approved area)
+  who worked           builder → reviewer
+  budget               2 of 6 attempts
+```
+
+`"don't touch auth"` is not a note in the prompt. It removed `src/auth` from the write scope, and a
+run that writes there is stopped by reconciliation.
+
+### The commands
+
+```
+diana-do "<goal>"            propose; show Goal / Plan / Authority
+diana-do approve <digest>    approve that exact proposal, then run it
+diana-do show <digest>       show a proposal again
+diana-do status <run-id>     progress, from Diana's own journal
+diana-do result <run-id>     result, from Diana's own run report
+```
+
+Shared flags: `--repo`, `--proposals-base`, `--executor`. Exit codes: `0` ok, `2` refused, `3` blocked.
+
+`diana-do` lives at the repository root and is **not installed on `PATH`** — the command Diana prints
+carries its own absolute path and context so it can be pasted and run from anywhere. Packaging is
+[Track D](docs/architecture/DIANA-DISTRIBUTION-ROADMAP.md), and is not done.
+
+---
+
+## What approval means
+
+Approval binds a **proposal digest** — an identity over the exact contract, work items, actor topology
+and run budget that approval would create.
+
+- The approval API takes a digest **by type**. `yes`, `do it`, `go ahead` and an approving paraphrase
+  cannot become approval, because agreeable text is not the input type.
+- Approval **re-derives against the live repository first**. If the repository moved — a new commit, a
+  dirty tree, or even a gitignored file — the digest differs and the approval is refused with **no run
+  created**. It is never silently rebuilt and run.
+- It approves **starting one bounded run**. It is **not** a merge, deploy, or code-review approval, and
+  no accumulation of it becomes one.
+
+## What happens on crash or restart
+
+The run journal is the only authoritative record and is written crash-atomically. A killed process
+leaves an obligation, not a mystery: the next process must prove no process of that run is still
+alive, reconcile what changed on disk, and only then continue — under the same contract, the same run
+id, the same remaining budget. Rendering a run after a restart shows the same run, because the view is
+a projection of that journal and there is no second copy to disagree with it.
+
+## What Builder and Reviewer mean
+
+Two actors under **one** approved envelope, run strictly one at a time.
+
+- **Builder** may read, write, patch and run the exact approved commands, inside the approved paths.
+- **Reviewer** may read and search. Nothing else — no write scope, no commands, no terminal. It is
+  read-only *by enforcement*, not by instruction: those tools are refused at the real dispatch
+  boundary.
+- The reviewer runs **no verification commands** — Diana does. A test command executes repository code
+  and could mutate it, which is exactly the authority the role exists to withhold.
+- A reviewer verdict is an **input to a Diana decision**, never a state transition. A `PASS` over a
+  diff that left the approved area still blocks.
+
+---
+
+## Current, and not yet
+
+| | |
+|---|---|
+| **Current** | Natural-language goal → bounded proposal → exact approval → Builder/Reviewer run → progress → `COMPLETE` / `FAILED` / `BLOCKED`, on Linux, for one certified workflow class (bounded repair). |
+| **Roadmap** | Security evidence certification · mechanical human merge approval · more certified workflow classes · packaging. See the [post-M7 roadmap](docs/architecture/DIANA-POST-M7-ROADMAP.md). |
+
+### Limitations worth knowing before you rely on it
+
+These are real, current, and documented in the specifications rather than softened here.
+
+- **Security findings are not certified.** The Security Gate reports **75/75 `UNPROVEN`** — that is an
+  honest "no evidence", not 75 failures, and not proof of anything either.
+  ([Track A](docs/architecture/DIANA-CERTIFICATION-ROADMAP.md))
+- **Mechanical human merge/deploy approval is unresolved (M5-D20).** `REQUIRE_HUMAN` maps to a passing
+  GitHub check and defers to a code-owner rule that is **not configured**. It is an advisory verdict.
+  ([Track B](docs/architecture/DIANA-HUMAN-APPROVAL-ROADMAP.md))
+- **Linux only, in practice.** Process ownership and quiescence need `/proc`; the run lease needs
+  `flock`. macOS and Windows are **unproven**, not merely untested.
+- **The run lease is cooperative exclusion, not containment.** It decides whether a process may act on
+  a run; it constrains nothing about what a process does once admitted.
+- **Same-user hostile mutation is outside parts of the threat model.** A process able to unlink and
+  recreate the lease file — or rewrite and re-digest the journal — is not defended against.
+- **Workflow classes are finite and certified**, not arbitrary. Adding one is a certification, not a
+  routing change. ([Track C](docs/architecture/DIANA-WORKFLOW-ROADMAP.md))
+- **Live-model behaviour introduces variance.** One acceptance suite's assertion count legitimately
+  varies with provider behaviour, and that is recorded rather than smoothed over.
+- **Legacy expert commands remain.** Nothing was deleted or retired.
+
+---
+
+## For experts
+
+- **[Architecture](docs/architecture/DIANA-ARCHITECTURE.md)** — the whole system in seven layers.
+- **Frozen specifications** — [M1](docs/architecture/HERMES-RUNTIME-M1.md) enforcement boundary ·
+  [M2](docs/architecture/HERMES-RUNTIME-M2.md) real LLM turn ·
+  [M3](docs/architecture/HERMES-RUNTIME-M3.md) runtime verification ·
+  [M4](docs/architecture/HERMES-RUNTIME-M4.md) bounded mutation ·
+  [M5](docs/architecture/HERMES-RUNTIME-M5.md) unattended execution ·
+  [M6](docs/architecture/HERMES-RUNTIME-M6.md) multi-actor/reviewer ·
+  [M7](docs/architecture/HERMES-RUNTIME-M7.md) product UX — plus seven errata in the same directory.
+- **[Post-M7 roadmap](docs/architecture/DIANA-POST-M7-ROADMAP.md)** — the four future tracks.
+- **Expert surfaces** — the slash commands, `ship.py`, `ao.py` and the CI gates are all still here and
+  unchanged; see the operator guide below.
+
+Everything below this line is the **operator guide** for the surrounding pipeline — policy, preflight,
+the gates, the AO-based `/diana-ship` workflow, and installation of the portable Diana layer. It
+remains accurate and in use.
+
+---
 
 ## What Diana is today
+
+Diana on `main` is **two things at once**, and conflating them is the easiest way to misread this
+repository.
+
+**1. The governed runtime (M1–M7, accepted).** The natural-language product flow described at the top
+of this file: proposal, approval, bounded execution, Builder and Reviewer, durable journal,
+reconciliation, recovery. Diana owns the authority and the evidence; Hermes executes. This is the path
+`diana-do` drives, and it is the subject of the fourteen frozen documents in `docs/architecture/`.
+
+**2. The surrounding pipeline (pre-M1, still in use).** Policy, Definition of Done, canonical memory,
+risk classification, deterministic Preflight, the Diana Gate, the Security Track, and the AO-based
+`/diana-ship` workflow. None of it was deleted or retired by M1–M7; `/diana-ship` steps 2–5 are
+*superseded for the certified product path only*, and the command still works.
+
+The rest of this section, and everything after it, documents the second.
 
 Current main is a thin control layer that owns:
 
@@ -454,6 +607,9 @@ A Security Gate result should therefore be read as: "what the currently availabl
 
 Current main can do the following with real confidence:
 
+- start a bounded, governed run from a natural-language goal, with an approval bound to an exact
+  proposal, Builder and Reviewer under one envelope, and a durable record that survives a crash
+  (`diana-do` — see the top of this file)
 - install the portable Diana layer into another project
 - provide a canonical engineering policy and reusable Claude Code workflow assets
 - run deterministic Preflight and Diana Gate checks locally
@@ -466,6 +622,9 @@ Current main can do the following with real confidence:
 
 Current main explicitly does not:
 
+- certify any security control — the Security Gate reports 75/75 `UNPROVEN`
+- mechanically enforce human merge approval (M5-D20 is undischarged)
+- claim macOS or Windows support — `/proc` and `flock` are Linux assumptions
 - automatically merge protected branches
 - certify AO + Codex autonomous writes
 - expose a private AO daemon API path as a supported interface
