@@ -273,17 +273,13 @@ can only be human-observed.
 
 | item | status |
 |---|---|
-| timestamp | **not supplied** — the report returned the literal placeholder `[PASTE]` |
-| actor | reported as `AnastasiaAurelia` (human-attested) |
-| new version identifier | **not supplied** — literal placeholder `[PASTE]` |
+| timestamp | **supplied** — §18 |
+| actor | **supplied** — `AnastasiaAurelia`, §18 |
+| new version identifier | **not exposed by any observed surface** — §18.2 |
 
-> **This requirement is recorded as OUTSTANDING and explicitly not waived.** It is *not* a case of
-> GitHub failing to expose the data; the values simply were not provided. Two of the three are still
-> needed.
->
-> Automation **can** corroborate that *a* change occurred and when: `updated_at` moved to
-> **`2026-09-20T21:57:14.933+07:00`**. It **cannot** corroborate the actor or the version id, and
-> neither is claimed here.
+> **Superseded by §18.** The provenance gap is now closed from the human account's Security Log
+> export. The version identifier remains unavailable — see §18.2, where that is recorded as a
+> platform limitation rather than waived.
 
 **Evidence provenance, kept separate as required:**
 
@@ -463,3 +459,67 @@ the artifact file.
 observed rejected, API unauthenticated, unauthenticated push impossible — and the dirty-tree guard
 fires and aborts, leaving the branch untouched. The harness was deliberately **not** run to
 completion: that is B5.
+
+---
+
+## 18. B4 provenance — human control-plane audit evidence (B-AC-12)
+
+Obtained by the human from the **account Security Log export**, a surface automation cannot read.
+
+```
+action        repository_ruleset.update
+actor         AnastasiaAurelia
+repository    AnastasiaAurelia/agent-orchestration
+ruleset       diana-main-protection   (id 22188373)
+timestamp     2026-09-20 21:57:15.029 +07:00   =   2026-09-20 14:57:15.029 UTC
+```
+
+**Rule delta recorded by the event itself:**
+
+| field | recorded transition |
+|---|---|
+| `required_approving_review_count` | `0 -> 1` |
+| `require_code_owner_review` | `false -> true` |
+| `require_last_push_approval` | `false -> true` |
+| `dismiss_stale_reviews_on_push` | `true -> true` (preserved) |
+| `required_review_thread_resolution` | `false -> false` (preserved) |
+| `allowed_merge_methods` | unchanged |
+
+### 18.1 Two independent surfaces agree
+
+This is the part worth keeping. The evidence was produced by **two surfaces that cannot see each
+other**, and they match:
+
+| | automation-observed (§8) | human-observed (§18) |
+|---|---|---|
+| credential | `DIANA-AGENT`, `public_repo` | `AnastasiaAurelia`, browser + Security Log |
+| what it shows | the ruleset's **resulting state** | the **transition** and **who made it** |
+| the three-field delta | `0→1`, `false→true`, `false→true` | **identical** |
+| preserved fields | 15 verified unchanged | dismissal, thread-resolution, merge methods confirmed unchanged |
+| time | `updated_at` `21:57:14.933 +07:00` | event at `21:57:15.029 +07:00` |
+
+The timestamps differ by **96 milliseconds** — the ruleset's `updated_at` and the audit event are
+the same write seen from either side. Neither surface was derived from the other, and neither was
+derived from this document.
+
+> **B4-D3 — This is what B-AC-12 asks for, and it is stronger than a version identifier would be.**
+> The requirement was that a control-plane change be *distinguishable from ordinary merge approval*
+> and *leave auditable evidence*. The Security Log records the action type
+> (`repository_ruleset.update` — not a review, not a merge), the acting human, the exact field
+> transitions, and the time. A version id would have been an opaque handle; this is the change itself.
+
+### 18.2 The version identifier is not available from any observed surface
+
+The human reports it is exposed by **neither the ruleset UI nor the Security Log CSV export**.
+
+> **Recorded as a platform limitation, not waived, and not invented.** B1-D26 anticipated capturing a
+> new version identifier; on this account's surfaces that field does not exist to capture. No id is
+> asserted here.
+>
+> **What this costs:** rollback (§12) cannot be addressed by version id from the human side either.
+> It does not matter in practice — B2 §13.2 holds the **complete pre-B4 rule state**, captured while
+> owner read access existed, and restoring *values* is what rollback requires. Version `49567930`
+> remains the reference for the pre-B4 state; no post-B4 counterpart exists to record.
+
+**Provenance gap closed.** Actor, timestamp and delta are established from the human control plane;
+the version identifier is established to be unavailable.
