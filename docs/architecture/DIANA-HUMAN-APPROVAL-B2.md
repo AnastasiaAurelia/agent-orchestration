@@ -153,7 +153,7 @@ Administration authority*, and that is achieved here more robustly than by scope
 | **B2.1** provision `DIANA-AGENT` credential | **COMPLETE** (human-performed) — §7 |
 | **B2.2** verify least privilege | **COMPLETE** — §8; the §7.2 deviation is **resolved** in §12 |
 | **B2.3** repoint automation identity | **COMPLETE** — §9 |
-| **B2.4** retire the human credential | **HALTED — requires explicit human confirmation.** Nothing revoked. |
+| **B2.4** retire the human credential | **pre-revocation check COMPLETE (§13); HALTED at the human checkpoint.** Nothing revoked. |
 | **B2.5** real `DIANA-AGENT` PR proof | **substantially complete** — PR #53, §10; closed unmerged |
 
 ## 4. Custody evidence so far
@@ -504,6 +504,128 @@ replacement and that the correct one of the two was deleted.
 > 2026-10-03 — orphaned rather than in use, but live. Its authority ceiling is unchanged
 > (`admin: false`, B2-D1), so it cannot administer the repository; but it *can* push, open pull
 > requests, and reach any private repository `DIANA-AGENT` is later added to.
+
+---
+
+## 13. B2.4 — pre-revocation safety check
+
+Run **before** asking the human to revoke anything. Every machine-checkable item passes.
+
+| # | check | result |
+|---|---|---|
+| 1 | replacement credential works | **pass** — authenticates |
+| 2 | explicit automation credential identity | **pass** — `DIANA-AGENT` (324038564) |
+| 3 | scope still `public_repo` only | **pass** — `X-Oauth-Scopes: public_repo` |
+| 4 | fetch / push / PR available | **pass** — `git fetch` ok; a throwaway ref was pushed and deleted; PR create/update proven at §12 |
+| 5 | Administration unavailable | **pass** — `actions/permissions` **403**; `admin: false`; `current_user_can_bypass: "never"` |
+| 6 | human browser session as `AnastasiaAurelia` available | **human-attested** — not agent-verifiable |
+| 7 | human can open repository Settings and the live ruleset | **human-attested** — not agent-verifiable |
+| 8 | ruleset / CODEOWNERS / workflows unchanged | **pass** — 3 versions, latest `49567930`; `approvals=0 code_owner=false bypass=0`; CODEOWNERS and workflows byte-identical to `main` |
+| 9 | owner credential is still the GitHub CLI OAuth authorization | **pass** — `gho_` prefix, keyring-stored, scopes `gist, read:org, repo, workflow` (B2-E1) |
+| 10 | revocation consequence understood | **stated** — §13.2 |
+
+### 13.1 B2-F7 — after revocation, ruleset *history* becomes human-only
+
+Measured with the automation credential:
+
+| read | `DIANA-AGENT` |
+|---|---|
+| ruleset **current state** | **ok** |
+| ruleset **version history** (`/rulesets/{id}/history`) | **404 — admin only** |
+| CODEOWNERS, workflows, pull requests, collaborators | **ok** |
+
+**Consequences, recorded rather than discovered later:**
+
+- **Invariant checking survives.** The agent can still verify the values that matter — enforcement,
+  `bypass_actors`, and every `pull_request` parameter — because the *current* ruleset is readable.
+  Its view was compared against the owner's and matches exactly.
+- **Audit evidence does not.** After B2.4 the agent **cannot** read the ruleset version history, so
+  it cannot independently observe a control-plane change (B1-D20's detection) or retrieve the
+  rollback snapshot B1-D26 names. **Both become human-only reads.**
+
+This is **correct** as authority design — the thing being governed should not audit its own governor —
+but B1-D26 asserted the snapshot was retrievable without saying *by whom*. It is retrievable **by the
+human**, not by automation.
+
+> **B2-D5 — Because of B2-F7, the pre-B4 ruleset snapshot is captured here, in the repository, while
+> owner read access still exists.** It is a convenience copy; GitHub's history remains authoritative
+> and B1-D26 is unchanged.
+
+### 13.2 Pre-B4 ruleset snapshot — `diana-main-protection`, version `49567930`
+
+```json
+{
+  "id": 22188373,
+  "name": "diana-main-protection",
+  "target": "branch",
+  "source_type": "Repository",
+  "enforcement": "active",
+  "bypass_actors": [],
+  "conditions": { "ref_name": { "include": ["refs/heads/main"], "exclude": [] } },
+  "rules": [
+    { "type": "deletion" },
+    { "type": "non_fast_forward" },
+    { "type": "pull_request", "parameters": {
+        "required_approving_review_count": 0,
+        "require_code_owner_review": false,
+        "require_last_push_approval": false,
+        "dismiss_stale_reviews_on_push": true,
+        "required_review_thread_resolution": false,
+        "require_extra_approval_for_unattributed_changes": false,
+        "required_reviewers": [],
+        "allowed_merge_methods": ["merge", "squash", "rebase"] } },
+    { "type": "required_status_checks", "parameters": {
+        "strict_required_status_checks_policy": true,
+        "do_not_enforce_on_create": false,
+        "required_status_checks": [
+          { "context": "Diana Gate", "integration_id": 15368 },
+          { "context": "Diana Security Gate", "integration_id": 15368 } ] } }
+  ]
+}
+```
+
+**This is the state B4 changes and rollback restores.** Restoring it is a human control-plane action
+using the human credential only (B1-D26, rollback requirement 3); no automation credential can
+perform it, which §13.1 now makes structural rather than merely intended.
+
+### 13.3 Revocation consequence, stated before confirmation is requested
+
+The owner credential is a **GitHub CLI OAuth authorization**, not a PAT (B2-E1). Revoking it:
+
+- invalidates GitHub CLI for `AnastasiaAurelia` **everywhere that account uses `gh`** — every machine
+  and device, not only this one;
+- does **not** affect the browser session, repository ownership, admin rights, or the ability to
+  approve, merge, or administer anything through the web control plane;
+- is reversible by re-authorizing GitHub CLI from a browser, though doing so **on this OS user** would
+  re-import the owner credential into agent reach and void the custody precondition (B2-F2).
+
+`gh auth logout` is **local deletion and is not revocation** — it satisfies neither B1-D9 nor B1-D23.
+
+---
+
+## 14. Automation token renewal — operational requirement
+
+**Current expiry: 2026-10-20 09:14:30 UTC.**
+
+After B2.4 there is **no fallback credential**. When the automation token expires, automation loses
+GitHub access entirely until a human provisions a replacement.
+
+> **B2-D6 — That is availability loss, not authority escalation, and it must never be "fixed" by
+> broadening the token or by reintroducing the owner credential.** A repository that automation
+> cannot reach is behaving correctly; a repository automation reaches with the owner's identity is not.
+
+Minimum renewal procedure — **never automated**, because token creation is exactly the human-only act
+this track depends on:
+
+1. the human creates a replacement `DIANA-AGENT` token;
+2. the replacement is proven **before** the current one expires or is retired;
+3. scope stays **no broader than `public_repo`** unless a separately frozen decision justifies
+   expansion — B2-E3's history shows how easily an intended scope and a granted scope diverge;
+4. the human replaces `~/.config/diana/gh-token`;
+5. identity and scope are verified (`gh api user`, `X-Oauth-Scopes`);
+6. the superseded token is retired at GitHub — noting B2-F6, that retirement is a human attestation;
+7. **the `AnastasiaAurelia` credential is never introduced into the automation environment as a
+   shortcut.**
 
 ---
 
