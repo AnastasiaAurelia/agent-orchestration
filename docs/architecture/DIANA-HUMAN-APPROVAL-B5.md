@@ -1,9 +1,10 @@
 # Track B · Phase B5 — Adversarial Acceptance Under Enforcement
 
-> **STATUS: IN PROGRESS — HALTED AT A HUMAN CHECKPOINT.**
-> The enforcement-only acceptance items are **settled** (§3–§7). The items that require a human
-> approving review are **waiting on PR #61** (§8) and are **not** claimed.
-> **M5-D20 remains UNDISCHARGED** until they are.
+> **STATUS: IN PROGRESS — A TEST-PROCEDURE INCIDENT OCCURRED (§10).**
+> The enforcement-only items are settled (§3–§7). **B-AC-3 is settled with stronger evidence than
+> planned**, as a by-product of the incident (§10.3). The remaining lifecycle items — B-AC-4, 4a, 5,
+> 6, 6a and CASE 5 — are **not** claimed and must be re-measured on a replacement fixture.
+> **M5-D20 remains UNDISCHARGED.**
 
 Base: B4 (`8e75cd2`). B0, B1, B2, B3 and B4 are **not** edited.
 
@@ -172,3 +173,122 @@ and B4 §18.1 shows it agreeing with the automation-side reading to within 96 ms
 
 **M5-D20 is not discharged.** Eight acceptance items remain unmeasured, including the one that
 proves a human approval actually *works* rather than merely that its absence blocks.
+
+---
+
+## 10. Incident — PR #61 was accidentally merged
+
+### 10.1 What happened
+
+PR #61 was the disposable B5 acceptance fixture of §8, titled `DO NOT MERGE`. **It was merged by the
+human by accident.** Verified facts:
+
+| | |
+|---|---|
+| PR #61 author | **`DIANA-AGENT`** |
+| state at zero reviews | **`BLOCKED` / `REVIEW_REQUIRED`**, with required checks **`SUCCESS`** |
+| reviewer | **`AnastasiaAurelia`** |
+| review state | **`APPROVED`** at `2026-09-20T15:50:44Z` |
+| approved commit | **`c3d93030307cf20bd07c8b1171bbb6f9b2b00439`** |
+| merged by | `AnastasiaAurelia` |
+| merge commit | **`d21ee8fa2a54509220f0b5dee90957deb182e2d5`** (parents `af8740e`, `c3d9303`) |
+| content merged | `.gitignore` `+1`, `DIANA-HUMAN-APPROVAL-B5-FIXTURE.md` `+25` — **nothing else** |
+
+### 10.2 Classification — a test-procedure incident, not a control failure
+
+> **The approval control did exactly what it was configured to do, at every step.** The automation
+> authored the revision; the zero-review state was mechanically blocked *with checks green*; a human
+> CODEOWNER approved; the approved revision then became mergeable; a human merged it.
+>
+> **Nothing bypassed anything.** What failed was the *procedure* around the test — a fixture labelled
+> `DO NOT MERGE` was merged — not the mechanism under test. Recording it as a control failure would
+> be as wrong as recording it as a success.
+
+**What the incident does cost:** the fixture was consumed. B-AC-4, B-AC-4a and B-AC-5 all require
+pushing commits onto a pull request that carries a *standing* approval, and that pull request no
+longer exists. They must be re-measured on a replacement fixture, and **none of them is claimed
+here.**
+
+### 10.3 B-AC-3 — PASS, with stronger evidence than the plan called for
+
+The plan was to observe that an approval makes the PR *mergeable* and then close it unmerged. What
+was observed instead is the complete path:
+
+```
+  DIANA-AGENT authors c3d9303
+        -> checks green, zero reviews  ->  BLOCKED / REVIEW_REQUIRED
+        -> AnastasiaAurelia APPROVES c3d9303
+        -> the approved revision becomes mergeable
+        -> merged as d21ee8f
+```
+
+> **B-AC-3: PASS.** A human CODEOWNER approval does satisfy the requirement, and the merge path
+> genuinely opens when it is given and not before.
+>
+> The approval's `commit_id` is `c3d9303`, and `d21ee8f`'s second parent is `c3d9303`: **the revision
+> that was approved is exactly the revision that was merged.** That is a stronger binding than the
+> planned test would have produced — it was demonstrated end to end rather than inferred from a
+> `mergeStateStatus` reading.
+
+> **What this is NOT evidence for.** The accidental merge says nothing about **B-AC-4** (does a
+> diff-affecting push dismiss a standing approval?) or **B-AC-5** (does a fresh approval restore
+> eligibility?). Both concern what happens *after* an approval while the PR stays open, and this PR
+> did not stay open. Counting a merge as evidence for dismissal-on-push would be exactly the kind of
+> borrowed conclusion Track B exists to refuse.
+
+### 10.4 Remediation — a normal revert PR, subject to the same rule
+
+**PR #62** — *Revert accidental B5 acceptance fixture merge*, authored by `DIANA-AGENT`,
+branch `governance/revert-b5-accidental-merge`.
+
+`main` was **not** rewritten, **not** force-pushed, and the ruleset was **not** relaxed. The fix goes
+through the ordinary governed path:
+
+| | |
+|---|---|
+| method | `git revert -m 1 d21ee8f`, mainline parent 1 (`af8740e`) |
+| diff | `-26` lines across exactly 2 files: the fixture and its manifest line |
+| tree check | **byte-identical to `af8740e`**, verified by an empty `git diff` against it |
+| untouched | ruleset, CODEOWNERS, workflows, runtime, frozen specifications |
+| checks | `Diana Gate` **success**, `Diana Security Gate` **success** |
+| state | **`BLOCKED` / `REVIEW_REQUIRED`**, 0 reviews |
+
+> **The remediation is itself governed, and that is the point.** A revert PR authored by automation is
+> blocked at zero approvals exactly like any other — the incident did not create an exception, and
+> cleaning up after a mistake does not earn one. It awaits a human approval.
+
+### 10.5 Ruleset integrity across the incident
+
+Re-read after the merge and after opening the revert:
+
+```
+approvals=1  code_owner=true  last_push=true  dismiss=true
+updated_at = 2026-09-20T21:57:14.933+07:00      (unchanged since B4)
+CODEOWNERS = * @AnastasiaAurelia                 (unchanged)
+```
+
+**No governance state moved.** The incident touched repository *content*, never repository
+*authority*.
+
+### 10.6 Procedure change for the replacement fixture
+
+The replacement B5 pull request must treat **merge as prohibited**, not merely discouraged: `DO NOT
+MERGE — B5 TEST FIXTURE` in the title, and a body that states the prohibition before anything else.
+The lifecycle to measure on it is: human approval → **do not merge** → `DIANA-AGENT` pushes a
+diff-affecting commit → approval invalidated → human approves again → eligible again → **close
+unmerged**.
+
+It is not created until the revert cleanup is complete.
+
+---
+
+## 11. Disposition update
+
+| id | verdict |
+|---|---|
+| B-AC-1, 2, 7, 9, 10, 11, 12, 13 | **PASS** — §3–§7, B3 §9/§11, B4 §18 |
+| **B-AC-3** | **PASS** — §10.3, end-to-end |
+| B-AC-14 | **PASS** — both halves (§3, §4) |
+| **B-AC-4, 4a, 5, 6, 6a, 8, CASE 5** | **PENDING** — require the replacement fixture (§10.6) |
+
+**M5-D20 remains UNDISCHARGED.**
