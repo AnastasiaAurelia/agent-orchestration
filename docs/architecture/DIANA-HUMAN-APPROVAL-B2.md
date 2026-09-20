@@ -1,9 +1,9 @@
 # Track B · Phase B2 — Automation Identity and Credential Provisioning
 
-> **STATUS: B2 IS INCOMPLETE.** This document records **B2.0 only** — the pre-mutation inventory.
-> Work is **halted at B2.1**, which requires a human to create a credential in a browser UI.
-> **No credential has been created, changed, revoked or removed. No identity has been repointed.**
-> B2.2, B2.3, B2.4 and B2.5 have **not** run. M5-D20 remains undischarged.
+> **STATUS: B2 IS INCOMPLETE.** B2.0–B2.3 are **complete**. Work is **halted before B2.4**, which
+> retires the human credential and requires explicit human confirmation.
+> **No credential has been revoked or removed. The `AnastasiaAurelia` GitHub CLI OAuth
+> authorization is untouched — not logged out, not revoked.** M5-D20 remains undischarged.
 
 Base: B1 (`9b09e8f`), branch `governance/mechanical-human-approval`.
 B0 and B1 are **not** edited. Findings that correct them are recorded here, in the B0→B1 pattern.
@@ -150,24 +150,26 @@ Administration authority*, and that is achieved here more robustly than by scope
 | step | state |
 |---|---|
 | **B2.0** pre-mutation inventory | **COMPLETE** — §1 |
-| **B2.1** provision `DIANA-AGENT` credential | **HALTED — requires human UI action.** Nothing created. |
-| **B2.2** verify least privilege | not started |
-| **B2.3** repoint automation identity | not started |
-| **B2.4** retire the human credential | not started — requires explicit human confirmation |
-| **B2.5** real `DIANA-AGENT` PR proof | not started |
+| **B2.1** provision `DIANA-AGENT` credential | **COMPLETE** (human-performed) — §7 |
+| **B2.2** verify least privilege | **COMPLETE** — §8, with one deviation (§7.2) |
+| **B2.3** repoint automation identity | **COMPLETE** — §9 |
+| **B2.4** retire the human credential | **HALTED — requires explicit human confirmation.** Nothing revoked. |
+| **B2.5** real `DIANA-AGENT` PR proof | **substantially complete** — PR #53, §10; closed unmerged |
 
 ## 4. Custody evidence so far
 
 | level | status |
 |---|---|
-| 1. **Inventory** | **done** — §1.3; one credential found, its location and identity recorded |
-| 2. **Positive identity** | **not achieved** — automation still authenticates as `AnastasiaAurelia` |
-| 3. **Behavioural** | **not achieved** — no `DIANA-AGENT`-authored PR yet |
-| 4. **Revocation** | **not achieved** — nothing revoked |
+| 1. **Inventory** | **done** — §1.3; one owner credential found, its location and identity recorded |
+| 2. **Positive identity** | **done** — `gh api user` under the automation credential returns `DIANA-AGENT` (§8.1) |
+| 3. **Behavioural** | **done** — PR #53 is authored by `DIANA-AGENT`, its commit is attributed by GitHub to `DIANA-AGENT`, and the `PushEvent` actor is `DIANA-AGENT` (§10) |
+| 4. **Revocation** | **NOT achieved** — nothing revoked; this is B2.4 and is deliberately outstanding |
 
-**No custody assertion is made by this document.** B1-D8's assertion may be stated only after
-levels 2–4 hold. At present the automation environment **does** contain a credential authenticating
-as `AnastasiaAurelia`, which is the exposure B2 exists to remove.
+**No custody assertion is made by this document.** B1-D8's assertion requires level 4.
+The automation environment **still contains** a working credential authenticating as
+`AnastasiaAurelia` — in the `gh` keyring, and it remains the default for any command that does not
+set `GH_TOKEN`. **That is the exposure B2 exists to remove, and it is still present.** What B2.0–B2.3
+established is that a sufficient replacement exists and works; not that the owner credential is gone.
 
 ## 5. Recovery route, established before any mutation
 
@@ -197,6 +199,234 @@ Required by the critical safety rule — recorded **before** anything changes:
    beyond this machine.
 4. Absence of a credential in the surfaces of §1.3 is **not** proof of absence anywhere.
 
-## 7. Readiness for B3
+## 7. B2.1 — the automation credential as actually provisioned
 
-**Not ready.** B3 cannot begin until B2.1–B2.5 complete. B2 is blocked on one human action.
+Created by the human in a browser UI; the agent never saw the secret and never requested it. Stored
+at `~/.config/diana/gh-token`, mode `600`, and used **only** as
+`GH_TOKEN="$(<~/.config/diana/gh-token)"` prefixed to individual commands. It was never printed,
+echoed, logged, copied, or written into any file, command history entry or document.
+
+| property | measured value |
+|---|---|
+| identity | **`DIANA-AGENT`** (id 324038564, User) |
+| type | **classic PAT** — confirmed by GitHub's own rejection message in §8.3 |
+| expiry | **2026-10-03 08:27:23 UTC** (13 days) |
+| repository role | `write` — `{admin: false, maintain: false, push: true, triage: true, pull: true}` |
+| transport | `GH_TOKEN` environment variable, per command |
+
+### 7.1 Why `GH_TOKEN` rather than `gh auth login --with-token`
+
+The human established, and it is recorded here as a constraint rather than a preference, that
+`gh auth login --with-token` **rejects a minimally-scoped token** — the current GitHub CLI requires
+`repo`, `read:org` and `gist` for that path. A least-privilege credential therefore **cannot** be
+stored in `gh`'s own credential store; `GH_TOKEN` is the only transport that accepts it.
+
+Two consequences were then verified empirically rather than assumed, using a **dummy token** so that
+no real credential was exposed:
+
+| question | result |
+|---|---|
+| Does `gh auth git-credential` honour `GH_TOKEN`? | **Yes** — it returned the dummy verbatim with `username=x-access-token`. `git push` authenticates as the environment token. |
+| Does `gh api` honour `GH_TOKEN` over the keyring? | **Yes** — the dummy was rejected with `Bad credentials` rather than silently falling back to the working keyring token. |
+
+> **B2-D3 — There is no silent fallback.** The second result matters more than the first: when the
+> automation credential is present it is *used*, and a broken or expired automation token fails
+> **closed** rather than quietly escalating to the owner's credential. This was measured, not assumed.
+
+> **B2-F3 — `GH_TOKEN` is per-command, not ambient.** It is not exported in any shell profile, the
+> systemd user environment, or the agent process's environment — verified across the whole process
+> ancestry. **Any command that omits the prefix still runs as `AnastasiaAurelia`.** Until B2.4, the
+> owner credential is the *default* and the automation credential is the exception. That is the
+> correct order — never retire a credential before its replacement is proven — but it must not be
+> mistaken for custody.
+
+### 7.2 B2-E3 — the granted scopes are **not** what B2-D2 froze
+
+B2-D2 required `public_repo` as the only scope. Measured:
+
+```
+X-Oauth-Scopes: gist, read:org, repo
+```
+
+The token carries **full `repo`**, plus `gist` and `read:org`. `public_repo` was not granted.
+This is recorded as a deviation rather than accepted silently.
+
+**Measured blast radius — currently nil beyond the intended target:**
+
+| | |
+|---|---|
+| repositories reachable | **exactly one**: `AnastasiaAurelia/agent-orchestration` (public, `write`) |
+| organizations | none |
+| gists owned | none |
+
+So `repo` and `public_repo` are **presently equivalent in effect** for this account: there is no
+private repository and no organization for the wider scope to reach. The deviation is **latent, not
+actual** — if `DIANA-AGENT` is ever added to a private repository, this token reaches it
+automatically, where a `public_repo` token would not.
+
+**What the deviation does *not* undermine:**
+
+- **Administration remains impossible** (B2-D1): `admin: false` is a property of the *account's role*,
+  and no PAT scope can raise it. GitHub confirms this directly — the ruleset reports
+  `current_user_can_bypass: "never"` **for this token**.
+- **`workflow` is still absent**, which is the exclusion B1-D19 actually cares about, and §8.3 proves
+  it behaviourally.
+
+> **B2-D4 — The deviation is reported, not absorbed.** Whether to regenerate the token with
+> `public_repo` only is a human decision, and it should be made **before B2.4**: once the owner
+> credential is revoked, regenerating the automation credential is harder. The recommendation is to
+> regenerate — the safety margin costs one minute — but the current token is *sufficient* and
+> *materially less privileged than the credential it replaces*.
+
+---
+
+## 8. B2.2 — least privilege, verified behaviourally
+
+### 8.1 Positive identity
+
+```
+$ GH_TOKEN=… gh api user          ->  {"login":"DIANA-AGENT","id":324038564,"type":"User"}
+$ gh api user   (no GH_TOKEN)     ->  AnastasiaAurelia        # still the default; see B2-F3
+```
+
+### 8.2 CAN / CANNOT
+
+Only **read-only** probes were used for the denial tests. No administrative mutation was attempted,
+per the instruction not to test destructive administration.
+
+| operation | result |
+|---|---|
+| **CAN** read repository metadata | 200 |
+| **CAN** list pull requests | 200 |
+| **CAN** read check runs / commit status | 200 |
+| **CAN** read reviews and requested reviewers | 200 |
+| **CAN** read file contents | 200 |
+| **CAN** fetch, and push an ordinary feature branch | §9 |
+| **CAN** create a pull request and update it (body and title) | §10 |
+| **CANNOT** `GET actions/permissions` | **403** |
+| **CANNOT** `GET hooks` | **404** + *"needs the `admin:repo_hook` scope"* |
+| **CANNOT** `GET keys` (deploy keys) | **404** |
+| **CANNOT** modify rulesets | **structural** — `admin: false`; ruleset write requires admin; GitHub reports `current_user_can_bypass: "never"` for this token |
+
+**Two probes were inconclusive and are reported as such rather than counted as passes:**
+
+- `GET actions/secrets` returned **200 with `{"total_count": 0, "secrets": []}`**. The repository
+  holds **no secrets**, so this is not a valid denial test — there is nothing to be denied. It is
+  *not* evidence that the token can read secrets, and *not* evidence that it cannot.
+- `GET branches/main/protection` returned **404 `Branch not protected`** — the same response the
+  owner receives, because classic protection is absent. It measures the repository, not the token.
+- `GET rulesets/{id}` returned **200**: ruleset *reads* are available to this token. Reading is not
+  mutating, and the same response reports that it cannot bypass.
+
+### 8.3 The exclusion that matters, proven behaviourally
+
+A push containing a one-line edit to `.github/workflows/diana-gate.yml` was attempted with the
+automation credential:
+
+```
+! [remote rejected] HEAD -> b2-scope-probe
+  (refusing to allow a Personal Access Token to create or update workflow
+   `.github/workflows/diana-gate.yml` without `workflow` scope)
+```
+
+The branch **did not come into existence** (`404 Branch not found`), and the local file was restored.
+This establishes three things at once: the credential is a **classic PAT**; **`workflow` scope is
+genuinely absent**, not merely unlisted; and **B1-D19 holds behaviourally**. The credential it
+replaces *does* carry `workflow` scope, so this is a real reduction in authority.
+
+---
+
+## 9. B2.3 — automation git identity
+
+```
+repo-local   user.name  = DIANA-AGENT
+repo-local   user.email = 324038564+DIANA-AGENT@users.noreply.github.com
+global       unchanged  = Anastasia <aurelanas@gmail.com>     # the human's own default
+```
+
+Set **repo-locally on purpose.** The global identity belongs to the human and is used for their other
+work; overwriting it would be a change B2 was not asked to make. The consequence is recorded honestly:
+**this separation is scoped to this repository only.**
+
+The address is **empirical, not invented** (as B2.3 requires): it is the exact address GitHub already
+attributed to `DIANA-AGENT` on the PR #39 commits during the 2026-09-08/09 era, and §10 re-confirms
+GitHub still resolves it to `DIANA-AGENT` today.
+
+**Before and after, on the same branch:**
+
+| commit | git author | GitHub attributes to |
+|---|---|---|
+| `39c4f4e` (B2.0, before) | `Anastasia <aurelanas@gmail.com>` | **`anastashiax`** — a *human collaborator* |
+| `989e9d3` (proof, after) | `DIANA-AGENT <324038564+…>` | **`DIANA-AGENT`** |
+
+This is B1-D4's concern demonstrated rather than argued: changing only the API credential would have
+left every commit attributed to a human.
+
+---
+
+## 10. B2.5 (partial) — the proof pull request
+
+**PR #53** — `[B2 PROOF — DO NOT MERGE] automation identity is DIANA-AGENT`. Documentation-only;
+**closed unmerged**; proof branch deleted from the remote. The PR record is retained as evidence.
+
+| property | value, as reported by GitHub |
+|---|---|
+| author | **`DIANA-AGENT`** |
+| `author_association` | **`COLLABORATOR`** — not `OWNER` |
+| commit `989e9d3` author / committer | **`DIANA-AGENT` / `DIANA-AGENT`** |
+| `PushEvent` actor | **`DIANA-AGENT`** — the authenticated pusher, not git metadata |
+| update its own PR (title, body) | **yes**, twice |
+| Diana Gate | **success** |
+| Diana Security Gate | **success** |
+| auto-requested reviewer | **`AnastasiaAurelia`** |
+
+### 10.1 Two findings worth keeping
+
+> **B2-F4 — GitHub auto-requested `AnastasiaAurelia` as reviewer on a `DIANA-AGENT` PR, even with
+> `require_code_owner_review: false`.** CODEOWNERS routing is *live today*; only the **requirement**
+> is switched off. This corroborates B1 §7: when automation authors, the code owner is genuinely
+> requested — the mechanism B4 turns on is already wired, it simply does not block.
+
+> **B2-F5 — The zero-approval merge path was directly observed, and deliberately not used.**
+> With both required checks green, GitHub reported:
+>
+> ```
+> mergeable: MERGEABLE   mergeStateStatus: CLEAN   reviewDecision: null   reviews: 0
+> ```
+>
+> A `DIANA-AGENT`-authored pull request was **mergeable into `main` with zero human approvals.**
+> That is precisely the gap M5-D20 names and B4 closes. It is **recorded as evidence, not exploited**:
+> the PR was closed unmerged. This is the live negative case for **B-AC-1**, captured before the fix.
+
+### 10.2 A process note, recorded because it is evidence about the gate
+
+The first two evidence blocks submitted with PR #53 were **malformed by the agent**, and Diana Gate
+**failed closed** both times — first `malformed input: input fields or version are invalid` (wrong
+delimiters: the block requires `<!-- DIANA:EVIDENCE … DIANA:EVIDENCE -->`, not a fenced code block),
+then `dod must be an object` (`dod` and `verification` are `{present, evidence[]}` objects and
+`preflight` is an array of `{id, applicable, severity, result}`). Only a correctly-formed block
+passed.
+
+That is the **correct** behaviour and is recorded as a positive result: the gate rejected
+agent-produced input it could not validate rather than interpreting it charitably. It also shows the
+agent did not discover the schema by reading it first — the failures did.
+
+---
+
+## 11. Readiness for B3
+
+**Not ready — B2.4 is outstanding, and it is the step that actually establishes custody.**
+
+Everything B2.4 depends on is now proven: the replacement credential exists, authenticates as
+`DIANA-AGENT`, performs every operation the automation needs, is provably unable to administer the
+repository or touch workflows, and produces correctly attributed commits and pull requests. What has
+**not** happened is the removal of the owner credential from agent reach — so today the agent can
+still act as `AnastasiaAurelia` by simply not setting `GH_TOKEN` (B2-F3).
+
+Two decisions belong to the human before B2.4:
+
+1. **Regenerate the automation token with `public_repo` only** (B2-E3 / B2-D4)? Recommended, and
+   easier now than after revocation.
+2. **How to retire the owner credential** (B2-E1). It is a GitHub CLI OAuth authorization, not a PAT;
+   revoking it disables `gh` for that account **everywhere**, not only on this machine. `gh auth
+   logout` is local deletion and does **not** satisfy B1-D9/D23.
