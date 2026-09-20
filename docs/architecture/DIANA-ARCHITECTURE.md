@@ -217,9 +217,21 @@ states that "merge stays blocked by the independent required human/code-owner re
 `require_last_push_approval: false`. `CODEOWNERS` exists but has no merge-blocking effect without
 code-owner review enabled.
 
-> **M5-D20 remains undischarged.** `REQUIRE_HUMAN` is an advisory verdict, not a mechanical merge
-> condition. Before any future milestone grants autonomous merge authority, it needs an independently
-> verifiable human-approval mechanism that automation cannot self-satisfy.
+> **M5-D20 is DISCHARGED** (Track B, phases B0–B5). The values above describe the pre-Track-B
+> baseline and are retained for context. The live `diana-main-protection` ruleset now carries
+> `required_approving_review_count: 1`, `require_code_owner_review: true`,
+> `require_last_push_approval: true` and `dismiss_stale_reviews_on_push: true`.
+>
+> Measured on live pull requests, not inferred from configuration: an automation-authored pull
+> request with zero approvals is **blocked with required checks green**; automation **cannot**
+> approve its own pull request (GitHub returns `422` on both REST and GraphQL); a human code-owner
+> approval opens the merge path for **that exact revision**; and a diff-affecting push **dismisses**
+> the approval.
+>
+> **The discharge is conditional.** It rests on credential separation — the automation runtime must
+> be unable to authenticate as the human owner — which **no GitHub rule enforces or detects**, and
+> which failed twice during Track B before being held by provider-side credential revocation. See
+> [`DIANA-HUMAN-APPROVAL-B5.md`](DIANA-HUMAN-APPROVAL-B5.md) §13.3.
 
 **Two approvals that never convert into one another:**
 
@@ -228,9 +240,13 @@ code-owner review enabled.
 - **Category B — repository/deployment approval.** "This exact revision may merge or deploy."
 
 No accumulation of A becomes B. M7 adds a human approval step for A, which is exactly what could be
-misread as discharging M5-D20. It does not.
+misread as discharging M5-D20 — it did not, and Track B discharged B separately. The separation is
+architectural: the M7 product surface has **no code path to GitHub at all**, so a Category A approval
+cannot create a review or change merge eligibility.
 
-See [`DIANA-HUMAN-APPROVAL-ROADMAP.md`](DIANA-HUMAN-APPROVAL-ROADMAP.md) — **future work**.
+See [`DIANA-HUMAN-APPROVAL-B5.md`](DIANA-HUMAN-APPROVAL-B5.md) for the discharge and its standing
+conditions; [`DIANA-HUMAN-APPROVAL-ROADMAP.md`](DIANA-HUMAN-APPROVAL-ROADMAP.md) is the original
+plan, retained as history.
 
 ---
 
@@ -343,7 +359,8 @@ See [`DIANA-POST-M7-ROADMAP.md`](DIANA-POST-M7-ROADMAP.md).
 | Reviewer is read-only by enforcement | **Yes** |
 | Backend switch creates authority | **No** |
 | Security findings are certified | **No** — 75/75 UNPROVEN |
-| Human merge approval is mechanically enforced | **No** — M5-D20 undischarged |
+| Human merge approval is mechanically enforced | **Yes** — M5-D20 discharged (Track B); conditional on credential separation |
+| Deployment approval is enforced | **No** — there is no deployment; merge approval is not deploy approval |
 | Arbitrary workflows can be added by keyword | **No** — a class needs its own certification |
 | Runs on macOS/Windows | **Unproven** — `/proc` and `flock` are Linux assumptions |
 | The lease contains a hostile process | **No** — cooperative exclusion only |

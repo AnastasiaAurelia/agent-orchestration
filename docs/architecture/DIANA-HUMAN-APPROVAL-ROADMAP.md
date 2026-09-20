@@ -1,7 +1,18 @@
-# Track B — Mechanical Human Approval (M5-D20) (ROADMAP — NOT IMPLEMENTED)
+# Track B — Mechanical Human Approval (M5-D20) (ROADMAP — SUPERSEDED)
+
+> **SUPERSEDED. Track B is complete and M5-D20 is DISCHARGED.**
+> This document is the **original plan**, retained unedited below as the record of what was intended
+> before any measurement. Several of its assumptions were later falsified by evidence — notably the
+> single-owner premise in "An honest constraint to confront" and the stop condition at the end.
+>
+> For what was actually measured and concluded, read the phase documents:
+> [B0](DIANA-HUMAN-APPROVAL-B0.md) baseline · [B1](DIANA-HUMAN-APPROVAL-B1.md) frozen semantics ·
+> [B2](DIANA-HUMAN-APPROVAL-B2.md) credential custody · [B3](DIANA-HUMAN-APPROVAL-B3.md) adversarial
+> baseline · [B4](DIANA-HUMAN-APPROVAL-B4.md) enforcement · [B5](DIANA-HUMAN-APPROVAL-B5.md)
+> acceptance and the discharge determination.
 
 Status: **planning only.** No repository rule, ruleset, branch protection or environment is changed by
-this document. **M5-D20 remains undischarged.**
+this document. *(As written. Superseded — see the notice above.)*
 
 ---
 

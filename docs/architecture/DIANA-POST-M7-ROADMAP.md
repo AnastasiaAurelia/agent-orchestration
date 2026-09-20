@@ -10,7 +10,7 @@ dependencies do not support.
 | | Track | Document |
 |---|---|---|
 | **A** | Security Evidence Certification | [`DIANA-CERTIFICATION-ROADMAP.md`](DIANA-CERTIFICATION-ROADMAP.md) |
-| **B** | Mechanical Human Approval (M5-D20) | [`DIANA-HUMAN-APPROVAL-ROADMAP.md`](DIANA-HUMAN-APPROVAL-ROADMAP.md) |
+| **B** | Mechanical Human Approval (M5-D20) — **COMPLETE, M5-D20 discharged** | [`DIANA-HUMAN-APPROVAL-B5.md`](DIANA-HUMAN-APPROVAL-B5.md) |
 | **C** | Certified Workflow Expansion | [`DIANA-WORKFLOW-ROADMAP.md`](DIANA-WORKFLOW-ROADMAP.md) |
 | **D** | Distribution & Productization | [`DIANA-DISTRIBUTION-ROADMAP.md`](DIANA-DISTRIBUTION-ROADMAP.md) |
 
@@ -54,6 +54,9 @@ Derived from what each track actually needs, not from a preferred order.
   verifies deterministically without any certified control.
 - **B → merge/deploy authority (hard).** No milestone may grant autonomous merge or deploy authority
   until B closes. This is the only hard gate in the diagram, and it is carried from M5-D20.
+  **B has since closed for *merge*** (M5-D20 discharged; see
+  [`DIANA-HUMAN-APPROVAL-B5.md`](DIANA-HUMAN-APPROVAL-B5.md)). The gate still stands for **deploy**,
+  which Track B did not address: there is no deployment, and merge approval is not deploy approval.
 - **D → C (soft, and often overlooked).** Every new class multiplies the surface a user must install,
   configure and diagnose. Expanding classes before distribution is stable widens something that is
   already hard to deliver.
@@ -94,6 +97,12 @@ authority for security actors.
 ---
 
 ### Track B — Mechanical Human Approval (M5-D20)
+
+> **SUPERSEDED — Track B is complete and M5-D20 is DISCHARGED.** The plan below is retained unedited
+> as the record of what was intended before measurement. Two of its premises were falsified by
+> evidence: the repository is **not** single-owner (B0), and the stop condition never triggered —
+> the mechanism binds, and was proven to bind on live pull requests (B5 §13).
+> Outcome: [`DIANA-HUMAN-APPROVAL-B5.md`](DIANA-HUMAN-APPROVAL-B5.md).
 
 **Problem.** `REQUIRE_HUMAN` is advisory. Measured ruleset: `required_approving_review_count: 0`,
 `require_code_owner_review: false`, `require_last_push_approval: false`. The gate's `REQUIRE_HUMAN`
