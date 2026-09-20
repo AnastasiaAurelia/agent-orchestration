@@ -34,6 +34,7 @@ cleanup() {
   [ -n "$PR" ] && gh pr close "$PR" --repo "$REPO" \
       --comment "Closing unmerged: Track B harness artifact." >/dev/null 2>&1
   gh api -X DELETE "repos/$REPO/git/refs/heads/$BRANCH" >/dev/null 2>&1
+  git -C "$ROOT" rm -f --quiet --ignore-unmatch .b3-harness-artifact.md >/dev/null 2>&1
   git -C "$ROOT" checkout -q "$START_REF" 2>/dev/null
   git -C "$ROOT" branch -D "$BRANCH" >/dev/null 2>&1
 }
@@ -55,19 +56,52 @@ scopes="$(gh api -i user 2>/dev/null | tr -d '\r' | sed -n 's/^[Xx]-[Oo][Aa]uth-
 [ "$scopes" = "public_repo" ] || { echo "ABORT  scopes are '$scopes', expected exactly public_repo"; exit 2; }
 ok "credential scope is public_repo only"
 
+# Broker variables are a RISK SIGNAL, not the property. Their presence used to
+# abort, which was correct while custody rested on environment isolation. Once
+# the owner authorization is revoked at the provider, the channel can still
+# exist while the credential behind it is worthless -- so aborting on presence
+# alone would block a repository that is in fact secure. Test the property.
+brokers=""
 for v in GIT_ASKPASS SSH_ASKPASS VSCODE_GIT_IPC_HANDLE VSCODE_GIT_ASKPASS_NODE \
-         VSCODE_GIT_ASKPASS_MAIN VSCODE_GIT_ASKPASS_EXTRA_ARGS GITHUB_TOKEN; do
-  [ -z "${!v:-}" ] || { echo "ABORT  credential-broker variable $v is present"; exit 2; }
+         VSCODE_GIT_ASKPASS_MAIN VSCODE_GIT_ASKPASS_EXTRA_ARGS; do
+  [ -z "${!v:-}" ] || brokers="$brokers $v"
 done
-ok "no credential-broker variables present"
-
-# The decisive one: with the automation credential removed, nothing may work.
-if printf 'protocol=https\nhost=github.com\n' | \
-     env -u GH_TOKEN GIT_TERMINAL_PROMPT=0 timeout 20 git credential fill 2>/dev/null | grep -q '^password='; then
-  echo "ABORT  an owner credential is reachable via the git credential helper"; exit 2
+[ -z "${GITHUB_TOKEN:-}" ] || { echo "ABORT  GITHUB_TOKEN is set; refusing to guess which identity it holds"; exit 2; }
+if [ -n "$brokers" ]; then
+  note "NOTE" "credential-broker variables present:$brokers" "usability is tested below"
+else
+  ok "no credential-broker variables present"
 fi
+
+# THE PROPERTY: with the automation credential removed, no owner credential may
+# be USABLE. A brokered string that GitHub rejects is not authority.
+brokered="$(printf 'protocol=https\nhost=github.com\n' | \
+            env -u GH_TOKEN GIT_TERMINAL_PROMPT=0 timeout 25 git credential fill 2>/dev/null \
+            | sed -n 's/^password=//p')"
+if [ -n "$brokered" ]; then
+  if GH_TOKEN="$brokered" gh api user >/dev/null 2>&1; then
+    unset brokered
+    echo "ABORT  a brokered credential AUTHENTICATES -- custody precondition is void"; exit 2
+  fi
+  unset brokered
+  ok "a credential is brokered but GitHub rejects it (provider-invalidated)"
+else
+  ok "no credential is brokered on the git transport"
+fi
+
 env -u GH_TOKEN gh api user >/dev/null 2>&1 && { echo "ABORT  an owner credential authenticates the API"; exit 2; }
-ok "no owner credential reachable on either transport"
+ok "no owner credential authenticates the API"
+
+# Behavioural backstop: an authenticated WRITE must be impossible without the
+# automation credential, whatever any helper hands out.
+probe_ref="b3-custody-probe-$$"
+env -u GH_TOKEN GIT_TERMINAL_PROMPT=0 timeout 45 \
+    git -C "$ROOT" push origin "origin/main:refs/heads/$probe_ref" >/dev/null 2>&1
+if gh api "repos/$REPO/branches/$probe_ref" >/dev/null 2>&1; then
+  gh api -X DELETE "repos/$REPO/git/refs/heads/$probe_ref" >/dev/null 2>&1
+  echo "ABORT  an unauthenticated push SUCCEEDED -- custody precondition is void"; exit 2
+fi
+ok "an authenticated push is impossible without the automation credential"
 
 # --------------------------------------------------------------------- baseline
 echo; echo "== live ruleset =="
@@ -108,8 +142,20 @@ gh api -X PUT "repos/$REPO/rulesets/$RULESET_ID" -f name="$(gh api "repos/$REPO/
 
 # ------------------------------------------------------------- disposable PR
 echo; echo "== disposable pull request =="
+# A dirty tree is fatal, not a warning. The detach below must succeed: if it
+# silently fails -- e.g. a modified file that does not exist on origin/main --
+# every command after it runs on the CALLING branch, and the artifact commit
+# lands on real work. Observed once; never again.
+if [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
+  echo "ABORT  working tree is not clean; refusing to run"; exit 2
+fi
 git -C "$ROOT" fetch -q origin main
-git -C "$ROOT" checkout -q --detach origin/main
+if ! git -C "$ROOT" checkout -q --detach origin/main; then
+  echo "ABORT  could not detach onto origin/main"; exit 2
+fi
+if [ -n "$(git -C "$ROOT" symbolic-ref -q HEAD || true)" ]; then
+  echo "ABORT  HEAD is still attached to a branch after --detach"; exit 2
+fi
 printf '# Track B harness artifact\n\nDisposable. Never merged. Deleted by the harness.\n' \
   > "$ROOT/.b3-harness-artifact.md"
 git -C "$ROOT" add -f .b3-harness-artifact.md

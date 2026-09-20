@@ -1,16 +1,15 @@
 # Track B · Phase B4 — Mechanical Human Approval Enforcement
 
-> **STATUS: ENFORCEMENT IS ENABLED. THE CUSTODY PRECONDITION HAS SINCE FAILED.**
+> **STATUS: ENFORCEMENT IS ENABLED. CUSTODY FAILED, THEN WAS RESTORED BY PROVIDER-SIDE REVOCATION.**
 >
 > The human applied exactly the three intended fields and nothing else (§8). The mechanism is
 > configured.
 >
-> **But the B2-F8 exposure recurred before post-change verification (§10):** the agent was relaunched
-> inside VS Code's environment, and a credential belonging to `AnastasiaAurelia` is once again
-> reachable on the git transport. **Track B's custody precondition does not hold as of this writing.**
+> The B2-F8 exposure recurred before post-change verification (§10) and was then **closed at the
+> provider** rather than by environment isolation (§16). Custody is re-established and re-falsified.
 >
-> **M5-D20 remains UNDISCHARGED**, and **B5 must not begin** until custody is restored and
-> re-falsified.
+> **B4's evidence remains CONFIGURATION ENABLED, not SECURITY PROPERTY PROVEN.**
+> **M5-D20 remains UNDISCHARGED** until B5.
 
 Base: B3 (`982f081`). B0, B1, B2 and B3 are **not** edited.
 
@@ -359,6 +358,108 @@ failed enforcement change. The recorded reason must say which occurred.
 ## 15. Statement of status
 
 **The mechanism is enabled. The mechanism is unproven. The custody precondition it depends on is
-currently failed.**
+restored and re-falsified (§16).**
 
 **M5-D20 remains UNDISCHARGED.**
+
+---
+
+## 16. B4-F2 — custody restored, this time by revocation rather than isolation
+
+The human revoked the **Visual Studio Code** GitHub authorization for `AnastasiaAurelia` at the
+provider. The confirmation was **not** taken on trust; the falsification was re-run in the live agent
+process.
+
+### 16.1 The result is more interesting than a clean pass
+
+**The broker channel still exists.** `GIT_ASKPASS`, `VSCODE_GIT_IPC_HANDLE`,
+`VSCODE_GIT_ASKPASS_NODE` and `VSCODE_GIT_ASKPASS_MAIN` are all still present in the agent process,
+and `git credential fill` **still returns a credential** for `username=149037636` — the owner's user
+id.
+
+**But the credential is dead:**
+
+| probe | result |
+|---|---|
+| `git push` without `GH_TOKEN` | **`remote: Invalid username or token`** — authentication failed, **no branch created** |
+| the brokered credential used against the API | **`401 Bad credentials`** |
+| `gh api user` without `GH_TOKEN` | not authenticated (`gh` store is `{}`) |
+| `~/.git-credentials`, `~/.netrc`, `~/.config/hub` | absent |
+| credential helpers configured | only `!gh auth git-credential`, and `gh` is logged out |
+
+> **B4-D2 — "No usable owner credential" is the property; "no credential returned" is only a proxy,
+> and the two have now come apart.** A brokered string that GitHub rejects is not authority. The
+> falsification therefore tests **usability**, empirically, rather than presence.
+
+### 16.2 Why this is stronger than the B2 remediation
+
+B2 closed this channel by **environment isolation** — the agent was relaunched without the broker
+variables — and B2-D7 recorded the weakness plainly: custody then depended on the launcher, and any
+relaunch inheriting VS Code's environment silently restored the exposure. **§10 is that prediction
+coming true within one phase.**
+
+Revocation removes that dependency:
+
+| | isolation (B2) | **revocation (B4)** |
+|---|---|---|
+| credential status | valid, merely unreachable | **invalid everywhere** |
+| survives an agent relaunch? | **no** — exposure returns silently | **yes** |
+| depends on the launch path? | **yes** | no |
+| detectable if it regresses? | only by re-running the falsification | the credential must be re-authorized, a deliberate human act |
+
+**B4-D1 stands, and is now satisfied by its second branch:** the VS Code authorization is revoked at
+the provider, so the credential is worthless rather than merely unreachable. Per-phase re-falsification
+remains mandatory regardless — it is what caught §10.
+
+### 16.3 Custody assertion at the B4 close
+
+> *At this observation point, within the inspected automation environment, the only working GitHub
+> credential is the `DIANA-AGENT` classic PAT scoped `public_repo`, which cannot administer the
+> repository (`admin: false`, `actions/permissions` 403, ruleset `PUT` refused,
+> `current_user_can_bypass: "never"`). Both previously observed `AnastasiaAurelia` credentials — the
+> GitHub CLI OAuth token and the VS Code-brokered token — are provider-invalidated and were each
+> empirically observed to be rejected. No authenticated read or write is possible without the
+> automation credential.*
+
+**Still not claimed:** global absence; that no copy exists elsewhere; protection against a future
+re-authorization; permanence. Re-authorizing VS Code or `gh` as the owner on this OS user would void
+the precondition again, and **nothing in this repository can detect that** — which is why every phase
+re-falsifies.
+
+---
+
+## 17. B4-F3 — two harness defects found while re-validating, and fixed
+
+The B3 harness is the instrument B5 depends on. Re-running its preconditions under the new
+(revoked, not isolated) custody model exposed two defects. Both are fixed in
+`governance/test-human-approval-b3.sh`; the B3 document is **not** edited.
+
+**Defect 1 — it aborted on a proxy rather than the property.** The harness treated the *presence* of
+any broker variable, and *any* password returned by `git credential fill`, as proof that an owner
+credential was reachable. Under isolation that was right. Under revocation it is **wrong in the
+blocking direction**: it aborted with `credential-broker variable GIT_ASKPASS is present` on a
+repository whose owner credentials are all dead, and would have blocked B5 indefinitely. Fixed to
+note broker variables as a risk signal, then **test whether a brokered credential actually
+authenticates**, aborting only if it does — plus a behavioural backstop that an unauthenticated push
+must fail.
+
+**Defect 2 — it could commit to the caller's branch.** The harness ran
+`git checkout --detach origin/main` **without checking the exit status**. With a modified file that
+does not exist on `origin/main`, git refuses the checkout; every later command then ran on the
+**calling branch**, and the artifact commit landed on real Track B work. This was **observed, not
+theorised**: commit `3b390f4` was created on `governance/mechanical-human-approval`. It was local
+only, never pushed, and was removed by `git reset --mixed 7d99498`; the remote head never moved.
+Fixed with three guards: refuse to run with a dirty working tree, check the checkout's exit status,
+and assert `HEAD` is genuinely detached before doing anything else. The cleanup trap also now removes
+the artifact file.
+
+> Both defects share the shape this project keeps rediscovering: **a check that tested the
+> circumstances of the last failure rather than the property it claimed to establish.** The first
+> encoded "the environment looked like *this* when we were exposed"; the second assumed a command had
+> succeeded because it had succeeded before. Neither could fail correctly until it was run under
+> conditions different from the ones that produced it.
+
+**Verification after the fix:** preconditions now pass — broker variables noted, brokered credential
+observed rejected, API unauthenticated, unauthenticated push impossible — and the dirty-tree guard
+fires and aborts, leaving the branch untouched. The harness was deliberately **not** run to
+completion: that is B5.
