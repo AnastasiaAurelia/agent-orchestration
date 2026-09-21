@@ -280,6 +280,27 @@ def clean_build_by_number(record: dict, number: object) -> dict | None:
     return None
 
 
+def brief_reviewer(driver, *, reviewed_attempt: int, verification_passed: bool) -> None:
+    """Tell a reviewer backend WHICH build it is reviewing. In memory, per turn.
+
+    Finding M6-A1 removed durable scheduling state from the decision path, and
+    this does not reintroduce it: nothing is written, nothing is read back, and
+    the values are Diana's own -- the attempt number this loop selected moments
+    earlier and the result of Diana's own verification callback. A backend that
+    ignores them composes no evidence and produces no verdict, which fails
+    closed; a backend that reports something else about them changes nothing,
+    because `_accept_review` re-derives the reviewed attempt from the
+    digest-covered journal and never from the backend.
+
+    It exists because the alternative measured worse: with nothing told to it,
+    the real reviewer backend resolved "the attempt under review" to the newest
+    journal entry -- which during a reviewer turn is the REVIEWER's own in-flight
+    attempt, and in a multi-item run can be another item's build.
+    """
+    driver.reviewed_attempt = reviewed_attempt
+    driver.verification_passed = bool(verification_passed)
+
+
 def select_actor(item_id: str, record: dict, pending: dict, rejected: set,
                  *, verified: bool) -> str:
     """Diana chooses the acting role. Deterministic, and no input is the agent's.
@@ -420,6 +441,11 @@ def _execute_locked(run_directory, *, builder, reviewer, verify,
         installed = install_projection(role, contract_block, topology_doc)
 
         driver = builder if role == BUILDER else reviewer
+        if role == REVIEWER:
+            # `select_actor` returned REVIEWER only because this item has a
+            # pending clean build, so the number is present by construction.
+            brief_reviewer(driver, reviewed_attempt=pending[item_id],
+                           verification_passed=verified)
         outcome = _unattended.run_attempt(run_directory, record, contract_block, policy,
                                           driver, item_id=item_id, actor=role)
         record = outcome["record"]

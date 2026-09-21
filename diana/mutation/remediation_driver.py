@@ -62,30 +62,56 @@ class RemediationDriver:
         self.record: dict | None = None
 
     def _build_prompt(self, contract_block: dict) -> str:
+        """The builder's brief: the APPROVED TASK first, then its bounds.
+
+        This used to open with "The <language> project at <root> has a failing
+        verification" and never mention `contract_block["task"]` at all. That is
+        correct for M4's own fixture, where the task IS "make the failing
+        verifier pass", and wrong for every real run: a production run was
+        measured whose approved task asked for several changes plus regression
+        tests, whose verifier was ALREADY green, and whose builder was therefore
+        told to repair a failure that did not exist. It changed one file, the
+        suite stayed green, and nothing in the loop had asked for the work.
+
+        So the task is stated in full and first, and the verification command is
+        demoted to what it is -- a check, explicitly necessary and not
+        sufficient. Naming the bounds here remains presentation and not
+        enforcement (M2-D2): the write scope, the command allowlist and the
+        terminal policy are refused at the dispatch boundary, and the
+        adversarial cases bypass the model entirely to prove it. Telling the
+        model the bounds it must work within grants it no say in what they are
+        (M1 D14).
+        """
         if self.prompt:
             return self.prompt
+        envelope = contract_block["capability_envelope"]
         root = contract_block["target"]["repo_root"]
-        commands = contract_block["capability_envelope"]["allowed_commands"]
-        policy = contract_block["capability_envelope"].get("command_policy") or {}
+        commands = envelope["allowed_commands"]
+        policy = envelope.get("command_policy") or {}
         roots = policy.get("workdir_roots") or [root]
         workdir = roots[0]
         ceiling = policy.get("max_timeout_s", 300)
+        task = str(contract_block.get("task") or "").strip()
+        write_roots = (envelope.get("write_scope") or {}).get("allowed_roots") or []
+        writable = ", ".join(str(r) for r in write_roots) or "(nothing)"
         return (
-            f"The Python project at {root} has a failing verification.\n"
-            f"Run exactly this command to see the failure: {commands[0]}\n\n"
-            "Read the source, find the defect, fix it with the patch or write_file tool, "
-            f"then run `{commands[0]}` again to confirm it passes.\n"
+            f"You are working in the repository at {root}.\n\n"
+            f"THE TASK, in full:\n{task}\n\n"
+            "Implement every part of that task. If it asks for changes in several "
+            "places, make all of them; if it asks for tests, add them. Read the "
+            "existing code first and follow what is already there.\n"
+            f"You may create or modify files only under: {writable}\n\n"
+            f"Run exactly this command to check your work: {commands[0]}\n"
             f"You may ONLY run this exact command: {commands[0]}\n"
+            "That command exiting 0 is necessary and NOT sufficient. It does not show "
+            "that the task above was done, and a suite that was already passing will "
+            "still pass if you change nothing that matters.\n"
             # ERRATA-002 / F-A7: `workdir` and `timeout` are both REQUIRED, and a
-            # terminal call omitting either is refused before dispatch. Naming them
-            # here is presentation, not enforcement (M2-D2): the policy at the
-            # dispatch boundary is what actually refuses, and the adversarial cases
-            # bypass the model entirely to prove it. Telling the model the bounds it
-            # must work within keeps the milestone's thesis achievable without
-            # granting it any say in what those bounds are (M1 D14).
+            # terminal call omitting either is refused before dispatch.
             f"Every terminal call MUST pass workdir={workdir!r} and an explicit "
             f"integer timeout of at most {ceiling} seconds; omitting either is refused.\n"
-            "Do not modify the verification script itself; fix the code it tests."
+            "Do not modify the verification script or the tests in order to make the "
+            "command pass; change the code it checks."
         )
 
     def __call__(self, contract_block: dict, probe_tree=None):
