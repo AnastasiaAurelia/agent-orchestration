@@ -29,6 +29,11 @@ INTENT_UNKNOWN_FIELD = "intent-unknown-field"
 COMMAND_NOT_IN_CATALOGUE = "command-not-in-catalogue"
 WRITE_PATH_FORBIDDEN = "write-path-forbidden"
 WRITE_PATH_OUTSIDE_REPO = "write-path-outside-repo"
+# An explicitly named path the request ALSO excluded. Distinct from
+# `write-path-forbidden` on purpose: "policy never grants this" and "you asked
+# for this and then excluded it" are different facts with different remedies,
+# and an over-broad code shared between them would tell an operator neither.
+WRITE_PATH_EXCLUDED = "write-path-excluded"
 WORKFLOW_NOT_CERTIFIED = "workflow-not-certified"
 WORKFLOW_NO_PRODUCT_PATH = "workflow-no-product-path"
 RISK_OR_DEPTH_PROPOSED = "risk-or-depth-proposed"

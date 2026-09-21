@@ -35,6 +35,7 @@ true prediction (M7-E1-D4).
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -95,10 +96,177 @@ def _excluded_names(exclusions) -> set[str]:
     return names
 
 
-def _write_paths(repo_root, exclusions) -> tuple[list[str], list[str]]:
-    """(write roots, paths withheld by an exclusion). Repo-relative, ordered."""
-    root = Path(repo_root)
+# --- explicit path references --------------------------------------------
+#
+# The derivation used to read the repository for four fixed directory names and
+# nothing else, so a repository shaped any other way had no writable scope --
+# and a request that NAMED its own path was answered with a different, narrower
+# scope without saying so. Both halves are fixed here: a named path is the
+# primary source of write authority, and a named path policy will not grant is
+# REFUSED rather than quietly replaced.
+#
+# Nothing about the authority model changes. A path named here is a *request*,
+# exactly as every other Intent field is; it is validated against the same
+# frozen policy before it can become a write root, the resulting scope is still
+# built by `remediate.build_contract`, still narrowed to the reviewer's frozen
+# envelope, and still enforced by `read_scope.decide` at the dispatch boundary.
+
+_BARE_FILE = re.compile(_cat.BARE_FILE_PATTERN)
+
+
+def _path_tokens(goal: str) -> list[str]:
+    """Whitespace tokens, trimmed of the punctuation prose wraps paths in.
+
+    A trailing full stop is sentence punctuation rather than an extension, so it
+    is removed -- `lib/rules.mjs.` at the end of a sentence is `lib/rules.mjs`.
+    """
+    tokens: list[str] = []
+    for raw in goal.split():
+        # Alternating, until stable: prose wraps a path in BOTH kinds of
+        # punctuation -- "`app/main.py`." ends with a backtick behind a full
+        # stop, and one pass of each would leave the backtick attached.
+        token = raw
+        while True:
+            trimmed = token.strip(_cat.PATH_TRIM_CHARS).rstrip(".")
+            if trimmed == token:
+                break
+            token = trimmed
+        # A backslash is never a separator in a repository-relative POSIX path,
+        # but normalising it here means `..\..\etc` is still SEEN as traversal
+        # and refused, rather than slipping past the check as opaque prose.
+        token = token.replace("\\", "/")
+        if token and token not in tokens:
+            tokens.append(token)
+    return tokens
+
+
+def _is_unsafe_shape(token: str) -> str:
+    """A shape that is unmistakably a path AND unmistakably out of bounds."""
+    if token.startswith(("/", "~")) or re.match(r"^[A-Za-z]:(/|$)", token):
+        return "is an absolute path; write scope is repository-relative only"
+    if ".." in token.split("/"):
+        return "contains a '..' component; write scope may not traverse upward"
+    return ""
+
+
+def _is_path_reference(token: str, root: Path) -> bool:
+    """Is this token a PATH REFERENCE at all? Deterministic and conservative.
+
+    Syntax first, repository evidence second, and never evidence alone. A bare
+    word that happens to match a directory must NOT become authority -- "fix the
+    parser in compiler" does not grant `compiler/` -- because that would let the
+    shape of the filesystem, rather than the request, decide what is writable.
+
+    A token is a reference when, in order:
+
+      1. it has an unsafe shape (absolute, or a `..` component). Always a
+         reference, so it is REFUSED rather than mistaken for prose.
+      2. it is written with an explicit `./` prefix. The author has said "this
+         is a path", which is how a not-yet-existing file is named.
+      2b. it has path syntax and names something policy never grants (`.git`,
+         `.github/...`, Diana's own enforcement surface, `.env*`). Always a
+         reference, so naming one is refused rather than read as prose.
+      3. it contains `/` AND either it exists in the repository or its parent
+         directory does. This is what excludes prose like `and/or` or `24/7`,
+         whose first component names nothing.
+      4. it contains no `/`, has a `name.ext` shape, AND exists. Existence is
+         required here because `name.ext` alone also describes `e.g` and `3.11`.
+
+    A directory must therefore be written with a slash (`packages/core/` or
+    `packages/core`) to be named. That is the deliberate resolution of "explicit
+    directories are supported" against "a matching word is not a request".
+    """
+    if _is_unsafe_shape(token):
+        return True
+    if token.startswith("./"):
+        return True
+    # A path policy will NEVER grant is always a reference, whether or not it
+    # exists here. Otherwise naming `.github/workflows/ci.yml` in a repository
+    # that has no `.github` would be read as prose and answered with some other
+    # scope -- which is the silent substitution this whole derivation exists to
+    # remove. It must be refused, and a refusal requires being seen first.
+    if "/" in token or _BARE_FILE.match(token):
+        if _cat.is_forbidden_write(token.strip("/")):
+            return True
+    relative = token.rstrip("/")
+    if "/" in token:
+        if not relative:
+            return True          # a bare "/" -- unsafe, judged as a reference
+        candidate = root / relative
+        return candidate.exists() or candidate.parent.is_dir()
+    return bool(_BARE_FILE.match(token)) and (root / token).exists()
+
+
+def _validate_explicit(token: str, root: Path, blocked: set) -> str:
+    """One named path -> its repo-relative form, or Refused. Never dropped."""
+    unsafe = _is_unsafe_shape(token)
+    if unsafe:
+        raise _ref.Refused(
+            _ref.WRITE_PATH_OUTSIDE_REPO, f"{token!r} {unsafe}")
+    relative = token
+    while relative.startswith("./"):
+        relative = relative[2:]
+    relative = relative.strip("/")
+    if not relative:
+        raise _ref.Refused(
+            _ref.WRITE_PATH_OUTSIDE_REPO,
+            f"{token!r} names the repository root; a bounded repair is never granted "
+            "the whole repository as its write scope")
+    if _cat.is_forbidden_write(relative):
+        raise _ref.Refused(
+            _ref.WRITE_PATH_FORBIDDEN,
+            f"{relative!r} is a path no proposal may make writable")
+    # Symlink escape is caught HERE and not by the string form: a path that is
+    # repository-relative as written can still resolve outside, and only the
+    # resolved location decides.
+    resolved = (root / relative).resolve()
+    if resolved == root or root not in resolved.parents:
+        raise _ref.Refused(
+            _ref.WRITE_PATH_OUTSIDE_REPO,
+            f"{relative!r} resolves to {resolved} which is not inside the repository")
+    hit = [part for part in relative.split("/") if part in blocked]
+    if hit:
+        raise _ref.Refused(
+            _ref.WRITE_PATH_EXCLUDED,
+            f"{relative!r} was named as a path to repair and also excluded by this "
+            f"request ({', '.join(sorted(set(hit)))}); Diana does not choose between "
+            "the two. Ask for one.")
+    return relative
+
+
+def _canonical_paths(paths: list[str]) -> list[str]:
+    """Sorted, de-duplicated, and reduced to the paths that are not covered.
+
+    Granting both `services/api` and `services/api/server.ts` grants exactly
+    `services/api`, so the narrower entry is dropped: the same authority stated
+    once. Sorting makes the result a function of the SET of named paths rather
+    than of the order they appeared in the sentence, so two requests naming the
+    same paths produce the same digest.
+    """
+    unique = sorted(set(paths))
+    return [p for p in unique
+            if not any(p.startswith(other + "/") for other in unique if other != p)]
+
+
+def _explicit_write_paths(goal: str, root: Path, blocked: set) -> list[str]:
+    """Every path the request named, validated. Refuses; never silently drops."""
+    named = [t for t in _path_tokens(goal) if _is_path_reference(t, root)]
+    return _canonical_paths([_validate_explicit(t, root, blocked) for t in named])
+
+
+def _write_paths(repo_root, exclusions, goal: str = "") -> tuple[list[str], list[str]]:
+    """(write roots, paths withheld by an exclusion). Repo-relative, ordered.
+
+    A request that names its own paths gets those paths and nothing else. Only
+    a request naming none falls back to the frozen candidate directories.
+    """
+    root = Path(repo_root).resolve()
     blocked = _excluded_names(exclusions)
+    explicit = _explicit_write_paths(goal, root, blocked)
+    if explicit:
+        # `withheld` stays empty on this path by construction: an explicitly
+        # named path that an exclusion blocks is a refusal above, not a note.
+        return explicit, []
     roots: list[str] = []
     withheld: list[str] = []
     for candidate in _cat.WRITE_ROOT_CANDIDATES:
@@ -142,15 +310,17 @@ def classify(goal: str, repo_root) -> dict:
 
     workflow = "BOUNDED_REMEDIATION" if wants_repair else "ADVISORY_SECURITY_REVIEW"
     exclusions = _exclusions(goal)
-    write_paths, withheld = _write_paths(repo_root, exclusions)
+    write_paths, withheld = _write_paths(repo_root, exclusions, goal)
     commands = _cat.commands_for(repo_root)
 
     if workflow == "BOUNDED_REMEDIATION":
         if not write_paths:
             raise _ref.Refused(
                 _ref.NO_WRITABLE_SCOPE,
-                "no source directory this policy can make writable exists here "
-                f"(looked for {list(_cat.WRITE_ROOT_CANDIDATES)})"
+                "this request names no path to repair, and no fallback source "
+                f"directory exists here (looked for {list(_cat.WRITE_ROOT_CANDIDATES)}). "
+                "Name the file or directory to change, for example 'app/main.py' or "
+                "'packages/core/'"
                 + (f"; excluded by your request: {withheld}" if withheld else ""))
         if not commands:
             raise _ref.Refused(
@@ -211,8 +381,14 @@ def validate(intent: object, repo_root) -> None:
                 _ref.WRITE_PATH_FORBIDDEN,
                 f"{rel!r} is a path no proposal may make writable")
         resolved = (root / rel).resolve()
-        if root not in resolved.parents and resolved != root:
+        if root not in resolved.parents:
+            # `resolved == root` lands here too, and deliberately: a write scope
+            # that IS the repository is not a bounded scope, and accepting it
+            # here would let a forged intent trade a named path for the whole
+            # tree without leaving the repository at all.
             raise _ref.Refused(
-                _ref.WRITE_PATH_OUTSIDE_REPO, f"{rel!r} resolves outside the repository")
+                _ref.WRITE_PATH_OUTSIDE_REPO,
+                f"{rel!r} resolves to {resolved}, which is not a bounded path inside "
+                "the repository")
     if not isinstance(intent["items"], list) or not intent["items"]:
         raise _ref.Refused(_ref.INTENT_MALFORMED, "items must be a non-empty list")
