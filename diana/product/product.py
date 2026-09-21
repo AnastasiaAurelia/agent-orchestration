@@ -82,20 +82,26 @@ def _verify_for(contract_block):
     return verify
 
 
-def _backends(kind: str, contract_block):
+def _backends(kind: str, contract_block, run_directory=None):
     """(builder, reviewer). The seam M6 froze; carries no authority."""
+    verify = _verify_for(contract_block)
     if kind == "hermes":
+        # The reviewer's evidence is composed by M6's `evidence_builder` from
+        # the digest-covered journal and the reconciliation record of the exact
+        # builder attempt under review. It was previously a literal --
+        # `paths_touched: []`, `within_envelope: None`,
+        # `verification_passed: True` -- which told the production reviewer that
+        # a build it was asked to judge had changed nothing and had passed. A
+        # reviewer cannot be a completion gate on evidence that is not true, and
+        # a hardcoded `verification_passed: True` is an approval Diana never
+        # measured.
         builder = _executors.HermesBuilder()
         reviewer = _executors.HermesReviewer(
-            evidence_for=lambda cb, item: {"task": cb["task"], "item_id": item,
-                                           "envelope": cb["capability_envelope"],
-                                           "paths_touched": [], "paths_outside_write_scope": [],
-                                           "within_envelope": None, "git_status_before": "",
-                                           "git_status_after": "", "verification_passed": True})
+            evidence_for=_executors.evidence_builder(
+                run_directory, lambda: _journal.read(run_directory), verify))
         return builder, reviewer
     # A deterministic in-repository backend. It types; it does not decide what
     # it may type -- the projection does, and it is proven live before its turn.
-    verify = _verify_for(contract_block)
 
     # TEST-ONLY SEAM, on the M2-D7 precedent: a scripted edit map so acceptance
     # can drive a real run to a real terminal outcome without a live model
@@ -163,7 +169,7 @@ def cmd_approve(args) -> int:
     run_directory = approved["run_directory"]
     print(f"\nAPPROVED  run {approved['run_id']}\n")
     loaded = _recovery.load_run(run_directory)
-    builder, reviewer = _backends(args.executor, loaded["contract"])
+    builder, reviewer = _backends(args.executor, loaded["contract"], run_directory)
     try:
         _actors.execute(run_directory, builder=builder, reviewer=reviewer,
                         verify=_verify_for(loaded["contract"]))

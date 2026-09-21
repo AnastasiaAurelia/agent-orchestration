@@ -71,6 +71,34 @@ class InvalidInput(ValueError):
     pass
 
 
+# The shape `diana/ci/build-gate-input.py` writes when it cannot build a real
+# input. It has never been a valid gate input and still is not.
+ADAPTER_FAILURE_KEYS = {"version", "adapter_error"}
+
+
+def adapter_failure_reason(root: dict[str, Any]) -> str | None:
+    """The adapter's own reason, when THIS input is the adapter's failure envelope.
+
+    Recognising the envelope changes no decision and relaxes no field: the
+    envelope is refused before this function is reached and is refused after it,
+    the only exit from here is a refusal, and `version` must be exactly 0 -- a
+    real input carries version 1 and can never match. What changes is the reason
+    an operator reads.
+
+    It exists because the adapter already knew exactly what was wrong -- "the
+    pull request body carries no evidence block" -- and the gate replaced that
+    with "input fields or version are invalid", which is true of every possible
+    adapter failure and therefore actionable for none of them. A real pull
+    request was blocked by that message with the real one recorded nowhere.
+    """
+    if set(root) != ADAPTER_FAILURE_KEYS or root.get("version") != 0:
+        return None
+    detail = root.get("adapter_error")
+    if not isinstance(detail, str) or not detail.strip():
+        return "gate input could not be built from this pull request (no reason recorded)"
+    return "gate input could not be built from this pull request: " + detail.strip()
+
+
 def require_dict(value: Any, name: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise InvalidInput(f"{name} must be an object")
@@ -100,8 +128,19 @@ def normalize_path(raw: Any) -> str:
 def evaluate(data: Any) -> dict[str, Any]:
     root = require_dict(data, "input")
     expected = {"version", "dod", "verification", "preflight", "diff", "human_only_conditions"}
-    if set(root) != expected or root["version"] != 1:
-        raise InvalidInput("input fields or version are invalid")
+    if set(root) != expected:
+        # Same refusal as before, with the field names an operator needs. The
+        # adapter's own failure envelope is one specific wrong field set, and it
+        # carries a reason worth repeating instead of describing generically.
+        adapter = adapter_failure_reason(root)
+        if adapter is not None:
+            raise InvalidInput(adapter)
+        raise InvalidInput(
+            "input fields are invalid: "
+            f"missing={sorted(expected - set(root))} "
+            f"unexpected={sorted(str(key) for key in set(root) - expected)}")
+    if root["version"] != 1:
+        raise InvalidInput(f"input version must be 1, not {root['version']!r}")
 
     reasons: list[str] = []
     checks: list[dict[str, str]] = []
