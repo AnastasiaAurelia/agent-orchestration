@@ -686,7 +686,7 @@ cb_i = {"task": TASK, "target": {"repo_root": "/x/repo"},
         "capability_envelope": {
             "allowed_commands": ["npm test"],
             "allowed_tools": ["read_file", "search_files", "write_file", "patch", "terminal"],
-            "write_scope": {"allowed_roots": ["/x/repo/src", "/x/repo/bidask.mjs"]},
+            "write_scope": {"allowed_roots": ["/x/repo/src", "/x/repo/entry.mjs"]},
             "command_policy": {"workdir_roots": ["/x/repo"], "max_timeout_s": 300}}}
 brief = RDV.RemediationDriver()._build_prompt(cb_i)
 check("I the approved task reaches the builder verbatim", TASK in brief)
@@ -696,7 +696,7 @@ check("I the builder is told the verifier is necessary and NOT sufficient",
       "necessary and NOT sufficient" in brief
       and "a suite that was already passing will still pass" in brief)
 check("I the approved write scope is stated",
-      "/x/repo/src" in brief and "/x/repo/bidask.mjs" in brief)
+      "/x/repo/src" in brief and "/x/repo/entry.mjs" in brief)
 check("I the command allowlist and terminal bounds are still stated (M4 ERRATA-002)",
       "You may ONLY run this exact command: npm test" in brief
       and "workdir='/x/repo'" in brief and "timeout of at most 300 seconds" in brief)
