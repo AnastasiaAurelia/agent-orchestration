@@ -4,8 +4,22 @@
 import json
 import sys
 
-with open(sys.argv[1], encoding="utf-8") as handle:
-    result = json.load(handle)
+# A summary is the only place many readers look, so it must render even when the
+# gate could not. An unreadable or shapeless result document is reported AS a
+# failure rather than as a traceback -- the required check has already failed
+# closed by then, and a stack trace in the summary hides that from the reader.
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        result = json.load(handle)
+    if not isinstance(result, dict) or not isinstance(result.get("decision"), str):
+        raise ValueError("gate result is not a decision document")
+except (OSError, IndexError, ValueError, json.JSONDecodeError) as exc:
+    print("## Diana Gate")
+    print()
+    print("Decision: **FAIL**")
+    print()
+    print(f"The gate produced no readable result document: {exc}")
+    raise SystemExit(0)
 
 print("## Diana Gate")
 print()
