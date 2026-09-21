@@ -211,6 +211,12 @@ HL.provider_config = lambda home=None: {
     "provider": "fake-provider", "model": "fake-model",
     "base_url": "https://example.invalid", "api_key": FAKE_KEY}
 
+def _run_ok(driver):
+    """Run a driver that is expected to finish, and hand back its final text."""
+    driver(CB)
+    return driver.final_text
+
+
 def scripted(*replies):
     FAKE["replies"] = list(replies)
     FAKE["prompts"] = []
@@ -400,7 +406,8 @@ class SequenceBuilder(E._Backend):
         return None
 
 
-def production_run(root, plans, replies, *, verify_fn=verify, max_attempts=8, items=None):
+def production_run(root, plans, replies, *, verify_fn=verify, max_attempts=8, items=None,
+                   reviewer_wall_clock=None):
     """A real `actors.execute`, with the PRODUCT's own reviewer backend.
 
     The reviewer comes from `product._backends`, so what is exercised is the
@@ -411,6 +418,11 @@ def production_run(root, plans, replies, *, verify_fn=verify, max_attempts=8, it
     run_directory = appraisal["run_directory"]
     loaded = RCV.load_run(run_directory)
     _builder, reviewer = PROD._backends("hermes", loaded["contract"], run_directory)
+    if reviewer_wall_clock is not None:
+        # Set on the INSTANCE: the class default was bound at definition time,
+        # so rebinding the module constant would change nothing and the test
+        # would silently measure the 420s path instead of the timeout path.
+        reviewer._wall_clock_seconds = reviewer_wall_clock
     scripted(*replies)
     blocked = None
     try:
@@ -591,14 +603,11 @@ for label, replies, want_code, _turn_code in MALFUNCTIONS:
         check(f"H {label}: and it stops with {want_code}", code == want_code, f"({code})")
 
 print("--- H: a reviewer that exceeds its wall-clock bound ---")
-REAL_CAP = HL.WALL_CLOCK_SECONDS
-HL.WALL_CLOCK_SECONDS = 1
-try:
-    root_t = fresh("timeout")
-    out = production_run(root_t, plans=[("src/calc.py", FIXED)],
-                         replies=[stall] * 3, max_attempts=3)
-finally:
-    HL.WALL_CLOCK_SECONDS = REAL_CAP
+# The reviewer carries its OWN budget now, so shrinking the module default would
+# no longer reach it -- the bound under test is set on the backend instance.
+root_t = fresh("timeout")
+out = production_run(root_t, plans=[("src/calc.py", FIXED)],
+                     replies=[stall] * 3, max_attempts=3, reviewer_wall_clock=1)
 rec = out["record"]
 check("H a reviewer that times out never completes the item",
       (rec.get("terminal") or {}).get("outcome") != J.COMPLETE
@@ -696,6 +705,165 @@ falsify("I the prompt no longer asserts a failing verification that may not exis
         "has a failing verification" not in brief and "Python project" not in brief)
 check("I an explicit caller-supplied prompt still wins, so the seam is unchanged",
       RDV.RemediationDriver(prompt="literal")._build_prompt(cb_i) == "literal")
+
+# ======================================================================
+print("\n=== J — the reviewer's wall-clock budget is its OWN, and still hard ===")
+#
+# Measured production run: reviewer attempt 2 produced a correct 3617-char
+# verdict in 134.7s; reviewer attempt 4, reviewing a four-file change, was still
+# reading when the inherited 240s default interrupted it at 240.19s. The bound
+# was never sized for the role. Raising it must not make it softer.
+import remediation_driver as _RDV
+
+print("--- the defaults other turns rely on are untouched ---")
+check("J the module default is still 240s",
+      HL.WALL_CLOCK_SECONDS == 240, f"({HL.WALL_CLOCK_SECONDS})")
+check("J an ordinary LiveTurnDriver still gets 240s",
+      HL.LiveTurnDriver(prompt="x").wall_clock_seconds == 240)
+check("J the M2 advisory turn shape (no argument) is unchanged",
+      HL.LiveTurnDriver().wall_clock_seconds == HL.WALL_CLOCK_SECONDS)
+check("J the builder's own driver is untouched at 420s",
+      _RDV.WALL_CLOCK_SECONDS == 420, f"({_RDV.WALL_CLOCK_SECONDS})")
+check("J the iteration cap was NOT changed by this fix",
+      HL.MAX_ITERATIONS == 12 and _RDV.MAX_ITERATIONS == 24,
+      f"({HL.MAX_ITERATIONS}, {_RDV.MAX_ITERATIONS})")
+
+print("--- the reviewer's budget is explicit, and matches the builder's ceiling ---")
+check("J the reviewer constant is 420s",
+      E.REVIEWER_WALL_CLOCK_SECONDS == 420, f"({E.REVIEWER_WALL_CLOCK_SECONDS})")
+check("J a reviewer must not be given less time than the builder it reviews",
+      E.REVIEWER_WALL_CLOCK_SECONDS >= _RDV.WALL_CLOCK_SECONDS)
+_rv = E.HermesReviewer(evidence_for=lambda *a, **k: {})
+check("J HermesReviewer takes the reviewer budget by default",
+      _rv._wall_clock_seconds == E.REVIEWER_WALL_CLOCK_SECONDS)
+check("J and it remains an explicit constructor parameter, not a global",
+      E.HermesReviewer(evidence_for=lambda *a, **k: {},
+                       wall_clock_seconds=99)._wall_clock_seconds == 99)
+falsify("J the reviewer no longer silently inherits the module default -- that "
+        "inheritance is the defect",
+        _rv._wall_clock_seconds != HL.WALL_CLOCK_SECONDS)
+
+print("--- the configured bound is what is enforced, and what is recorded ---")
+scripted(json.dumps(PASS_V()))
+_d = HL.LiveTurnDriver(prompt="x", allowed_tools=P.REVIEWER_TOOLS, wall_clock_seconds=420)
+_d(CB)
+check("J turn-record reports the bound ACTUALLY in force, not the module default",
+      _d.record["wall_clock_cap_seconds"] == 420, f"({_d.record['wall_clock_cap_seconds']})")
+scripted(json.dumps(PASS_V()))
+_d2 = HL.LiveTurnDriver(prompt="x", allowed_tools=P.REVIEWER_TOOLS)
+_d2(CB)
+falsify("J and an ordinary turn still records 240, so the field tracks the instance",
+        _d2.record["wall_clock_cap_seconds"] == 240)
+check("J iterations_used is recorded alongside the cap, as observability only",
+      "iterations_used" in _d.record and "iterations_cap" in _d.record)
+
+print("--- an unbounded turn is refused at construction ---")
+for bad in (0, -1, None.__class__, 3.5, True, "420"):
+    code = code_of(lambda b=bad: HL.LiveTurnDriver(prompt="x", wall_clock_seconds=b))
+    check(f"J wall_clock_seconds={bad!r} is refused",
+          code == blocking.HERMES_TURN_FAILED, f"({code})")
+check("J None means 'use the default', which is a bound and not the absence of one",
+      HL.LiveTurnDriver(prompt="x", wall_clock_seconds=None).wall_clock_seconds == 240)
+
+print("--- the bound is still HARD: interrupt, stop, and fail closed ---")
+def _stall_then_pass(_message):
+    time.sleep(3)
+    return json.dumps(PASS_V())
+
+FAKE["interrupted"] = False
+scripted(_stall_then_pass)
+_slow = HL.LiveTurnDriver(prompt="x", allowed_tools=P.REVIEWER_TOOLS, wall_clock_seconds=1)
+_code = code_of(lambda: _slow(CB))
+check("J exceeding the configured bound raises hermes-turn-failed",
+      _code == blocking.HERMES_TURN_FAILED, f"({_code})")
+check("J the interrupt was issued and the turn was actually stopped",
+      FAKE["interrupted"] is True and _slow.record["timed_out"] is True
+      and _slow.record["stopped_after_interrupt"] is True,
+      f"({_slow.record['timed_out']}, {_slow.record['stopped_after_interrupt']})")
+check("J the refusal names the CONFIGURED bound, so an operator reads the real limit",
+      _slow.record["wall_clock_cap_seconds"] == 1)
+check("J an over-deadline turn's text is DISCARDED, so no verdict can come from it",
+      _slow.final_text is None and E.extract_verdict(_slow.final_text)[0] is None)
+check("J the discard is recorded honestly: nothing usable, and what was thrown away",
+      _slow.record["final_present"] is False and _slow.record["final_chars"] == 0
+      and _slow.record["final_discarded_on_timeout"] is True
+      and _slow.record["discarded_final_chars"] > 0,
+      f"({_slow.record['final_discarded_on_timeout']}, "
+      f"{_slow.record['discarded_final_chars']})")
+falsify("J the discarded text really WAS a complete valid PASS verdict, so the refusal "
+        "is the deadline and not the content",
+        E.extract_verdict(json.dumps(PASS_V()))[0] is not None
+        and _slow.record["discarded_final_chars"] == len(json.dumps(PASS_V())))
+falsify("J the very same reply PASSES when the turn is allowed to finish, so the "
+        "refusal above was the bound and not the fixture",
+        (lambda: (scripted(_stall_then_pass),
+                  E.extract_verdict(
+                      _run_ok(HL.LiveTurnDriver(prompt="x",
+                                                allowed_tools=P.REVIEWER_TOOLS,
+                                                wall_clock_seconds=30)))[0]
+                  is not None)[1])())
+
+print("--- a reviewer that times out never completes an item ---")
+FAKE["interrupted"] = False
+out_j = production_run(fresh("wallclock"), plans=[("src/calc.py", FIXED)],
+                       replies=[_stall_then_pass] * 3, max_attempts=3,
+                       reviewer_wall_clock=1)
+_rec_j = out_j["record"]
+check("J the item is NOT COMPLETE when the reviewer runs out of wall clock",
+      (_rec_j.get("terminal") or {}).get("outcome") != J.COMPLETE
+      and _rec_j["items"]["item-1"]["status"] != "COMPLETE",
+      f"({_rec_j.get('terminal')}, {_rec_j['items']['item-1']['status']})")
+check("J and the timeout is recorded against the reviewer attempt, interrupted",
+      json.loads((Path(out_j["rd"]) / "turn-record-002.json").read_text())["timed_out"] is True)
+falsify("J a PASS verdict was available the whole time and was never admitted, so a "
+        "timeout is a rejection and never an approval",
+        not list(Path(out_j["rd"]).glob("review-verdict-*.json")))
+check("J the reviewer backend holds NO verdict after a timed-out turn",
+      out_j["reviewer"].verdict is None)
+check("J and its transport says absent rather than reporting the discarded text",
+      (json.loads((Path(out_j["rd"]) / "turn-record-002.json").read_text())
+       ["verdict_transport"]["parse_status"]) == E.PARSE_ABSENT)
+
+print("--- nothing about authority, scope, tools or approval moved ---")
+check("J the reviewer's frozen envelope is unchanged",
+      P.REVIEWER_TOOLS == ("read_file", "search_files"))
+scripted(json.dumps(PASS_V()))
+_d3 = HL.LiveTurnDriver(prompt="x", allowed_tools=P.REVIEWER_TOOLS, wall_clock_seconds=420)
+_d3(CB)
+check("J a longer budget shows the reviewer no extra schema",
+      _d3.record["tool_schemas_shown"] == ["read_file", "search_files"])
+check("J the verdict schema is untouched",
+      VD.VERDICT_KEYS == ("decision", "summary", "findings", "dod_checks"))
+check("J the interrupt grace period is unchanged",
+      HL.INTERRUPT_GRACE_SECONDS == 20)
+check("J the observation bound is unchanged",
+      HL.MAX_OBSERVATION_CHARS == 2000)
+
+print("--- the prompt prioritises the touched paths WITHOUT bounding authority ---")
+_ev = {"task": "t", "item_id": "item-1", "reviewed_attempt": 3,
+       "envelope": {"allowed_tools": ["read_file"], "write_scope": ["/r/lib"],
+                    "allowed_commands": ["npm test"]},
+       "paths_touched": ["lib/a.mjs", "test/a.test.mjs"],
+       "paths_outside_write_scope": [], "within_envelope": True,
+       "git_status_before": "", "git_status_after": " M lib/a.mjs",
+       "verification_passed": True}
+_pr = E._reviewer_prompt(_ev)
+check("J the reviewer is told to read the changed paths FIRST",
+      "FIRST read the changed paths listed above" in _pr)
+check("J and to search only for what those paths cannot settle",
+      "only for the" in _pr and "criteria you still cannot settle" in _pr)
+check("J the list is stated to be evidence, never a limit",
+      "never a limit: read any other in-scope file you actually need" in _pr)
+falsify("J the prompt does NOT forbid reading beyond the touched paths, so "
+        "paths_touched is prioritisation and not an authority boundary",
+        "only read" not in _pr and "do not read" not in _pr.lower())
+check("J the reviewer is told an unfinished review is a rejection",
+      "no verdict counts as a rejection" in _pr)
+check("J every pre-existing instruction survived the edit",
+      "NOT evidence that the requested behaviour was implemented" in _pr
+      and "Return PASS only when every requirement is actually implemented" in _pr
+      and "Reply with exactly ONE JSON object" in _pr
+      and _ev["task"] in _pr)
 
 print(f"\n{passed} passed, {failed} failed, {falsifiers} falsifiers")
 sys.exit(1 if failed else 0)

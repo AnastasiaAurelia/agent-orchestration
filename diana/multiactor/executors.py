@@ -303,6 +303,25 @@ def extract_verdict(text: object) -> tuple[dict | None, dict]:
     return None, transport
 
 
+# The reviewer's own wall-clock budget, in seconds.
+#
+# It used to inherit `hermes_live.WALL_CLOCK_SECONDS` (240) silently, which was
+# the default for an ordinary short read-only turn and was never sized for this
+# role. A measured production run settles it: reviewer attempt 2 needed 134.7s
+# and 22 tool calls to produce a correct 3617-character verdict; reviewer
+# attempt 4, reviewing a four-file change, was still reading and searching when
+# the 240s bound interrupted it at 240.19s. The turn was working, not looping.
+#
+# 420 matches `remediation_driver.WALL_CLOCK_SECONDS`, the BUILDER's ceiling,
+# which is the right reference: a reviewer must re-read what a builder wrote
+# inside the same run's budget, so a reviewer given materially less time than
+# the builder that produced the diff cannot finish by construction. It is a
+# larger number, not a weaker rule -- the bound is still hard, still interrupts
+# the turn, and a reviewer that exceeds it still yields NO verdict, which M6-R5
+# makes identical to a rejection.
+REVIEWER_WALL_CLOCK_SECONDS = 420
+
+
 def _reviewer_prompt(evidence: dict) -> str:
     """The reviewer's brief. Every fact in it is Diana's, none is the builder's.
 
@@ -343,10 +362,17 @@ def _reviewer_prompt(evidence: dict) -> str:
         "The verification result above only means an already-existing command exited",
         "zero. It is NOT evidence that the requested behaviour was implemented, and an",
         "unchanged test suite that still passes proves nothing about work never done.",
-        "Derive the acceptance criteria from the task text yourself. Read every path",
-        "listed above, and use search_files to look for whatever the task required that",
-        "is NOT in that list. A task asking for several changes, or for new regression",
-        "tests, is satisfied only when all of them are present in the code.",
+        "Derive the acceptance criteria from the task text yourself, then work in this",
+        "order. FIRST read the changed paths listed above: that is where the work is, and",
+        "it is usually enough to settle most criteria. THEN use search_files only for the",
+        "criteria you still cannot settle from them -- in particular, work the task",
+        "required that may be missing from that list. The list is evidence and a starting",
+        "point, never a limit: read any other in-scope file you actually need.",
+        "A task asking for several changes, or for new regression tests, is satisfied only",
+        "when all of them are present in the code.",
+        "Your turn is time-bounded. Stop investigating and answer as soon as you can",
+        "justify every criterion; a review that does not finish returns no verdict at all,",
+        "and no verdict counts as a rejection.",
         "Return PASS only when every requirement is actually implemented. Otherwise",
         "return FAIL with one finding per missing or incorrect part, each naming the",
         "file it should have been in or stating that no file contains it.",
@@ -397,10 +423,12 @@ class HermesReviewer(_Backend):
 
     name = "hermes-reviewer"
 
-    def __init__(self, *, evidence_for, hermes_home=None) -> None:
+    def __init__(self, *, evidence_for, hermes_home=None,
+                 wall_clock_seconds: int = REVIEWER_WALL_CLOCK_SECONDS) -> None:
         super().__init__()
         self._evidence_for = evidence_for
         self._hermes_home = hermes_home
+        self._wall_clock_seconds = wall_clock_seconds
         self.verdict: dict | None = None
         self.evidence_seen: list[dict] = []
         # Set by the run loop before each reviewer turn (see actors.brief_reviewer).
@@ -423,7 +451,8 @@ class HermesReviewer(_Backend):
 
         driver = _live.LiveTurnDriver(
             hermes_home=self._hermes_home, prompt=_reviewer_prompt(evidence),
-            allowed_tools=_projection.REVIEWER_TOOLS)
+            allowed_tools=_projection.REVIEWER_TOOLS,
+            wall_clock_seconds=self._wall_clock_seconds)
         try:
             driver(contract_block)
         finally:

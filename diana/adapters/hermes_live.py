@@ -51,6 +51,14 @@ ENVELOPE = ("read_file", "search_files")
 
 # M2-D12: a live turn is bounded so an unattended run cannot loop or spend
 # without limit. Exceeding either bound is a failure, never a partial result.
+#
+# `WALL_CLOCK_SECONDS` is the DEFAULT for an ordinary read-only turn, not a
+# global ceiling. A caller whose turn is legitimately longer-running passes its
+# own bound to `LiveTurnDriver(wall_clock_seconds=...)`; the bound is still hard,
+# still interrupts, and still fails closed -- only its value is the caller's.
+# Measured reason: a production reviewer turn doing genuine multi-file reading
+# was interrupted at 240.19s mid-investigation, which is a budget that was never
+# sized for that role rather than a turn misbehaving.
 MAX_ITERATIONS = 12
 WALL_CLOCK_SECONDS = 240
 # How long to let an over-deadline turn wind down after being interrupted.
@@ -186,6 +194,15 @@ def provider_config(hermes_home: str | None = None) -> dict:
     return {"provider": provider, "model": model, "base_url": base_url, "api_key": api_key}
 
 
+def _iterations_used(agent) -> int | None:
+    """How many model iterations the turn spent, if Hermes exposes the counter."""
+    try:
+        used = getattr(getattr(agent, "iteration_budget", None), "used", None)
+        return int(used) if isinstance(used, int) else None
+    except Exception:  # noqa: BLE001 - a diagnostic never fails a turn
+        return None
+
+
 def narrow_tool_schemas(agent, allowed=ENVELOPE) -> list[str]:
     """Show the model only the envelope. Presentation, not enforcement (M2-D2)."""
     def name_of(schema):
@@ -285,11 +302,25 @@ class LiveTurnDriver:
     """
 
     def __init__(self, *, hermes_home: str | None = None, narrow: bool = True,
-                 prompt: str | None = None, corruptor=None, allowed_tools=None) -> None:
+                 prompt: str | None = None, corruptor=None, allowed_tools=None,
+                 wall_clock_seconds: int | None = None) -> None:
         self.hermes_home = hermes_home
         self.narrow = narrow
         self.prompt = prompt
         self.allowed_tools = allowed_tools
+        # The caller's bound, or this module's default for an ordinary turn.
+        # Validated here rather than at use: a bound that is absent, zero or
+        # negative would be a turn with NO deadline, which is the one thing
+        # M2-D12 exists to prevent, so it is refused at construction.
+        if wall_clock_seconds is None:
+            wall_clock_seconds = WALL_CLOCK_SECONDS
+        if not isinstance(wall_clock_seconds, int) or isinstance(wall_clock_seconds, bool) \
+                or wall_clock_seconds <= 0:
+            raise blocking.Blocked(
+                blocking.HERMES_TURN_FAILED,
+                f"wall_clock_seconds must be a positive integer, not {wall_clock_seconds!r}; "
+                "an unbounded live turn is refused")
+        self.wall_clock_seconds = wall_clock_seconds
         # Test-only seam: injects a non-envelope call upstream of every Diana
         # control so the adversarial case does not depend on the model choosing
         # to misbehave (M2-D7). Never used by a production run.
@@ -335,7 +366,7 @@ class LiveTurnDriver:
             try:
                 worker = threading.Thread(target=run_turn, name="diana-live-turn", daemon=True)
                 worker.start()
-                worker.join(timeout=WALL_CLOCK_SECONDS)
+                worker.join(timeout=self.wall_clock_seconds)
                 timed_out = worker.is_alive()
                 if timed_out:
                     # Raising Blocked stops Diana WAITING; it does not stop the
@@ -356,7 +387,17 @@ class LiveTurnDriver:
 
         elapsed = round(time.monotonic() - started, 2)
         final = outcome["final"]
-        final_text = final.strip() if isinstance(final, str) else ""
+        arrived = final.strip() if isinstance(final, str) else ""
+
+        # M2-D12: exceeding a bound is a FAILURE, never a partial result. A turn
+        # that finished during the post-interrupt grace window finished AFTER the
+        # deadline Diana had already declared missed, so its text is not a result
+        # and is not handed to the caller. Discarding it here is what makes
+        # "a timeout never becomes a PASS" structural rather than incidental --
+        # the run loop already refuses a verdict from an errored attempt, and a
+        # control that depends on a second control staying correct is one edit
+        # away from being fail-open.
+        final_text = "" if timed_out else arrived
         # The caller's copy: complete, in memory, for this call only.
         self.final_text = final_text or None
         self.record = {
@@ -368,24 +409,37 @@ class LiveTurnDriver:
             "tools_attempted": list(record.attempted),
             "tools_refused_by_diana": list(record.refused),
             "iterations_cap": MAX_ITERATIONS,
-            "wall_clock_cap_seconds": WALL_CLOCK_SECONDS,
+            # Observability only, never a control. `iterations_cap` alone cannot
+            # say whether the OTHER bound was close to binding, and a turn that
+            # stops for the wrong reason is exactly what this milestone is
+            # debugging. Read defensively: a Hermes without this counter records
+            # None rather than failing a turn over a diagnostic.
+            "iterations_used": _iterations_used(agent),
+            # The bound ACTUALLY in force for this turn, not the module default.
+            "wall_clock_cap_seconds": self.wall_clock_seconds,
             "elapsed_seconds": elapsed,
             "timed_out": bool(timed_out),
             "interrupted_on_timeout": bool(timed_out),
             "stopped_after_interrupt": stopped,
             "interrupt_error": outcome["interrupt_error"],
             "error": outcome["error"],
-            # Safe transport observability: whether a final response arrived and
-            # how long it was. A length is not the content, and no credential,
-            # prompt or transcript is recorded here.
+            # Safe transport observability: whether a USABLE final response was
+            # produced and how long it was. A length is not the content, and no
+            # credential, prompt or transcript is recorded here.
             "final_present": bool(final_text),
             "final_chars": len(final_text),
+            # What the over-deadline turn produced and Diana threw away. Recorded
+            # so an operator can tell "the reviewer said nothing" from "the
+            # reviewer answered too late", which are different problems with
+            # different fixes -- and neither is an approval.
+            "final_discarded_on_timeout": bool(timed_out and arrived),
+            "discarded_final_chars": len(arrived) if timed_out else 0,
         }
 
         if timed_out:
             raise blocking.Blocked(
                 blocking.HERMES_TURN_FAILED,
-                f"live turn exceeded its {WALL_CLOCK_SECONDS}s wall-clock bound; "
+                f"live turn exceeded its {self.wall_clock_seconds}s wall-clock bound; "
                 f"interrupt issued, stopped={stopped}",
             )
         if outcome["error"] is not None:
