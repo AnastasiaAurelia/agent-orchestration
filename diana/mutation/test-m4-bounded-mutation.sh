@@ -641,13 +641,47 @@ deleted = sorted(p for st, p in changed if st.startswith("D"))
 ERRATA_001_PRODUCTION = {"diana/runtime/contract.py",
                          "diana/runtime/blocking.py",
                          "diana/adapters/hermes_patches.py"}
+# POST-M7-E1-D1 (docs/architecture/DIANA-POST-M7-ERRATA-001.md): the pre-existing
+# production files that ACCEPTED POST-M7 work replaced. They are added to this
+# milestone's declared set rather than attributed to it, because this milestone
+# did not touch them -- `BASE..HEAD` cannot tell "replaced by M4" from
+# "replaced by later accepted work", and the clause is a statement about M4.
+# The comparison stays SET EQUALITY: a file in neither set still fails.
+POST_M7_PRODUCTION = {"diana/adapters/hermes_live.py",
+                      "diana/multiactor/actors.py",
+                      "diana/multiactor/executors.py",
+                      "diana/mutation/remediation_driver.py",
+                      "diana/ci/build-gate-input.py",
+                      "diana/ci/write-summary.py",
+                      "diana/gate/diana-gate.py"}
+# POST-M7-E1-D7: the milestone SUITES this erratum corrects. Test code, never
+# production code -- the same classification M4-ERRATA-001 finding 4 already
+# established, enumerated rather than blanket-excluded.
+POST_M7_HARNESS = {"diana/mutation/test-m4-bounded-mutation.sh",
+                   "diana/multiactor/test-m6-multiactor.sh",
+                   "diana/product/test-m7-product.sh"}
+# M4's own declared set is left PRISTINE so the per-file justification check
+# below still compares against exactly the three files a frozen M4 decision
+# requires. The union is a separate name, used only where the question is
+# "what has been replaced since M3", not "what did M4 replace".
+# A post-M7 replacement is visible as a MODIFICATION only at a base where the
+# file already existed; where it did not, the same file is an ADDITION and the
+# milestone never saw it. Determined by asking git, not by hand-listing, so the
+# set cannot drift from the repository.
+existed_at = lambda base, q: subprocess.run(
+    ["git", "-C", repo_dir, "cat-file", "-e", f"{base}:{q}"],
+    capture_output=True).returncode == 0
+PERMITTED_PRODUCTION = ERRATA_001_PRODUCTION | {
+    q for q in POST_M7_PRODUCTION if existed_at(M3_MERGE, q)}
 # (b) docs + publish manifest -- never a production-code replacement.
-DOCS_MANIFEST = {".gitignore"}
+# POST-M7-E1-D2: README.md is documentation. Omitting it counted a documentation
+# edit as a production replacement in all four milestone suites.
+DOCS_MANIFEST = {".gitignore", "README.md"}
 is_doc = lambda q: q.startswith("docs/") or q in DOCS_MANIFEST
 # (c) test-harness corrections -- test code, not production code. The M3
 # harness fix is audit finding 4, authorised as a governance decision.
 is_harness = lambda q: Path(q).name.startswith("test-") and q.endswith(".sh")
-ERRATA_001_HARNESS = {"diana/runtime_verify/test-m3-runtime-verify.sh"}
+ERRATA_001_HARNESS = {"diana/runtime_verify/test-m3-runtime-verify.sh"} | POST_M7_HARNESS
 
 mod_production = {q for q in modified if not is_doc(q) and not is_harness(q)}
 mod_docs = {q for q in modified if is_doc(q)}
@@ -655,16 +689,17 @@ mod_harness = {q for q in modified if is_harness(q)}
 
 # EQUALITY, not subset: modifying FEWER of the three is also a failure, because
 # it means the frozen design and the implementation have drifted apart.
-check("M4-REG-2 modified pre-existing PRODUCTION code equals the ERRATA-001 set exactly",
-      mod_production == ERRATA_001_PRODUCTION,
-      f"(got {sorted(mod_production)} want {sorted(ERRATA_001_PRODUCTION)})")
+check("M4-REG-2 modified pre-existing PRODUCTION code equals the ERRATA-001 set "
+      "plus the accounted post-M7 set, exactly",
+      mod_production == PERMITTED_PRODUCTION,
+      f"(got {sorted(mod_production)} want {sorted(PERMITTED_PRODUCTION)})")
 check("M4-REG-2 each ERRATA-001 production file is justified by a frozen M4 decision",
       ERRATA_001_PRODUCTION == {"diana/runtime/contract.py",      # M4-D2/D4/D5
                                 "diana/runtime/blocking.py",       # M4-D4/D6/D15
                                 "diana/adapters/hermes_patches.py"})  # M4-D1
 check("M4-REG-2 no OTHER pre-existing production module was modified",
-      not (mod_production - ERRATA_001_PRODUCTION),
-      f"(unexpected {sorted(mod_production - ERRATA_001_PRODUCTION)})")
+      not (mod_production - PERMITTED_PRODUCTION),
+      f"(unexpected {sorted(mod_production - PERMITTED_PRODUCTION)})")
 check("M4-REG-2 docs/manifest changes are classified separately, not as replacements",
       mod_docs <= ({"docs/architecture/HERMES-RUNTIME-M4.md"} | DOCS_MANIFEST),
       f"(got {sorted(mod_docs)})")

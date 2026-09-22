@@ -63,6 +63,9 @@ import journal as _journal  # noqa: E402
 import actors as _actors  # noqa: E402
 import intent as _intent  # noqa: E402
 import refusal as _ref  # noqa: E402
+sys.path.insert(0, str(_HERE.parent / "autonomy"))
+import policy as _autonomy  # noqa: E402
+import standing as _standing  # noqa: E402
 
 PROPOSALS_DIRNAME = "proposals"
 DOCUMENT_VERSION = 1
@@ -98,19 +101,31 @@ def policy_authority(policy: dict) -> dict:
 
 
 def digest_of(contract_block: dict, items_doc: dict, topology_doc: dict | None,
-              policy_doc: dict) -> str:
+              policy_doc: dict, standing_doc: dict | None = None) -> str:
     """The proposal digest (M7-E1-D1), over the same canonical serialization
-    the contract itself is hashed with, so the two cannot disagree about bytes."""
-    return _contract.digest({
+    the contract itself is hashed with, so the two cannot disagree about bytes.
+
+    `standing_doc` contributes a key ONLY when autonomy is enabled. A manual
+    proposal therefore hashes to exactly the bytes it hashed to before standing
+    approvals existed -- backward compatibility proven by construction rather
+    than asserted. When autonomy IS enabled the standing approval is inside the
+    digest, so changing the policy, a budget, the executor or any authority
+    field invalidates the approval, which is what makes it non-reusable.
+    """
+    payload = {
         "authority": authority_view(contract_block),
         "work_items": _workitems.digest(items_doc),
         "actors": _topology.digest(topology_doc) if topology_doc else None,
         "run_policy": policy_authority(policy_doc),
-    })
+    }
+    if standing_doc is not None and standing_doc["autonomy"]["enabled"]:
+        payload["autonomy"] = _standing.digest(standing_doc)
+    return _contract.digest(payload)
 
 
 def _derive(intent_doc: dict, repo_root: str, run_id: str,
-            max_attempts: int, total_seconds: int) -> dict:
+            max_attempts: int, total_seconds: int,
+            autonomy_policy: dict | None = None, executor: str = "hermes") -> dict:
     """Build the predicted objects with the SAME builders the run will use."""
     if intent_doc["workflow"] != "BOUNDED_REMEDIATION":
         raise _ref.Refused(
@@ -132,22 +147,28 @@ def _derive(intent_doc: dict, repo_root: str, run_id: str,
         run_id=run_id)
     items_doc = _workitems.build(run_id=run_id, items=intent_doc["items"])
     topology_doc = _topology.build(run_id=run_id)
+    standing_doc = _standing.from_contract(
+        contract_block, root_run_id=run_id, goal=contract_block["task"],
+        autonomy_policy=autonomy_policy or _autonomy.manual(), executor=executor)
     return {"contract": contract_block, "items": items_doc, "topology": topology_doc,
-            "observed": observed, "policy": policy}
+            "observed": observed, "policy": policy, "standing": standing_doc}
 
 
 def build(goal: str, repo_root: str, *, base: str | None = None,
           max_attempts: int = DEFAULT_MAX_ATTEMPTS,
-          total_seconds: int = DEFAULT_TOTAL_SECONDS) -> dict:
+          total_seconds: int = DEFAULT_TOTAL_SECONDS,
+          autonomy_policy: dict | None = None, executor: str = "hermes") -> dict:
     """Natural-language goal -> a persisted, digest-identified Proposal."""
     repo_root = os.path.realpath(repo_root)
     intent_doc = _intent.classify(goal, repo_root)
     run_id = str(uuid.uuid4())
-    derived = _derive(intent_doc, repo_root, run_id, max_attempts, total_seconds)
+    derived = _derive(intent_doc, repo_root, run_id, max_attempts, total_seconds,
+                      autonomy_policy, executor)
     proposal = {
         "document_version": DOCUMENT_VERSION,
         "proposal_digest": digest_of(derived["contract"], derived["items"],
-                                     derived["topology"], derived["policy"]),
+                                     derived["topology"], derived["policy"],
+                                     derived["standing"]),
         "run_id": run_id,
         "repo_root": repo_root,
         "intent": {k: v for k, v in intent_doc.items() if k != "_withheld"},
@@ -157,6 +178,9 @@ def build(goal: str, repo_root: str, *, base: str | None = None,
         "predicted_items": derived["items"],
         "predicted_topology": derived["topology"],
         "predicted_policy": derived["policy"],
+        "autonomy": derived["standing"]["autonomy"],
+        "executor": executor,
+        "predicted_standing": derived["standing"],
     }
     path = proposals_dir(base) / f"{proposal['proposal_digest'].split(':', 1)[1]}.json"
     path.write_text(json.dumps(proposal, indent=2, sort_keys=True))
@@ -190,14 +214,15 @@ def rederive(proposal: dict) -> dict:
     if not isinstance(budget, dict) or set(budget) != {"max_attempts", "total_seconds"}:
         raise _ref.Refused(_ref.PROPOSAL_MALFORMED, "unexpected or missing budget fields")
     return _derive(proposal["intent"], proposal["repo_root"], proposal["run_id"],
-                   budget["max_attempts"], budget["total_seconds"])
+                   budget["max_attempts"], budget["total_seconds"],
+                   proposal.get("autonomy"), proposal.get("executor", "hermes"))
 
 
 def recompute(proposal: dict) -> str:
     """Re-derive the complete proposal identity against the LIVE repository."""
     derived = rederive(proposal)
     return digest_of(derived["contract"], derived["items"], derived["topology"],
-                     derived["policy"])
+                     derived["policy"], derived["standing"])
 
 
 def approve(proposal_digest: str, *, base: str | None = None,
@@ -227,7 +252,7 @@ def approve(proposal_digest: str, *, base: str | None = None,
     # M7-E1-D3: re-derive against the live repository BEFORE anything is created.
     derived = rederive(proposal)
     current = digest_of(derived["contract"], derived["items"], derived["topology"],
-                        derived["policy"])
+                        derived["policy"], derived["standing"])
     if current != proposal_digest:
         raise _ref.Refused(
             _ref.PROPOSAL_STALE,
@@ -301,4 +326,6 @@ def approve(proposal_digest: str, *, base: str | None = None,
             f"run directory {run_directory} exists and must not be executed")
     return {"proposal_digest": proposal_digest, "run_id": result["run_id"],
             "run_directory": result["run_directory"],
-            "contract_digest": result["contract_digest"], "approved": True}
+            "contract_digest": result["contract_digest"], "approved": True,
+            "standing": derived["standing"],
+            "standing_digest": _standing.digest(derived["standing"])}

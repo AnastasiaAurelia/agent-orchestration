@@ -980,7 +980,37 @@ deleted = sorted(p for st, p in changed if st.startswith("D"))
 added = sorted(p for st, p in changed if st.startswith("A"))
 M6_PRODUCTION = {"diana/runtime/blocking.py", "diana/unattended/journal.py",
                  "diana/unattended/unattended.py", "diana/unattended/report.py"}
-DOCS_MANIFEST = {".gitignore"}
+# POST-M7-E1-D1 (docs/architecture/DIANA-POST-M7-ERRATA-001.md): the pre-existing
+# production files that ACCEPTED POST-M7 work replaced. They are added to this
+# milestone's declared set rather than attributed to it, because this milestone
+# did not touch them -- `BASE..HEAD` cannot tell "replaced by M6" from
+# "replaced by later accepted work", and the clause is a statement about M6.
+# The comparison stays SET EQUALITY: a file in neither set still fails.
+POST_M7_PRODUCTION = {"diana/adapters/hermes_live.py",
+                      "diana/multiactor/actors.py",
+                      "diana/multiactor/executors.py",
+                      "diana/mutation/remediation_driver.py",
+                      "diana/ci/build-gate-input.py",
+                      "diana/ci/write-summary.py",
+                      "diana/gate/diana-gate.py"}
+# POST-M7-E1-D7: the milestone SUITES this erratum corrects. Test code, never
+# production code -- the same classification M4-ERRATA-001 finding 4 already
+# established, enumerated rather than blanket-excluded.
+POST_M7_HARNESS = {"diana/mutation/test-m4-bounded-mutation.sh",
+                   "diana/multiactor/test-m6-multiactor.sh",
+                   "diana/product/test-m7-product.sh"}
+M6_DECLARED = set(M6_PRODUCTION)      # pristine: M6's own claim
+# A post-M7 replacement is visible as a MODIFICATION only at a base where the
+# file already existed; where it did not, the same file is an ADDITION and the
+# milestone never saw it. Determined by asking git, not by hand-listing, so the
+# set cannot drift from the repository.
+existed_at = lambda base, q: subprocess.run(
+    ["git", "-C", repo_dir, "cat-file", "-e", f"{base}:{q}"],
+    capture_output=True).returncode == 0
+M6_PRODUCTION = M6_PRODUCTION | {
+    q for q in POST_M7_PRODUCTION if existed_at(FREEZE, q)}
+# POST-M7-E1-D2: README.md is documentation.
+DOCS_MANIFEST = {".gitignore", "README.md"}
 is_doc = lambda q: q.startswith("docs/") or q in DOCS_MANIFEST
 mod_production = {q for q in modified if not is_doc(q)}
 # Files M5 first added show as A in the BASE range, so the equality below is
@@ -990,19 +1020,40 @@ mod_production = {q for q in modified if not is_doc(q)}
 # not the implementation has been committed yet -- a set that only becomes
 # correct after a commit is not a check on the implementation.
 since_freeze = [l.split("\t") for l in git("diff", "--name-status", FREEZE).strip().splitlines() if l]
-mod_since_freeze = {p for st, p in since_freeze if st.startswith("M") and not is_doc(p)}
+# Test-harness corrections are test code, not production code (M4-ERRATA-001
+# finding 4, applied consistently). Bounded by an enumerated set, not excluded
+# wholesale: an unlisted harness edit still fails the check below.
+is_harness = lambda q: q.rsplit("/", 1)[-1].startswith("test-") and q.endswith(".sh")
+mod_harness = {p for st, p in since_freeze if st.startswith("M") and is_harness(p)}
+mod_since_freeze = {p for st, p in since_freeze
+                    if st.startswith("M") and not is_doc(p) and not is_harness(p)}
 untracked = [l for l in git("ls-files", "--others", "--exclude-standard").strip().splitlines() if l]
 added = sorted(set(added) | set(untracked))
 check("M6-E1-AC-1 modified pre-existing PRODUCTION code equals M6's declared set EXACTLY",
       mod_since_freeze == M6_PRODUCTION, f"(got {sorted(mod_since_freeze)})")
 check("M6-E1-AC-1 the set is neither larger nor smaller than declared",
       not (mod_since_freeze - M6_PRODUCTION) and not (M6_PRODUCTION - mod_since_freeze))
+check("M6-E1-AC-1 M6's OWN declared four are all still there, unchanged by this erratum",
+      M6_DECLARED <= mod_since_freeze and len(M6_DECLARED) == 4)
+check("M6-E1-AC-1 test-harness corrections are classified separately and enumerated",
+      mod_harness <= POST_M7_HARNESS, f"(got {sorted(mod_harness)})")
 EXCLUDED = ["diana/adapters/hermes_patches.py", "diana/mutation/mutation_policy.py",
             "diana/runtime/contract.py", "diana/adapters/ao.py", "diana/unattended/recovery.py",
             "diana/unattended/ownership.py", "diana/unattended/workitems.py",
             "diana/unattended/runpolicy.py", "diana/adapters/hermes_live.py",
             "diana/mutation/reconcile.py", "diana/mutation/remediate.py"]
 for path in EXCLUDED:
+    # POST-M7-E1-D5: this was one assertion making two claims. "Excluded from
+    # M6's replacement set" is still true of every path here and is still
+    # checked unchanged. "Byte-identical to the freeze" became false only for a
+    # file that ACCEPTED POST-M7 work replaced, and that file must be in
+    # POST-M7-E1-D1's enumerated set -- an unlisted change still fails.
+    check(f"M6-E1-AC-2 excluded from M6's replacement set: {path}",
+          path not in (mod_since_freeze - POST_M7_PRODUCTION))
+    if path in POST_M7_PRODUCTION:
+        check(f"M6-E1-AC-2 changed only by accounted post-M7 work: {path}",
+              git("diff", "--name-only", FREEZE, "--", path).strip() != "")
+        continue
     check(f"M6-E1-AC-2 excluded and byte-identical to the freeze: {path}",
           path not in mod_since_freeze
           and git("diff", "--name-only", FREEZE, "--", path).strip() == "")
