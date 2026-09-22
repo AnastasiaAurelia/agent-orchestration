@@ -84,6 +84,29 @@ def plan_view(proposal: dict) -> str:
     lines.append(f"  Limits      {proposal['budget']['max_attempts']} attempts, "
                  f"{proposal['budget']['total_seconds']} seconds from run creation")
     lines.append(f"  Stop grace  {proposal['predicted_policy']['quiescence_grace_seconds']} seconds")
+    autonomy = proposal.get("autonomy")
+    if autonomy and autonomy.get("enabled"):
+        allow, limits = autonomy["allow"], autonomy["limits"]
+        yes = lambda flag: "yes" if allow.get(flag) else "no"
+        lines += ["", "AUTONOMY",
+                  "  Diana may recover from ordinary failures without asking again.",
+                  f"  Same-scope retries          {yes('same_scope_retries')}",
+                  f"  Narrower child runs         {yes('narrower_child_runs')}",
+                  f"  Task splitting              {yes('task_splitting')}",
+                  f"  Preserve partial work       {yes('preserve_verified_changes')}",
+                  f"  Revert its own unverified   {yes('revert_owned_unverified_changes')}",
+                  f"  Dependency changes          {yes('dependency_changes')}",
+                  f"  Budgets                     {limits['max_child_runs']} child runs, "
+                  f"depth {limits['max_child_depth']}, "
+                  f"{limits['max_total_attempts']} attempts, "
+                  f"{limits['max_wall_clock_seconds']}s, "
+                  f"{limits['max_changed_files']} files, "
+                  f"{limits['max_supervisor_calls']} diagnoses",
+                  "", "ALWAYS ESCALATES",
+                  "  Diana stops and asks you, whatever the recovery plan says:"]
+        lines += [f"  {CROSS} {c.replace('_', ' ')}"
+                  for c in proposal.get("predicted_standing", {}).get(
+                      "human_only_conditions", [])]
     lines += ["", "APPROVAL REQUIRED",
               f"  Risk {contract['risk']} · needs your explicit approval before anything runs.",
               f"  This approves starting this run only. It is not a merge, deploy or "
@@ -165,3 +188,112 @@ def blocked_widens(blocked_item: dict) -> bool:
     if blocked_item.get("paths_outside_write_scope"):
         return True
     return blocked_item.get("reason_code") == "reconciliation-mismatch"
+
+
+# --- autonomous session outcome ------------------------------------------
+#
+# The escalation text is the whole point of the feature's failure path. "Human
+# decision needed" is useless: a person returning to a stopped session needs to
+# know what was tried, what remains, what is in their working tree, and exactly
+# which additional authority would unblock it. Every line below is derived from
+# the session outcome; none is written by a model.
+
+_ESCALATION_PLAIN = {
+    "authority-expansion-requested": "the next step needs authority you did not grant",
+    "write-scope-not-subset": "the next step needs to write outside the approved area",
+    "command-not-subset": "the next step needs to run a command you did not approve",
+    "dependency-change-not-authorized": "the next step needs to change dependencies",
+    "forbidden-capability-requested": "the next step needs a capability Diana never grants",
+    "supervisor-requested-human": "the recovery planner says a person must decide",
+    "supervisor-unavailable": "the recovery planner could not be consulted",
+    "supervisor-timeout": "the recovery planner did not answer in time",
+    "supervisor-malformed": "the recovery planner's answer could not be understood",
+    "supervisor-unknown-decision": "the recovery planner proposed something Diana does not do",
+    "supervisor-unknown-field": "the recovery planner's answer carried an unknown instruction",
+    "supervisor-evidence-missing": "the recovery planner needed evidence Diana does not have",
+    "child-budget-exhausted": "the approved number of recovery runs was used up",
+    "child-depth-exceeded": "recovery reached the approved depth limit",
+    "attempt-budget-exhausted": "the approved number of attempts was used up",
+    "wall-clock-exhausted": "the approved time limit was reached",
+    "changed-file-budget-exhausted": "the approved number of changed files was reached",
+    "supervisor-call-budget-exhausted": "the approved number of diagnoses was used up",
+    "no-progress": "recovery repeated itself without making progress",
+    "provenance-ambiguous": "Diana could not prove who last changed a file",
+    "revert-would-lose-work": "undoing a change would have destroyed work Diana does not own",
+    "preserve-conflict": "a change could not be preserved as asked",
+    "lineage-corrupt": "the recovery ledger no longer matches its own digest",
+    "not-recoverable": "this failure has no bounded recovery",
+    "repository-mismatch": "the next step named a different repository",
+    "standing-approval-invalid": "the standing approval could not be read",
+    "standing-approval-digest-mismatch": "the standing approval was changed after you approved it",
+    "autonomy-disabled": "this run was approved in manual mode",
+}
+
+
+def autonomy_view(outcome: dict) -> str:
+    """What the session did, and -- if it stopped -- exactly what it needs."""
+    used, left = outcome["budget_used"], outcome["budget_remaining"]
+    decisions = outcome.get("supervisor_decisions") or []
+    accepted = [d for d in decisions if d.get("accepted")]
+    lines = ["", "AUTONOMOUS SESSION",
+             f"  Outcome            {outcome['outcome']}",
+             f"  Runs               {outcome['runs_attempted']} "
+             f"({len(outcome['completed_runs'])} completed)",
+             f"  Recovery plans     {len(decisions)} requested, {len(accepted)} acted on",
+             f"  Budget used        {used['child_runs']} child runs, "
+             f"{used['attempts']} attempts, {used['wall_clock_seconds']}s, "
+             f"{len(used['changed_files'])} files, "
+             f"{used['supervisor_calls']} diagnoses",
+             f"  Budget left        {left['child_runs']} child runs, "
+             f"{left['attempts']} attempts, {left['wall_clock_seconds']}s, "
+             f"{left['changed_files']} files, {left['supervisor_calls']} diagnoses"]
+
+    lines += ["", "  WORKSPACE"]
+    for label, paths, note in (
+        ("verified", outcome["verified_changes"], "complete and checked"),
+        ("preserved", outcome["preserved_changes"], "kept, NOT yet verified"),
+        ("unverified", outcome["unverified_changes"], "left in place, NOT verified"),
+        ("reverted", outcome["reverted_changes"], "undone by Diana"),
+    ):
+        if paths:
+            lines.append(f"    {label:10} {', '.join(paths)}   ({note})")
+    if not any(outcome[k] for k in ("verified_changes", "preserved_changes",
+                                    "unverified_changes", "reverted_changes")):
+        lines.append("    (nothing was changed)")
+
+    lines += ["", "  RUNS",
+              f"    root       {outcome['root_run_id']}"]
+    for run_id in outcome["completed_runs"]:
+        lines.append(f"    completed  {run_id}")
+    lines.append("    (per-run detail: diana-do result <run-id>)")
+
+    escalation = outcome.get("escalation")
+    if not escalation:
+        lines += ["", f"  {TICK} Finished without needing you.", ""]
+        return "\n".join(lines)
+
+    code = escalation["code"]
+    lines += ["", "STOPPED FOR YOU",
+              f"  Why                {_ESCALATION_PLAIN.get(code, code)}",
+              f"  Reason code        {code}",
+              f"  Detail             {escalation['detail']}"]
+    requested = escalation.get("requested") or {}
+    if "increase_limit" in requested:
+        # A budget is the one escalation with an exact, mechanical remedy.
+        lines += ["  Diana would need a larger budget:",
+                  f"    {requested['increase_limit']}: currently "
+                  f"{requested.get('current_value')}, "
+                  f"{requested.get('used', requested.get('needed'))} used",
+                  "  Everything else about the approval can stay the same."]
+    elif requested:
+        lines.append("  Diana would need:")
+        for key, value in sorted(requested.items()):
+            shown = ", ".join(str(v) for v in value) if isinstance(value, list) else value
+            lines.append(f"    {key.replace('_', ' ')}: {shown}")
+    else:
+        lines.append("  No additional authority would help; this needs your judgement.")
+    lines += ["",
+              "  Approving this does NOT happen by re-running the same command: propose",
+              "  again with the authority above included, review it, and approve that.",
+              ""]
+    return "\n".join(lines)

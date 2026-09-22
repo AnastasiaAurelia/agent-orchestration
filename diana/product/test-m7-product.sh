@@ -513,15 +513,49 @@ frozen = ["install.sh", "diana/ship/ship.py", "diana/adapters/ao.py",
           "diana/ci/map-gate-result.py", "diana/gate/diana-gate.py"]
 frozen += [f"diana/commands/{n}" for n in
            ("diana-ship.md","fix.md","review.md","ship.md","orchestrate.md","loop-audit.md")]
+# POST-M7-E1-D1: the pre-existing production files accepted post-M7 work replaced.
+POST_M7_PRODUCTION = {"diana/adapters/hermes_live.py",
+                      "diana/multiactor/actors.py",
+                      "diana/multiactor/executors.py",
+                      "diana/mutation/remediation_driver.py",
+                      "diana/ci/build-gate-input.py",
+                      "diana/ci/write-summary.py",
+                      "diana/gate/diana-gate.py"}
+# POST-M7-E1-D7: the milestone SUITES this erratum corrects. Test code, never
+# production code -- the same classification M4-ERRATA-001 finding 4 already
+# established, enumerated rather than blanket-excluded.
+POST_M7_HARNESS = {"diana/mutation/test-m4-bounded-mutation.sh",
+                   "diana/multiactor/test-m6-multiactor.sh",
+                   "diana/product/test-m7-product.sh"}
 for path in frozen:
+    # POST-M7-E1-D6: a frozen path that accepted post-M7 work replaced must be in
+    # the enumerated set above; every other frozen path is still required to be
+    # byte-identical to M7's accepted base.
+    if path in POST_M7_PRODUCTION:
+        check(f"M7-AC-21 changed only by accounted post-M7 work: {path}",
+              git("diff","--name-only",BASE,"--",path).strip() != "")
+        continue
     check(f"M7-AC-21 byte-identical to the accepted base: {path}",
           git("diff","--name-only",BASE,"--",path).strip() == "")
 changed = [l.split("\t") for l in git("diff","--name-status",BASE).strip().splitlines() if l]
 modified = {p for st,p in changed if st.startswith("M")}
-is_doc = lambda q: q.startswith("docs/") or q == ".gitignore"
-mod_production = {p for p in modified if not is_doc(p)}
-check("M7-REG-2 modified pre-existing non-doc production files is EMPTY, by set equality",
-      mod_production == set(), f"(got {sorted(mod_production)})")
+# POST-M7-E1-D2: README.md is documentation.
+is_doc = lambda q: q.startswith("docs/") or q in {".gitignore", "README.md"}
+is_harness = lambda q: q.rsplit("/", 1)[-1].startswith("test-") and q.endswith(".sh")
+mod_harness = {p for p in modified if is_harness(p)}
+mod_production = {p for p in modified if not is_doc(p) and not is_harness(p)}
+# POST-M7-E1-D4: M7 itself replaced NOTHING pre-existing, which is still the
+# claim. Accepted post-M7 work replaced exactly POST_M7_PRODUCTION. Still set
+# equality -- a file in neither is still a failure.
+existed_at = lambda base, q: subprocess.run(
+    ["git", "-C", repo_dir, "cat-file", "-e", f"{base}:{q}"],
+    capture_output=True).returncode == 0
+PERMITTED_PRODUCTION = {q for q in POST_M7_PRODUCTION if existed_at(BASE, q)}
+check("M7-REG-2 modified pre-existing non-doc production files is exactly M7's "
+      "(empty) set plus the accounted post-M7 set, by set equality",
+      mod_production == PERMITTED_PRODUCTION, f"(got {sorted(mod_production)})")
+check("M7-REG-2 test-harness corrections are classified separately and enumerated",
+      mod_harness <= POST_M7_HARNESS, f"(got {sorted(mod_harness)})")
 deleted = [p for st,p in changed if st.startswith("D")]
 check("M7-REG-3 nothing was deleted or renamed", deleted == [], f"({deleted})")
 untracked = [l for l in git("ls-files","--others","--exclude-standard").strip().splitlines() if l]

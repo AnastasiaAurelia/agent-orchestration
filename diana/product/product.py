@@ -54,6 +54,10 @@ import executors as _executors  # noqa: E402
 import proposal as _proposal  # noqa: E402
 import refusal as _ref  # noqa: E402
 import view as _view  # noqa: E402
+sys.path.insert(0, str(_HERE.parent / "autonomy"))
+sys.path.insert(0, str(_HERE.parent / "supervisors"))
+import escalation as _esc  # noqa: E402
+import policy as _autonomy  # noqa: E402
 
 EXIT_OK, EXIT_REFUSED, EXIT_BLOCKED = 0, 2, 3
 
@@ -143,8 +147,58 @@ def _backends(kind: str, contract_block, run_directory=None):
     return DeterministicBuilder({}), DianaGatedReviewer([])
 
 
+# Configuration seams, following the existing `DIANA_RUNS_BASE` precedent.
+# Both name parameters `proposal.build` already takes; neither invents authority.
+# Every value lands inside the approved digest, so a budget set here is a budget
+# the human sees rendered and approves -- it cannot be changed after approval.
+ENV_AUTONOMY_LIMITS = "DIANA_AUTONOMY_LIMITS"   # JSON object of policy limits
+ENV_AUTONOMY_ALLOW = "DIANA_AUTONOMY_ALLOW"     # JSON object of policy allow flags
+ENV_RUN_BUDGET = "DIANA_RUN_BUDGET"             # JSON {max_attempts,total_seconds}
+
+
+def _json_env(name: str) -> dict:
+    raw = os.environ.get(name)
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise _ref.Refused(_ref.PROPOSAL_MALFORMED,
+                           f"{name} is not valid JSON: {exc}") from None
+    if not isinstance(value, dict):
+        raise _ref.Refused(_ref.PROPOSAL_MALFORMED, f"{name} must be a JSON object")
+    return value
+
+
+def _autonomy_policy(enabled: bool) -> dict:
+    """The policy to propose. `policy.build` validates it; bad values refuse."""
+    if not enabled:
+        return _autonomy.manual()
+    try:
+        return _autonomy.build(allow=_json_env(ENV_AUTONOMY_ALLOW),
+                               limits=_json_env(ENV_AUTONOMY_LIMITS))
+    except _autonomy.PolicyError as exc:
+        raise _ref.Refused(_ref.PROPOSAL_MALFORMED,
+                           f"the autonomy policy is invalid: {exc}") from None
+
+
+def _run_budget() -> dict:
+    budget = {"max_attempts": _proposal.DEFAULT_MAX_ATTEMPTS,
+              "total_seconds": _proposal.DEFAULT_TOTAL_SECONDS}
+    supplied = _json_env(ENV_RUN_BUDGET)
+    unknown = sorted(set(supplied) - set(budget))
+    if unknown:
+        raise _ref.Refused(_ref.PROPOSAL_MALFORMED,
+                           f"{ENV_RUN_BUDGET} carries unknown field(s) {unknown}")
+    budget.update(supplied)
+    return budget
+
+
 def cmd_propose(args) -> int:
-    proposal = _proposal.build(args.goal, args.repo or os.getcwd(), base=args.proposals_base)
+    proposal = _proposal.build(
+        args.goal, args.repo or os.getcwd(), base=args.proposals_base,
+        autonomy_policy=_autonomy_policy(args.autonomy),
+        executor=args.executor, **_run_budget())
     print(_view.plan_view(proposal))
     # The launcher is not installed on PATH. Preserve storage and target context
     # with absolute, shell-quoted paths so this line works from another cwd.
@@ -153,6 +207,8 @@ def cmd_propose(args) -> int:
                "--proposals-base", str(_proposal.proposals_dir(args.proposals_base).resolve().parent)]
     if args.executor != "hermes":
         command += ["--executor", args.executor]
+    if args.autonomy:
+        command += ["--autonomy"]
     print(f"  To start it:   {shlex.join(command)}")
     print(f"  To do nothing: ignore this. Nothing has run and no run exists yet.\n")
     return EXIT_OK
@@ -169,6 +225,9 @@ def cmd_approve(args) -> int:
     run_directory = approved["run_directory"]
     print(f"\nAPPROVED  run {approved['run_id']}\n")
     loaded = _recovery.load_run(run_directory)
+    standing = approved.get("standing")
+    if standing and standing["autonomy"]["enabled"]:
+        return _run_autonomous(approved, loaded, args)
     builder, reviewer = _backends(args.executor, loaded["contract"], run_directory)
     try:
         _actors.execute(run_directory, builder=builder, reviewer=reviewer,
@@ -178,6 +237,61 @@ def cmd_approve(args) -> int:
         print(f"  stopped: {exc.code}\n")
     print(_view.progress_view(run_directory))
     return _emit_result(run_directory)
+
+
+def _supervisor(repo_root=None):
+    """The configured automated planner, or the one that always asks a human.
+
+    Resolution order, and the order is the point:
+
+      1. `hermes_supervisor` -- Diana's OWN provider machinery, so an installation with
+                      working Diana/Hermes auth needs no second credential. This
+                      is first because anything else would ask a user who
+                      already has a working provider to go and buy another one.
+      2. `openai_supervisor` -- a direct OpenAI-compatible endpoint, for an installation
+                      that has a plain API key and no Hermes provider.
+      3. human     -- no planner. Records everything and escalates.
+
+    Falling back to `HumanSupervisor` rather than to "carry on" is the whole
+    posture: autonomy with no planner is strictly better than today, never worse.
+    """
+    import mock as _mock
+
+    # Module names are unambiguous on purpose: `diana/adapters/hermes.py`
+    # already exists, and these directories are flat on sys.path, so a
+    # supervisor module called `hermes` would resolve to whichever landed first.
+    for module_name, kwargs in (("hermes_supervisor", {"repo_root": repo_root}),
+                                ("openai_supervisor", {})):
+        try:
+            adapter = __import__(module_name).from_environment(**kwargs)
+        except Exception:  # noqa: BLE001 - an adapter that cannot load is not a planner
+            adapter = None
+        if adapter is not None:
+            return adapter
+    return _mock.HumanSupervisor()
+
+
+def _run_autonomous(approved, loaded, args) -> int:
+    """One standing approval, driven to COMPLETE or BLOCKED_FOR_HUMAN."""
+    import loop as _loop
+
+    run_directory = approved["run_directory"]
+    session = _loop.Session(
+        lineage_dir=Path(run_directory).parent / f"lineage-{approved['run_id']}",
+        standing_doc=approved["standing"], standing_digest=approved["standing_digest"],
+        supervisor=_supervisor(loaded["contract"]["target"]["repo_root"]),
+        backends=lambda cb, rd: _backends(args.executor, cb, rd),
+        verify=_verify_for(loaded["contract"]), runs_base=_runs_base())
+    session.start(approved["run_id"], loaded["contract"]["task"])
+    outcome = session.run(run_directory, approved["run_id"])
+    print(_view.autonomy_view(outcome))
+    # Deliberately NOT `_emit_result(run_directory)`. That renders the ROOT
+    # run's own report, and in a successful session the root is the run that
+    # FAILED -- recovery is the whole point. Printing "RESULT FAILED" under
+    # "Outcome COMPLETE" was measured in the first real dogfood and is a
+    # straightforwardly false statement about the session. The session view is
+    # the authoritative summary; per-run detail stays reachable by run id.
+    return EXIT_BLOCKED if outcome["outcome"] == _esc.BLOCKED_FOR_HUMAN else EXIT_OK
 
 
 def _emit_result(run_directory) -> int:
@@ -208,6 +322,9 @@ def _shared() -> argparse.ArgumentParser:
     common.add_argument("--repo", default=argparse.SUPPRESS)
     common.add_argument("--proposals-base", default=argparse.SUPPRESS)
     common.add_argument("--executor", choices=("hermes", "deterministic"), default=argparse.SUPPRESS)
+    # Autonomy is OPT-IN and off by default. Manual mode is unchanged in every
+    # respect, including the bytes its proposal digest hashes to.
+    common.add_argument("--autonomy", action="store_true", default=argparse.SUPPRESS)
     return common
 
 
@@ -241,7 +358,8 @@ def main(argv: list[str]) -> int:
             return EXIT_OK
     # Suppressed shared defaults prevent subparser defaults from erasing options
     # supplied before the verb, especially an explicit expected repository.
-    for name, default in (("repo", None), ("proposals_base", None), ("executor", "hermes")):
+    for name, default in (("repo", None), ("proposals_base", None), ("executor", "hermes"),
+                          ("autonomy", False)):
         if not hasattr(args, name):
             setattr(args, name, default)
     try:
