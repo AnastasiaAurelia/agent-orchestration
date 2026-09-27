@@ -10,6 +10,27 @@ documents: seven specifications and seven errata.
 Every claim below was read from the accepted specifications, audits and implementation rather than
 recalled. Where a number appears, it was measured.
 
+> **Snapshot boundary.** This document is the canonical architecture record for the **accepted M1–M7
+> system** at `431229e` and for the governance updates documented since. Sections A1–A7 and B are
+> kept deliberately as an **acceptance snapshot**. They are not rewritten as the code evolves, and a
+> statement in them is a statement about the accepted revision unless it is labeled **current
+> `main`**.
+>
+> Current `main` also contains **post-M7 changes** that were accepted separately and are **not**
+> part of the M1–M7 acceptance: generic write-scope derivation, the Hermes Builder/Reviewer
+> production-path repair, CI gate-input hardening, mechanical human merge approval (Track B), and
+> one-approval autonomous recovery. They are summarized in
+> [Post-M7 deltas on current `main`](#post-m7-deltas-on-current-main) and documented in:
+>
+> | Source | Role |
+> |---|---|
+> | [`README.md`](../../README.md) | Entry point for current `main`: the product surface and runtime behaviour |
+> | This document | Accepted M1–M7 architecture, plus clearly marked post-M7 deltas |
+> | `HERMES-RUNTIME-M1` … `M7` and their errata | Frozen accepted specifications; they win over this document |
+> | [`DIANA-POST-M7-ERRATA-001.md`](DIANA-POST-M7-ERRATA-001.md) | The authoritative account of which pre-existing production files accepted post-M7 work replaced |
+> | [`DIANA-POST-M7-ROADMAP.md`](DIANA-POST-M7-ROADMAP.md) | The original post-M7 plan, with explicit current-status labels |
+> | [`DIANA-HUMAN-APPROVAL-B0.md`](DIANA-HUMAN-APPROVAL-B0.md) … [`B5`](DIANA-HUMAN-APPROVAL-B5.md) | Evidence for mechanical human merge approval |
+
 ---
 
 ## The one-sentence version
@@ -192,7 +213,8 @@ Three states, and they are **not** the same thing:
 | **UNPROVEN** | The Security Track's honest default. Either applicability was never established, or no verification run was submitted for that control. |
 | **CERTIFIED** | **Does not exist today.** No control is certified by any part of M1–M7. |
 
-The Security Gate currently evaluates **75 controls** and reports **75/75 UNPROVEN**, which maps to
+At the accepted revision the Security Gate evaluates **75 controls** and reports **75/75 UNPROVEN**
+(`diana/security/` is unchanged on current `main`), which maps to
 `REQUIRE_HUMAN`. That is the standard being met, not 75 failures — and the distinction matters,
 because "we have no evidence" and "we found a violation" are different facts.
 
@@ -212,10 +234,10 @@ own changes.
 failed on `REQUIRE_HUMAN` would deadlock the pull request against its own required check. The run log
 states that "merge stays blocked by the independent required human/code-owner review rule."
 
-**No such rule is currently configured.** The accepted M4 audit records the repository ruleset as
-`required_approving_review_count: 0`, `require_code_owner_review: false`,
-`require_last_push_approval: false`. `CODEOWNERS` exists but has no merge-blocking effect without
-code-owner review enabled.
+**Historical baseline (pre-Track-B): no such rule was configured.** The accepted M4 audit records the
+repository ruleset as `required_approving_review_count: 0`, `require_code_owner_review: false`,
+`require_last_push_approval: false`. `CODEOWNERS` existed but had no merge-blocking effect without
+code-owner review enabled. The current state follows.
 
 > **M5-D20 is DISCHARGED** (Track B, phases B0–B5). The values above describe the pre-Track-B
 > baseline and are retained for context. The live `diana-main-protection` ruleset now carries
@@ -252,15 +274,26 @@ plan, retained as history.
 
 ## A7 — Legacy and expert surface
 
-**Nothing has been deleted or retired.** All six slash commands, `ship.py`, `ao.py` and every CI
-adapter are byte-identical to the accepted M6 base.
+**Nothing has been deleted or retired.** *Accepted M1–M7 baseline (`431229e`):* all six slash
+commands, `ship.py`, `ao.py` and every CI adapter were byte-identical to the accepted M6 base. That
+statement remains true for the accepted revision.
 
-| Surface | Status |
+*Current `main`:* it is not true of every file. Accepted post-M7 work replaced four of these surfaces:
+`diana/ci/build-gate-input.py`, `diana/ci/write-summary.py` and `diana/gate/diana-gate.py` (`0f121ce`,
+CI gate-input hardening), and `diana/adapters/hermes_live.py` (`0828801`, `f724038`, the production
+Builder/Reviewer repair). These are authorized, documented changes. They are enumerated by set
+equality in [`DIANA-POST-M7-ERRATA-001.md`](DIANA-POST-M7-ERRATA-001.md) (POST-M7-E1-D1) and
+re-asserted by `diana/ci/test-post-m7-replacement-set.sh`. The slash commands, `ship.py`, `ao.py`,
+preflight and `diana/security/` remain byte-identical to `431229e` on current `main`.
+
+| Surface | Status (accepted baseline → current `main`) |
 |---|---|
 | `/diana-ship` | Present and usable. Its **steps 2–5** (accept the goal, author the Definition of Done, classify risk, precheck) are **superseded for the certified product path only** — the M7 flow produces the same four outputs from one sentence. The command is not retired. |
 | `/fix`, `/review`, `/ship`, `/orchestrate`, `/loop-audit` | Present, unchanged, expert/debug surfaces. |
 | `ship.py` (10 subcommands), `ao.py` (4) | Present, unchanged. |
-| Gate, Security Gate, preflight, adapters | Present, unchanged; part of the normal CI path. |
+| Security Gate, preflight | Present, unchanged; part of the normal CI path. |
+| Diana Gate, gate-input adapter, CI summary | Present; unchanged at acceptance. **Current `main`:** hardened post-M7 by `0f121ce` — strictly more is refused, nothing is newly admitted (POST-M7-E1-D1). |
+| Hermes live adapter (`hermes_live.py`) | Unchanged at acceptance. **Current `main`:** replaced post-M7 by `0828801`/`f724038`; contract, `allowed_tools` and `read_scope` unchanged (POST-M7-E1-D1). |
 | Expert inspection | The existing inspectors — journal read, run report, authority re-binding — surface contract, journal, actor, reconciliation, reason codes and raw evidence. |
 
 The product path and the expert path **converge on the same runtime**: the same goal driven through
@@ -323,31 +356,82 @@ rather than reimplementing them.
    stale? ──▶ refused, no run created
 ```
 
-### Future tracks — **none of these exist today**
+### Post-M7 tracks — Track B complete; A, C and D are planning only
 
 ```
                        M1–M7 COMPLETE
                              │
         ┌────────────────────┼────────────────────┐
         ▼                    ▼                    ▼
-  [FUTURE] TRACK A     [FUTURE] TRACK B     [FUTURE] TRACK D
+  [PLANNED] TRACK A    [COMPLETE] TRACK B   [PLANNED] TRACK D
   Security Evidence     Mechanical Human      Distribution &
-   Certification           Approval          Productization
+   Certification       Merge Approval —      Productization
+                      M5-D20 DISCHARGED
+                   (conditional: credential
+                        separation)
         │                    │                    │
-        └─────────┬──────────┘                    │
-                  ▼                               │
-          [FUTURE] TRACK C ◀─────────────────────┘
+        │                    ▼                    │
+        │          merge ≠ deploy: deployment     │
+        │          approval still unaddressed     │
+        │                                         │
+        └─────────┬───────────────────────────────┘
+                  ▼
+          [PLANNED] TRACK C
        Certified Workflow Expansion
                   │
                   ▼
            broader production use
 ```
 
-See [`DIANA-POST-M7-ROADMAP.md`](DIANA-POST-M7-ROADMAP.md).
+- **Track B is complete for merge.** M5-D20 is discharged, measured on live pull requests
+  ([`DIANA-HUMAN-APPROVAL-B5.md`](DIANA-HUMAN-APPROVAL-B5.md)). The discharge is **conditional on
+  credential separation**, an operational assumption that no GitHub rule enforces or detects
+  (B5 §13.3). It did not address deployment, and merge approval is not deployment approval.
+- **Tracks A, C and D are planning only.** Their roadmaps state that nothing in them is implemented;
+  no security control is certified and no workflow class has been added.
+
+This diagram was previously titled "Future tracks — none of these exist today" and showed Track B as
+future. That was the pre-Track-B plan. The original dependency map is kept unedited in
+[`DIANA-POST-M7-ROADMAP.md`](DIANA-POST-M7-ROADMAP.md), and the original Track B plan is kept in
+[`DIANA-HUMAN-APPROVAL-ROADMAP.md`](DIANA-HUMAN-APPROVAL-ROADMAP.md).
 
 ---
 
-## What is true today, in one table
+## Post-M7 deltas on current `main`
+
+*Post-M7 delta* — accepted after `431229e`, **not** part of the M1–M7 acceptance, and not folded into
+A1–A7 above. Each row was checked against the commit and the current source. None of them adds a
+tool, a network capability, merge authority or deploy authority.
+
+| Delta | Where | What changed on current `main` | Stated limits |
+|---|---|---|---|
+| **Generic write-scope derivation** | `3e248fd` (#66); `diana/product/intent.py`, `catalogue.py` | A goal that names its own paths gets exactly those paths as write roots. A named path policy will not grant — absolute, `..`, a symlink escaping the repository, `.git`, `.github/…`, `.env*`, Diana's enforcement surface — is **refused**, not replaced. Only a goal naming no path falls back to the frozen roots `src`, `lib`, `tests`, `test`. | A named path is a *request* inside the intent; the contract is still built by the same builder and enforced at the same dispatch boundary. Directories must be written with `/` or `./`. |
+| **Hermes Builder/Reviewer production-path repair** | `0828801`, `f724038` (#65, `97f718a`) | OAuth-backed provider resolution (fail-closed); the reviewer is *presented* only `projection.REVIEWER_TOOLS`; verdict extraction is a fail-closed parser over the complete final text; reviewer evidence is bound to the exact build under review; the Builder is given the approved task; reviewer turns get an explicit wall-clock bound. One controlled real dogfood run completed end to end. | **A validated repair, not a production-hardening claim.** Verdicts over 2,000 characters are proven by the deterministic suite only. `verdict.py`'s closed schema is untouched. |
+| **CI gate-input hardening** | `0f121ce` (in #65) | Per-cause refusal reasons and annotations; a **deleted** review-sensitive path is now visible to the Gate (`--diff-filter=ACMRD`); the Gate recognises and quotes the adapter's failure envelope; the summary renders `FAIL` instead of a traceback. | The closed input schema, every decision path and every exit code are unchanged. Strictly more is refused; nothing is newly admitted (POST-M7-E1-D1). |
+| **Mechanical human merge approval** | Track B (#64, `aec0820`); [`B5`](DIANA-HUMAN-APPROVAL-B5.md) | M5-D20 **discharged**: a zero-approval automation pull request is blocked with checks green; automation cannot approve its own pull request; a code-owner approval opens the merge path for that exact revision; a diff-affecting push dismisses it. See [A6](#a6--governance-layer). | **Conditional on credential separation**, an operational assumption no GitHub rule enforces or detects (B5 §13.3). Merge approval is **not** deployment approval; deployment approval remains unaddressed. |
+| **One-approval autonomous recovery** | `2f3559f` (#67, `c8d6ecf`); `diana/autonomy/`, `diana/supervisors/` | Opt-in (`diana-do --autonomy`); off by default, and a manual proposal hashes to the same bytes as before. A digest-bound **standing approval** (the envelope, the executor and a closed autonomy policy with a fixed deny list and finite limits) is approved once with the root run. On a failure classified as recoverable, Diana may start **child recovery runs**, each with **its own run id**, each proven a subset of the standing approval on every axis, recorded in a digest-bound lineage, and all drawing on budgets that are **cumulative across the lineage**. The session ends `COMPLETE` or `BLOCKED_FOR_HUMAN`. | One approval authorizes one bounded session, rooted at one approved run — not permanent autonomy. A supervisor's recommendation is never authority. No session-level resume if the loop's own process is interrupted. Evidence is the deterministic `diana/autonomy/test-autonomy-*.sh` suites. |
+
+**Two recovery mechanisms that must not be conflated:**
+
+```text
+crash recovery (M5, A4)                 autonomous recovery (post-M7, opt-in)
+  same run id                             standing digest-bound approval
+  same approved contract                        ↓
+  same remaining budget                   bounded session lineage
+  target moved → BLOCKED                        ↓
+                                          root run + child recovery runs
+                                                ↓
+                                          each child has its own run id
+                                                ↓
+                                          aggregate budget across the lineage
+```
+
+---
+
+## What is true on current `main`, in one table
+
+Each row was re-checked against current `main`. Rows marked *post-M7* describe behaviour that did
+not exist at the accepted revision.
 
 | Claim | Status |
 |---|---|
@@ -355,11 +439,12 @@ See [`DIANA-POST-M7-ROADMAP.md`](DIANA-POST-M7-ROADMAP.md).
 | Model output can grant authority | **No** — structurally |
 | Approval binds an exact immutable proposal | **Yes** |
 | Crash/restart resumes the same run | **Yes** |
+| Autonomous recovery keeps the same run id | **No** (*post-M7*, opt-in) — child recovery runs get their own run ids under one standing approval |
 | Builder and Reviewer under one envelope | **Yes** |
 | Reviewer is read-only by enforcement | **Yes** |
 | Backend switch creates authority | **No** |
 | Security findings are certified | **No** — 75/75 UNPROVEN |
-| Human merge approval is mechanically enforced | **Yes** — M5-D20 discharged (Track B); conditional on credential separation |
+| Human merge approval is mechanically enforced | **Yes** (*post-M7*) — M5-D20 discharged (Track B); conditional on credential separation |
 | Deployment approval is enforced | **No** — there is no deployment; merge approval is not deploy approval |
 | Arbitrary workflows can be added by keyword | **No** — a class needs its own certification |
 | Runs on macOS/Windows | **Unproven** — `/proc` and `flock` are Linux assumptions |

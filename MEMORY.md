@@ -2,8 +2,10 @@
 
 _Last updated: 2026-08-31_
 
-This file is the canonical handoff for the current Diana architecture discussion.  
-Use it to start a fresh Claude Code / Codex / ChatGPT session without re-deriving the architecture from scratch.
+This file is a historical architecture handoff dated 2026-08-31. It captures the Diana architecture
+discussion at that point in time and predates the accepted M7 runtime and later post-M7 changes.
+For current architecture and product behavior, use [`README.md`](README.md) and
+[`docs/architecture/DIANA-ARCHITECTURE.md`](docs/architecture/DIANA-ARCHITECTURE.md).
 
 ---
 
