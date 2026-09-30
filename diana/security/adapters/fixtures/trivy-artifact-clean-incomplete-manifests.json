@@ -1,0 +1,32 @@
+{
+  "tool": {
+    "name": "trivy",
+    "version": "0.72.0"
+  },
+  "execution": {
+    "completed": true
+  },
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "c51ce15a301df2d7804b36d59e9d508b8653249b",
+    "root": ".",
+    "scope": "full-repo"
+  },
+  "config": {},
+  "scanned_inputs": [
+    "requirements.txt"
+  ],
+  "report": {
+    "Results": [
+      {
+        "Target": "requirements.txt",
+        "Class": "lang-pkgs",
+        "Type": "pip",
+        "Vulnerabilities": []
+      }
+    ]
+  },
+  "artifact_binding": {
+    "sha256": "4dd691c4ed3f2ecd0887a18276a760c652d67ff174f286f69ae9721f9929e9b2"
+  }
+}

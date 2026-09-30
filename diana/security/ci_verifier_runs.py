@@ -127,6 +127,7 @@ import functools
 import hashlib
 import http.server
 import io
+from datetime import datetime, timezone
 import json
 import os
 import platform
@@ -148,6 +149,11 @@ sys.path.insert(0, str(SEC_DIR / "adapters"))
 import semgrep_adapter  # noqa: E402
 import gitleaks_adapter  # noqa: E402
 import deterministic_repo_adapter  # noqa: E402
+import osv_scanner_adapter  # noqa: E402
+import trivy_adapter  # noqa: E402
+import zap_adapter  # noqa: E402
+import nuclei_adapter  # noqa: E402
+import provenance  # noqa: E402
 sys.path.insert(0, str(SEC_DIR / "dynamic"))
 import dynamic_normalizer  # noqa: E402
 from scenarios import SCENARIO_REGISTRY  # noqa: E402
@@ -221,6 +227,58 @@ FRONTEND_BUNDLE_DIR_CANDIDATES = ("dist", "build", "out", ".next", "public/build
 
 _SUBPROCESS_TIMEOUT_SECONDS = 120
 _DOWNLOAD_TIMEOUT_SECONDS = 60
+
+# osv-scanner: version-pinned, checksum-verified release binary (Security
+# Phase 7.1). Checksum taken from the release's own published
+# osv-scanner_SHA256SUMS file for this exact version -- never `@latest`,
+# never an unverified download, exactly the same invariant already applied
+# to Gitleaks above.
+OSV_SCANNER_VERSION = "2.6.0"
+OSV_SCANNER_LINUX_X64_URL = (
+    f"https://github.com/google/osv-scanner/releases/download/v{OSV_SCANNER_VERSION}/osv-scanner_linux_amd64"
+)
+OSV_SCANNER_LINUX_X64_SHA256 = "ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108"
+
+# Manifest/lockfile basenames osv-scanner is asked to scan -- a small,
+# fixed, non-PR-influenced list (never derived from PR-supplied content).
+# Only files that actually exist in the checkout are ever passed on the
+# command line; the "expected manifests" the adapter checks scan coverage
+# against is derived from exactly this same detection, never a larger
+# claim than what was actually found and scanned.
+DEPENDENCY_MANIFEST_CANDIDATES = (
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+    "requirements.txt", "Pipfile.lock", "poetry.lock",
+    "go.sum", "Cargo.lock", "composer.lock", "Gemfile.lock",
+)
+
+# Trivy: version-pinned, checksum-verified release tarball (Security
+# Phase 7.2). Checksum taken from the release's own published
+# trivy_<version>_checksums.txt for this exact version.
+TRIVY_VERSION = "0.72.0"
+TRIVY_LINUX_X64_URL = (
+    f"https://github.com/aquasecurity/trivy/releases/download/v{TRIVY_VERSION}/"
+    f"trivy_{TRIVY_VERSION}_Linux-64bit.tar.gz"
+)
+TRIVY_LINUX_X64_SHA256 = "bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"
+
+# Nuclei: version-pinned, checksum-verified release zip (Security Phase
+# 7.4). Checksum taken from the release's own published
+# nuclei_<version>_checksums.txt for this exact version.
+NUCLEI_VERSION = "3.11.1"
+NUCLEI_LINUX_X64_URL = (
+    f"https://github.com/projectdiscovery/nuclei/releases/download/v{NUCLEI_VERSION}/"
+    f"nuclei_{NUCLEI_VERSION}_linux_amd64.zip"
+)
+NUCLEI_LINUX_X64_SHA256 = "ea63d4ae232808cd7c6bc00d0142428e231fab59dae01042246097d195835ab6"
+
+# OWASP ZAP: run via the official, version-TAG-pinned Docker image (never
+# `:latest`) -- ZAP's own recommended CI usage is the Docker baseline
+# scan, and there is no single raw-binary release asset to
+# checksum-pin the way osv-scanner/Trivy/Nuclei have. Tag-pinning (not
+# digest-pinning) is a deliberate, documented limitation of this round --
+# see the Phase 7 report's "what this still does not prove" section.
+ZAP_DOCKER_IMAGE = "zaproxy/zap-stable:2.16.1"
+_ZAP_DOCKER_TIMEOUT_SECONDS = 300
 
 # Diana's own internal deterministic-repo-scan check has no third-party
 # tool version to report -- this names ITS OWN traversal-logic version
@@ -422,6 +480,48 @@ def _diag(stage: str, detail: str = "") -> None:
     exception TYPE names, or fixed strings -- never file contents,
     finding values, tokens, or any other secret-shaped data."""
     print(f"[gitleaks-diag] {stage}{': ' + detail if detail else ''}", file=sys.stderr)
+
+
+def _emit_provenance_manifest(
+    *,
+    verifier_type: str,
+    tool_name: str,
+    tool_version: str,
+    repository: str,
+    commit: str,
+    environment: str,
+    target: str,
+    started_at: str,
+    finished_at: str,
+    command_identity: str,
+    ruleset_identity: str,
+    artifact_digest: str,
+    exit_status: str,
+    coverage_description: str,
+) -> None:
+    """Builds a Security Phase 7.5 provenance manifest (provenance.py)
+    for one real, completed external-verifier run and emits it as one
+    diagnostic JSON line to STDERR (never stdout -- see `_diag`'s own
+    docstring for why). Purely additive audit trail: never raises (a
+    malformed manifest degrades to a diag line noting the failure, not a
+    collector crash) and never affects any PASS/FAIL/UNPROVEN/ERROR
+    determination, which remains evidence_model.py's alone."""
+    try:
+        manifest = provenance.build_manifest(
+            verifier_type=verifier_type, tool_name=tool_name, tool_version=tool_version,
+            repository=repository, commit=commit, environment=environment, target=target,
+            started_at=started_at, finished_at=finished_at, command_identity=command_identity,
+            ruleset_identity=ruleset_identity, artifact_digest=artifact_digest,
+            exit_status=exit_status, coverage_description=coverage_description,
+        )
+    except provenance.ProvenanceError as exc:
+        _diag("provenance-build-failed", type(exc).__name__)
+        return
+    print(f"[verifier-provenance] {json.dumps(manifest, sort_keys=True)}", file=sys.stderr)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 GITLEAKS_DIAG_STAGES = (
@@ -676,6 +776,636 @@ def collect_gitleaks_runs(repo_root: str = ".") -> list[dict[str, Any]]:
         return runs
 
 
+def _download_pinned_file(url: str, expected_sha256: str, diag_prefix: str) -> bytes | None:
+    """Downloads `url` and verifies it against `expected_sha256` BEFORE
+    returning anything. Returns the verified bytes, or None on ANY
+    failure (network, HTTP error, checksum mismatch) -- a
+    compromised/substituted download is refused, never silently used.
+    Mirrors `_verify_and_extract_gitleaks`'s checksum-first discipline,
+    generalized for osv-scanner (a raw binary) and Trivy (a tarball)."""
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": "diana-security-ci"})
+        with urllib.request.urlopen(request, timeout=_DOWNLOAD_TIMEOUT_SECONDS) as response:  # noqa: S310 -- fixed, pinned HTTPS URL to a known release asset
+            data = response.read()
+    except urllib.error.HTTPError as exc:
+        _diag(f"{diag_prefix}_DOWNLOAD", f"no: HTTP {exc.code}")
+        return None
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        _diag(f"{diag_prefix}_DOWNLOAD", f"no: {type(exc).__name__}: {exc}")
+        return None
+
+    actual_sha256 = hashlib.sha256(data).hexdigest()
+    if actual_sha256 != expected_sha256:
+        _diag(f"{diag_prefix}_CHECKSUM", f"MISMATCH (downloaded {len(data)} bytes; refusing to use)")
+        return None
+    _diag(f"{diag_prefix}_CHECKSUM", "match")
+    return data
+
+
+def _find_or_install_osv_scanner(workdir: Path) -> str | None:
+    """Returns a path to a working `osv-scanner` executable, or None if
+    unavailable. Tries an already-on-PATH binary first (cheap, no
+    network); falls back to downloading the pinned, checksum-verified
+    Linux x86_64 release binary (a single raw executable, no archive).
+    Only supports linux/x86_64; any other platform, or any download/
+    checksum/network failure, gracefully returns None."""
+    on_path = shutil.which("osv-scanner")
+    if on_path is not None:
+        return on_path
+
+    if platform.system() != "Linux" or platform.machine() not in ("x86_64", "AMD64"):
+        return None
+
+    data = _download_pinned_file(OSV_SCANNER_LINUX_X64_URL, OSV_SCANNER_LINUX_X64_SHA256, "OSV_SCANNER")
+    if data is None:
+        return None
+
+    binary_path = workdir / "osv-scanner"
+    try:
+        binary_path.write_bytes(data)
+        binary_path.chmod(0o755)
+    except OSError:
+        return None
+    return str(binary_path)
+
+
+def _detect_dependency_manifests(repo_root: str) -> list[str]:
+    """Returns the subset of DEPENDENCY_MANIFEST_CANDIDATES that actually
+    exist directly under repo_root -- never assumed, never fabricated,
+    same discipline as `_detect_frontend_bundle_dir`. Relative, forward-
+    slash paths (matching how osv-scanner/Trivy report scanned inputs)."""
+    root = Path(repo_root)
+    return sorted(name for name in DEPENDENCY_MANIFEST_CANDIDATES if (root / name).is_file())
+
+
+def _run_osv_scanner(osv_scanner_path: str, target_root: str) -> dict[str, Any] | None:
+    """Runs `osv-scanner scan source --format=json <target_root>`.
+    Returns the parsed JSON dict on a run that produced valid JSON
+    (osv-scanner exits non-zero when it FOUND vulnerabilities -- that is
+    a legitimate, expected exit code, not a failure -- so exit code alone
+    is never used to decide tool failure here, only JSON parseability).
+    None on any failure to produce parseable output at all."""
+    proc = _run(
+        [osv_scanner_path, "scan", "source", "--format=json", target_root],
+        timeout=_SUBPROCESS_TIMEOUT_SECONDS,
+    )
+    if proc is None:
+        return None
+    try:
+        report = json.loads(proc.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(report, dict):
+        return None
+    return report
+
+
+def build_osv_scanner_envelope(
+    repository: str,
+    commit: str,
+    root: str,
+    osv_report: dict[str, Any],
+    scanned_manifests: list[str],
+    tool_version: str,
+) -> dict[str, Any]:
+    """Pure function: wraps a real, already-produced osv-scanner report
+    into the adapter_base scan-evidence-artifact envelope. Never invokes
+    osv-scanner itself -- separated out for deterministic, offline unit
+    testing (see test-ci-verifier-runs.sh)."""
+    envelope: dict[str, Any] = {
+        "tool": {"name": "osv-scanner", "version": tool_version},
+        "execution": {"completed": True},
+        "target": {"repository": repository, "commit": commit, "root": root, "scope": "full-repo"},
+        "config": {},
+        "scanned_inputs": sorted(set(scanned_manifests)),
+        "report": osv_report,
+    }
+    bound = {k: envelope[k] for k in ("tool", "execution", "target", "config", "scanned_inputs", "report")}
+    canonical = json.dumps(bound, sort_keys=True, separators=(",", ":"))
+    envelope["artifact_binding"] = {"sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest()}
+    return envelope
+
+
+def collect_osv_runs(repo_root: str = ".") -> list[dict[str, Any]]:
+    """Orchestrates real osv-scanner execution end to end for SEC-060
+    (Security Phase 7.1). Any failure at any step (git identity, tool
+    availability, no dependency manifest detected, execution) degrades to
+    `osv_scanner_adapter.ingest(None, ...)` -- explicit UNPROVEN, never a
+    crash, never fabricated evidence. If NO dependency manifest exists in
+    this repository at all, osv-scanner is never even invoked -- SEC-060
+    correctly stays UNPROVEN rather than a scan being fabricated for a
+    manifest set that doesn't exist (same principle as
+    `_detect_frontend_bundle_dir`'s callers)."""
+    identity = "ci_verifier_runs::osv-scanner-live"
+    control_ids = sorted(osv_scanner_adapter.AUTHORIZED_EVIDENCE.keys())
+
+    target = git_repository_identity(repo_root)
+    if target is None:
+        return osv_scanner_adapter.ingest(None, control_ids, identity, None)
+    repository, commit = target
+
+    manifests = _detect_dependency_manifests(repo_root)
+    expected_target = {"repository": repository, "commit": commit, "manifests": manifests}
+    if not manifests:
+        return osv_scanner_adapter.ingest(None, control_ids, identity, expected_target)
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        started_at = _utc_now_iso()
+        osv_path = _find_or_install_osv_scanner(tmp)
+        if osv_path is None:
+            return osv_scanner_adapter.ingest(None, control_ids, identity, expected_target)
+
+        report = _run_osv_scanner(osv_path, repo_root)
+        if report is None:
+            return osv_scanner_adapter.ingest(None, control_ids, identity, expected_target)
+
+        version_proc = _run([osv_path, "--version"], timeout=15)
+        tool_version = (
+            version_proc.stdout.decode("utf-8", "replace").strip() if version_proc is not None else "unknown"
+        )
+
+        envelope = build_osv_scanner_envelope(repository, commit, repo_root, report, manifests, tool_version)
+        artifact_path = tmp / "osv-scanner-artifact.json"
+        artifact_path.write_text(json.dumps(envelope), encoding="utf-8")
+
+        _emit_provenance_manifest(
+            verifier_type="DEPENDENCY_SCANNER", tool_name="osv-scanner", tool_version=tool_version or "unknown",
+            repository=repository, commit=commit, environment="CI", target=repo_root,
+            started_at=started_at, finished_at=_utc_now_iso(),
+            command_identity="osv-scanner --format json --recursive .", ruleset_identity="osv.dev-live-advisory-db",
+            artifact_digest=envelope["artifact_binding"]["sha256"], exit_status="completed",
+            coverage_description=f"dependency manifests: {', '.join(manifests)}",
+        )
+        return osv_scanner_adapter.ingest(str(artifact_path), control_ids, identity, expected_target)
+
+
+def _find_or_install_trivy(workdir: Path) -> str | None:
+    """Returns a path to a working `trivy` executable, or None if
+    unavailable. Tries an already-on-PATH binary first; falls back to
+    the pinned, checksum-verified Linux x86_64 release tarball. Reuses
+    the same path-traversal-safe tar extraction discipline as
+    `_verify_and_extract_gitleaks` (inlined here, not shared, to avoid
+    coupling two independently-versioned tool installers to one
+    function signature)."""
+    on_path = shutil.which("trivy")
+    if on_path is not None:
+        return on_path
+
+    if platform.system() != "Linux" or platform.machine() not in ("x86_64", "AMD64"):
+        return None
+
+    archive_bytes = _download_pinned_file(TRIVY_LINUX_X64_URL, TRIVY_LINUX_X64_SHA256, "TRIVY")
+    if archive_bytes is None:
+        return None
+
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
+            dest_resolved = workdir.resolve()
+            for member in tar.getmembers():
+                member_path = (workdir / member.name).resolve()
+                if member_path != dest_resolved and dest_resolved not in member_path.parents:
+                    return None  # refuse any path-traversal member, fail closed
+            tar.extractall(path=workdir)  # noqa: S202 -- members individually validated above
+    except (tarfile.TarError, OSError):
+        return None
+
+    binary_path = workdir / "trivy"
+    if not binary_path.is_file():
+        return None
+    binary_path.chmod(0o755)
+    return str(binary_path)
+
+
+def _run_trivy_fs_scan(trivy_path: str, target_root: str) -> dict[str, Any] | None:
+    """Runs `trivy fs --scanners vuln --format=json <target_root>` --
+    deliberately `--scanners vuln` ONLY (never `secret`/`config` in this
+    invocation -- see trivy_adapter.py module docstring for why those
+    scan classes, even if present in a report, are never authorized
+    evidence here). Returns the parsed JSON dict on a run that produced
+    parseable JSON; None on any failure. A non-zero exit is expected on
+    findings (matching osv-scanner's convention) and is never itself
+    treated as tool failure -- only unparseable output is."""
+    proc = _run(
+        [trivy_path, "fs", "--scanners", "vuln", "--format=json", "--quiet", target_root],
+        timeout=_SUBPROCESS_TIMEOUT_SECONDS,
+    )
+    if proc is None:
+        return None
+    try:
+        report = json.loads(proc.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(report, dict):
+        return None
+    return report
+
+
+def build_trivy_envelope(
+    repository: str,
+    commit: str,
+    root: str,
+    trivy_report: dict[str, Any],
+    scanned_manifests: list[str],
+    tool_version: str,
+) -> dict[str, Any]:
+    """Pure function: wraps a real, already-produced Trivy report into
+    the adapter_base scan-evidence-artifact envelope. Never invokes
+    Trivy itself -- separated out for deterministic, offline unit
+    testing (see test-ci-verifier-runs.sh)."""
+    envelope: dict[str, Any] = {
+        "tool": {"name": "trivy", "version": tool_version},
+        "execution": {"completed": True},
+        "target": {"repository": repository, "commit": commit, "root": root, "scope": "full-repo"},
+        "config": {"scanners": "vuln"},
+        "scanned_inputs": sorted(set(scanned_manifests)),
+        "report": trivy_report,
+    }
+    bound = {k: envelope[k] for k in ("tool", "execution", "target", "config", "scanned_inputs", "report")}
+    canonical = json.dumps(bound, sort_keys=True, separators=(",", ":"))
+    envelope["artifact_binding"] = {"sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest()}
+    return envelope
+
+
+def collect_trivy_runs(repo_root: str = ".") -> list[dict[str, Any]]:
+    """Orchestrates real Trivy execution end to end for SEC-060 (Security
+    Phase 7.2), independently of osv-scanner -- the same target, the same
+    manifest-detection discipline, a genuinely different tool. Any
+    failure at any step degrades to `trivy_adapter.ingest(None, ...)`;
+    no dependency manifest detected -> never invoked at all, same as
+    `collect_osv_runs`."""
+    identity = "ci_verifier_runs::trivy-live"
+    control_ids = sorted(trivy_adapter.AUTHORIZED_EVIDENCE.keys())
+
+    target = git_repository_identity(repo_root)
+    if target is None:
+        return trivy_adapter.ingest(None, control_ids, identity, None)
+    repository, commit = target
+
+    manifests = _detect_dependency_manifests(repo_root)
+    expected_target = {"repository": repository, "commit": commit, "manifests": manifests}
+    if not manifests:
+        return trivy_adapter.ingest(None, control_ids, identity, expected_target)
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        started_at = _utc_now_iso()
+        trivy_path = _find_or_install_trivy(tmp)
+        if trivy_path is None:
+            return trivy_adapter.ingest(None, control_ids, identity, expected_target)
+
+        report = _run_trivy_fs_scan(trivy_path, repo_root)
+        if report is None:
+            return trivy_adapter.ingest(None, control_ids, identity, expected_target)
+
+        version_proc = _run([trivy_path, "--version", "--format=json"], timeout=15)
+        tool_version = TRIVY_VERSION
+        if version_proc is not None:
+            try:
+                version_data = json.loads(version_proc.stdout.decode("utf-8"))
+                if isinstance(version_data, dict) and isinstance(version_data.get("Version"), str):
+                    tool_version = version_data["Version"]
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                pass
+
+        envelope = build_trivy_envelope(repository, commit, repo_root, report, manifests, tool_version)
+        artifact_path = tmp / "trivy-artifact.json"
+        artifact_path.write_text(json.dumps(envelope), encoding="utf-8")
+
+        _emit_provenance_manifest(
+            verifier_type="DEPENDENCY_SCANNER", tool_name="trivy", tool_version=tool_version or "unknown",
+            repository=repository, commit=commit, environment="CI", target=repo_root,
+            started_at=started_at, finished_at=_utc_now_iso(),
+            command_identity="trivy fs --scanners vuln --format=json --quiet .", ruleset_identity=f"trivy-{TRIVY_VERSION}-builtin-vuln-db",
+            artifact_digest=envelope["artifact_binding"]["sha256"], exit_status="completed",
+            coverage_description=f"dependency manifests: {', '.join(manifests)}",
+        )
+        return trivy_adapter.ingest(str(artifact_path), control_ids, identity, expected_target)
+
+
+def _find_or_install_nuclei(workdir: Path) -> str | None:
+    """Returns a path to a working `nuclei` executable, or None if
+    unavailable. Tries an already-on-PATH binary first; falls back to
+    the pinned, checksum-verified Linux x86_64 release zip. Only
+    supports linux/x86_64; any other platform, or any download/checksum/
+    network/extraction failure, gracefully returns None."""
+    on_path = shutil.which("nuclei")
+    if on_path is not None:
+        return on_path
+
+    if platform.system() != "Linux" or platform.machine() not in ("x86_64", "AMD64"):
+        return None
+
+    archive_bytes = _download_pinned_file(NUCLEI_LINUX_X64_URL, NUCLEI_LINUX_X64_SHA256, "NUCLEI")
+    if archive_bytes is None:
+        return None
+
+    try:
+        import zipfile
+
+        with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
+            dest_resolved = workdir.resolve()
+            for member in zf.namelist():
+                member_path = (workdir / member).resolve()
+                if member_path != dest_resolved and dest_resolved not in member_path.parents:
+                    return None  # refuse any path-traversal member, fail closed
+            zf.extractall(path=workdir)  # noqa: S202 -- members individually validated above
+    except (OSError, ValueError) as exc:
+        if "BadZipFile" not in type(exc).__name__ and not isinstance(exc, OSError):
+            return None
+        return None
+
+    binary_path = workdir / "nuclei"
+    if not binary_path.is_file():
+        return None
+    binary_path.chmod(0o755)
+    return str(binary_path)
+
+
+def _run_nuclei(nuclei_path: str, templates_dir: Path, base_url: str, output_path: Path) -> list[dict[str, Any]] | None:
+    """Runs `nuclei -u <base_url> -t <templates_dir> -jsonl -o <output_path>`
+    against ONLY Diana's own pinned, committed curated templates (never
+    Nuclei's community template registry, never a network template
+    fetch). Returns the parsed list of finding objects on a run that
+    produced parseable (possibly empty) JSONL output; None on any
+    failure. A non-zero exit is not itself treated as failure (Nuclei
+    exits non-zero on some template-load warnings even with real
+    matches) -- only unreadable/unparseable output is."""
+    proc = _run(
+        [
+            nuclei_path, "-u", base_url, "-t", str(templates_dir),
+            "-jsonl", "-o", str(output_path),
+            "-timeout", "5", "-rate-limit", "10", "-c", "5",
+            "-no-color", "-silent", "-disable-update-check",
+        ],
+        timeout=_SUBPROCESS_TIMEOUT_SECONDS,
+    )
+    if proc is None:
+        return None
+    if not output_path.exists():
+        # No matches at all -- nuclei may not create the file when
+        # nothing matched. An empty finding list is a legitimate clean
+        # result, not a failure.
+        return []
+    try:
+        lines = output_path.read_text(encoding="utf-8").strip().splitlines()
+        return [json.loads(line) for line in lines if line.strip()]
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+
+def build_nuclei_envelope(
+    repository: str,
+    commit: str,
+    base_url: str,
+    findings: list[dict[str, Any]],
+    template_ids: list[str],
+    tool_version: str,
+) -> dict[str, Any]:
+    """Pure function: wraps real, already-produced Nuclei findings into
+    the adapter_base scan-evidence-artifact envelope, scoped to a LOCAL
+    target. Never invokes Nuclei itself -- separated out for
+    deterministic, offline unit testing."""
+    envelope: dict[str, Any] = {
+        "tool": {"name": "nuclei", "version": tool_version},
+        "execution": {"completed": True},
+        "target": {
+            "repository": repository, "commit": commit,
+            "environment": "LOCAL", "base_url": base_url,
+        },
+        "config": {"template_ids": sorted(set(template_ids))},
+        "scanned_inputs": [base_url],
+        "report": findings,
+    }
+    bound = {k: envelope[k] for k in ("tool", "execution", "target", "config", "scanned_inputs", "report")}
+    canonical = json.dumps(bound, sort_keys=True, separators=(",", ":"))
+    envelope["artifact_binding"] = {"sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest()}
+    return envelope
+
+
+def collect_nuclei_runs(repo_root: str = ".") -> list[dict[str, Any]]:
+    """Orchestrates real Nuclei execution end to end for SEC-064's dynamic
+    half (Security Phase 7.4), using ONLY Diana's own pinned, committed
+    curated templates (`diana/security/nuclei/templates/`, authorized via
+    `diana/security/nuclei/allowed_templates.json`) against a real, LOCAL-
+    only (127.0.0.1, ephemeral-port) HTTP server this script itself starts
+    and tears down -- never a production target, never a community
+    template fetch. Reuses the same web-root detection as the sensitive-
+    path-fetch dynamic scenario and the deterministic-repo-scan
+    (`_detect_frontend_bundle_dir`). If this repository has no such
+    directory, Nuclei is never even invoked -- SEC-064's Nuclei
+    contribution correctly stays UNPROVEN rather than a scan being
+    fabricated for a deployment surface that does not exist. Any failure
+    at any step (git identity, no web root, server bind failure, tool
+    unavailable, execution failure) degrades to
+    `nuclei_adapter.ingest(None, ...)` -- explicit UNPROVEN, never a
+    crash, never fabricated evidence."""
+    identity = "ci_verifier_runs::nuclei-live"
+    control_ids = sorted(nuclei_adapter.AUTHORIZED_EVIDENCE.keys())
+
+    target = git_repository_identity(repo_root)
+    if target is None:
+        return nuclei_adapter.ingest(None, control_ids, identity, None)
+    repository, commit = target
+
+    web_root_dir = _detect_frontend_bundle_dir(repo_root)
+    if web_root_dir is None:
+        return nuclei_adapter.ingest(None, control_ids, identity, None)
+
+    templates_dir = SEC_DIR / "nuclei" / "templates"
+    template_ids = sorted(nuclei_adapter.ALLOWED_TEMPLATES.keys())
+    if not template_ids or not templates_dir.is_dir():
+        return nuclei_adapter.ingest(None, control_ids, identity, None)
+
+    try:
+        server, _thread, port = _start_local_static_server(web_root_dir)
+    except OSError:
+        return nuclei_adapter.ingest(None, control_ids, identity, None)
+
+    base_url = f"http://127.0.0.1:{port}"
+    expected_target = {"repository": repository, "commit": commit, "environment": "LOCAL", "base_url": base_url}
+    try:
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            started_at = _utc_now_iso()
+            nuclei_path = _find_or_install_nuclei(tmp)
+            if nuclei_path is None:
+                return nuclei_adapter.ingest(None, control_ids, identity, expected_target)
+
+            output_path = tmp / "nuclei-output.jsonl"
+            findings = _run_nuclei(nuclei_path, templates_dir, base_url, output_path)
+            if findings is None:
+                return nuclei_adapter.ingest(None, control_ids, identity, expected_target)
+
+            version_proc = _run([nuclei_path, "-version"], timeout=15)
+            tool_version = NUCLEI_VERSION
+            if version_proc is not None:
+                out = (version_proc.stdout or b"").decode("utf-8", "replace")
+                if NUCLEI_VERSION not in out and out.strip():
+                    tool_version = out.strip().splitlines()[-1].strip()
+
+            envelope = build_nuclei_envelope(repository, commit, base_url, findings, template_ids, tool_version)
+            artifact_path = tmp / "nuclei-artifact.json"
+            artifact_path.write_text(json.dumps(envelope), encoding="utf-8")
+
+            _emit_provenance_manifest(
+                verifier_type="DYNAMIC_API", tool_name="nuclei", tool_version=tool_version or "unknown",
+                repository=repository, commit=commit, environment="LOCAL", target=base_url,
+                started_at=started_at, finished_at=_utc_now_iso(),
+                command_identity=f"nuclei -u {base_url} -t {templates_dir} -jsonl",
+                ruleset_identity="diana-curated:" + ",".join(template_ids),
+                artifact_digest=envelope["artifact_binding"]["sha256"], exit_status="completed",
+                coverage_description=f"{len(template_ids)} curated Nuclei template(s) against a local, ephemeral static server",
+            )
+            return nuclei_adapter.ingest(str(artifact_path), control_ids, identity, expected_target)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _find_or_check_zap_docker() -> bool:
+    """Returns True iff `docker` is on PATH AND the pinned
+    ZAP_DOCKER_IMAGE is ALREADY present in the local image cache. This
+    module deliberately NEVER triggers an implicit `docker pull` of a
+    large (several-hundred-MB) image as a side effect of a bounded
+    verifier call: a pull's duration is governed by network speed, not
+    by any timeout this module controls, and killing the parent
+    `python3` process on an outer timeout does not kill an
+    already-spawned `docker pull`/`docker run` child -- it would keep
+    consuming network/CPU as an orphaned process. Pulling the pinned
+    image is therefore an explicit, separate CI provisioning step (e.g.
+    `docker pull zaproxy/zap-stable:2.16.1` in a prior workflow step),
+    never something this function does itself. No image present ->
+    tool-unavailable, exactly like any other missing tool in this
+    module -- never a hang."""
+    if shutil.which("docker") is None:
+        return False
+    proc = _run(["docker", "image", "inspect", ZAP_DOCKER_IMAGE], timeout=15)
+    return proc is not None and proc.returncode == 0
+
+
+def _run_zap_baseline(base_url: str, workdir: Path) -> dict[str, Any] | None:
+    """Runs the pinned ZAP_DOCKER_IMAGE's own `zap-baseline.py` (a
+    PASSIVE scan by default -- no `-a`/active-scan flag is ever passed)
+    against `base_url` (always 127.0.0.1, enforced by the caller and
+    independently re-validated by `zap_adapter.py` itself), using
+    `--network host` so the container can reach the host's loopback
+    port. Returns the parsed JSON report on success; None on any
+    failure (docker not runnable, image pull failure, timeout, missing/
+    unparseable report) -- a genuinely completed baseline scan with
+    alerts is NOT a failure (zap-baseline.py exits non-zero when it
+    finds WARN/FAIL-level alerts by design), so exit code alone is never
+    used to decide failure here, only whether report.json was actually
+    produced and is parseable."""
+    report_path = workdir / "report.json"
+    proc = _run(
+        [
+            "docker", "run", "--rm", "--network", "host", "--pull", "never",
+            "-v", f"{workdir}:/zap/wrk/:rw",
+            "-t", ZAP_DOCKER_IMAGE,
+            "zap-baseline.py", "-t", base_url, "-J", "report.json", "-I",
+        ],
+        timeout=_ZAP_DOCKER_TIMEOUT_SECONDS,
+    )
+    if proc is None:
+        return None
+    if not report_path.exists():
+        return None
+    try:
+        return json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+
+def build_zap_envelope(
+    repository: str,
+    commit: str,
+    base_url: str,
+    zap_report: dict[str, Any],
+) -> dict[str, Any]:
+    """Pure function: wraps a real, already-produced ZAP report into the
+    adapter_base scan-evidence-artifact envelope, scoped to a LOCAL
+    target. Never invokes ZAP itself -- separated out for deterministic,
+    offline unit testing."""
+    envelope: dict[str, Any] = {
+        "tool": {"name": "zap", "version": ZAP_DOCKER_IMAGE},
+        "execution": {"completed": True},
+        "target": {
+            "repository": repository, "commit": commit,
+            "environment": "LOCAL", "base_url": base_url,
+        },
+        "config": {"scan_mode": "passive", "docker_image": ZAP_DOCKER_IMAGE},
+        "scanned_inputs": [base_url],
+        "report": zap_report,
+    }
+    bound = {k: envelope[k] for k in ("tool", "execution", "target", "config", "scanned_inputs", "report")}
+    canonical = json.dumps(bound, sort_keys=True, separators=(",", ":"))
+    envelope["artifact_binding"] = {"sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest()}
+    return envelope
+
+
+def collect_zap_runs(repo_root: str = ".") -> list[dict[str, Any]]:
+    """Orchestrates a real, bounded OWASP ZAP PASSIVE scan end to end for
+    the five header/cookie-configuration controls' dynamic half (Security
+    Phase 7.3), against a real, LOCAL-only (127.0.0.1, ephemeral-port)
+    HTTP server this script itself starts and tears down -- never a
+    production target, never active scanning. Reuses the same web-root
+    detection as the other live families (`_detect_frontend_bundle_dir`).
+    If this repository has no such directory, ZAP is never even invoked.
+    Any failure at any step (git identity, no web root, server bind
+    failure, docker unavailable, execution/timeout failure) degrades to
+    `zap_adapter.ingest(None, ...)` -- explicit UNPROVEN, never a crash,
+    never fabricated evidence."""
+    identity = "ci_verifier_runs::zap-live"
+    control_ids = sorted(zap_adapter.AUTHORIZED_EVIDENCE.keys())
+
+    target = git_repository_identity(repo_root)
+    if target is None:
+        return zap_adapter.ingest(None, control_ids, identity, None)
+    repository, commit = target
+
+    web_root_dir = _detect_frontend_bundle_dir(repo_root)
+    if web_root_dir is None:
+        return zap_adapter.ingest(None, control_ids, identity, None)
+
+    if not _find_or_check_zap_docker():
+        return zap_adapter.ingest(None, control_ids, identity, None)
+
+    try:
+        server, _thread, port = _start_local_static_server(web_root_dir)
+    except OSError:
+        return zap_adapter.ingest(None, control_ids, identity, None)
+
+    base_url = f"http://127.0.0.1:{port}"
+    expected_target = {"repository": repository, "commit": commit, "environment": "LOCAL", "base_url": base_url}
+    try:
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            started_at = _utc_now_iso()
+            tmp.chmod(0o777)  # the ZAP container runs as a different uid; must be able to write report.json
+            report = _run_zap_baseline(base_url, tmp)
+            if report is None:
+                return zap_adapter.ingest(None, control_ids, identity, expected_target)
+
+            envelope = build_zap_envelope(repository, commit, base_url, report)
+            artifact_path = tmp / "zap-artifact.json"
+            artifact_path.write_text(json.dumps(envelope), encoding="utf-8")
+
+            _emit_provenance_manifest(
+                verifier_type="DYNAMIC_API", tool_name="zap", tool_version=ZAP_DOCKER_IMAGE,
+                repository=repository, commit=commit, environment="LOCAL", target=base_url,
+                started_at=started_at, finished_at=_utc_now_iso(),
+                command_identity=f"docker run --network host {ZAP_DOCKER_IMAGE} zap-baseline.py -t {base_url}",
+                ruleset_identity=f"{ZAP_DOCKER_IMAGE}-passive-baseline-rules",
+                artifact_digest=envelope["artifact_binding"]["sha256"], exit_status="completed",
+                coverage_description="ZAP passive baseline scan against a local, ephemeral static server",
+            )
+            return zap_adapter.ingest(str(artifact_path), control_ids, identity, expected_target)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def _list_served_paths(root_dir: str) -> list[str]:
     """Deterministically walks root_dir (a real, already-detected public
     deployment web root) and returns every regular file's path RELATIVE
@@ -886,7 +1616,7 @@ def collect_sensitive_path_fetch_scenario_runs(repo_root: str = ".") -> list[dic
 
 
 # Every control_id any live-wired family in this module could possibly
-# emit a run for -- the union across all four collect_*_runs() families.
+# emit a run for -- the union across all live collect_*_runs() families.
 # Used by test-security-gate.sh to prove a planted fake artifact never
 # smuggles evidence for a control none of these live families actually
 # cover, without hardcoding a duplicate list that could silently drift.
@@ -894,6 +1624,10 @@ ALL_LIVE_WIREABLE_CONTROL_IDS = sorted(
     set(SEMGREP_LIVE_CONTROL_IDS)
     | set(gitleaks_adapter.AUTHORIZED_EVIDENCE.keys())
     | set(deterministic_repo_adapter.AUTHORIZED_EVIDENCE.keys())
+    | set(osv_scanner_adapter.AUTHORIZED_EVIDENCE.keys())
+    | set(trivy_adapter.AUTHORIZED_EVIDENCE.keys())
+    | set(zap_adapter.AUTHORIZED_EVIDENCE.keys())
+    | set(nuclei_adapter.AUTHORIZED_EVIDENCE.keys())
     | {SCENARIO_REGISTRY[SENSITIVE_FETCH_SCENARIO_ID]["control_id"]}
     | github_review_adapter._authorized_control_ids(
         {c["id"]: c for c in json.load(open(CATALOG_PATH, "r", encoding="utf-8"))["controls"]}
@@ -1202,6 +1936,22 @@ def collect_trusted_runs() -> list[dict[str, Any]]:
         pass
     try:
         runs.extend(collect_deterministic_repo_runs())
+    except Exception:  # noqa: BLE001 -- absolute safety net, see docstring
+        pass
+    try:
+        runs.extend(collect_osv_runs())
+    except Exception:  # noqa: BLE001 -- absolute safety net, see docstring
+        pass
+    try:
+        runs.extend(collect_trivy_runs())
+    except Exception:  # noqa: BLE001 -- absolute safety net, see docstring
+        pass
+    try:
+        runs.extend(collect_zap_runs())
+    except Exception:  # noqa: BLE001 -- absolute safety net, see docstring
+        pass
+    try:
+        runs.extend(collect_nuclei_runs())
     except Exception:  # noqa: BLE001 -- absolute safety net, see docstring
         pass
     try:

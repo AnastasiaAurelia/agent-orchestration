@@ -135,6 +135,19 @@ def extract_trusted_tree(repo_root: str, base_sha: str, dest: Path) -> bool:
     return all((dest / path).is_file() for path in TRUSTED_FILES)
 
 
+# ci_verifier_runs.py itself internally bounds every individual verifier
+# it runs (each tool's own subprocess/download call has its own timeout --
+# see diana/security/ci_verifier_runs.py's _SUBPROCESS_TIMEOUT_SECONDS /
+# _DOWNLOAD_TIMEOUT_SECONDS / _ZAP_DOCKER_TIMEOUT_SECONDS constants), but
+# nothing previously bounded THIS process's wait on the whole chain
+# end to end -- a single slow/stalled verifier step could hang the
+# trusted evaluator (and therefore the whole Security Gate workflow)
+# indefinitely. This is a generous ceiling covering every currently
+# live-wired family run sequentially in the worst case, not a per-tool
+# budget.
+CI_VERIFIER_RUNS_TIMEOUT_SECONDS = 600
+
+
 def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs)
     return result
@@ -146,7 +159,23 @@ def run_trusted_pipeline(dest: Path, repository: str, base_sha: str, target_sha:
     files under `dest` (never the PR head's working tree)."""
     security_dir = dest / "diana" / "security"
 
-    runs_proc = _run([sys.executable, str(security_dir / "ci_verifier_runs.py")])
+    try:
+        runs_proc = _run(
+            [sys.executable, str(security_dir / "ci_verifier_runs.py")],
+            timeout=CI_VERIFIER_RUNS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        # Fail closed: a trusted evaluator that cannot even finish
+        # collecting evidence within the bound is treated exactly like
+        # any other evaluator failure, never silently retried and never
+        # treated as "no evidence found".
+        return {
+            "decision": "FAIL",
+            "reasons": [
+                f"trusted ci_verifier_runs.py did not complete within "
+                f"{CI_VERIFIER_RUNS_TIMEOUT_SECONDS}s (timed out)"
+            ],
+        }
     if runs_proc.returncode != 0:
         return {
             "decision": "FAIL",
