@@ -3,6 +3,14 @@
 Status: **planning only.** The M1–M7 runtime roadmap is complete and accepted. Everything in this
 document is future work and none of it is frozen, authorized or started.
 
+> **Current-state note — Track B has since completed.** The title and status line above, the
+> dependency map below (which shows Track B as `[FUTURE]`), and the "Recommended first track" section
+> are the original plan, kept unedited as the record of what was intended before measurement. Track B
+> is **COMPLETE and M5-D20 is DISCHARGED** for **merge**, conditional on credential separation, which
+> no GitHub rule enforces or detects ([`DIANA-HUMAN-APPROVAL-B5.md`](DIANA-HUMAN-APPROVAL-B5.md)
+> §13.3). Deployment approval remains unaddressed, and merge approval is not deployment approval.
+> Tracks A, C and D remain planning only.
+
 These are deliberately **named parallel tracks, not M8/M9/M10.** They solve different problems, have
 different prerequisites, and are not a single sequence — numbering them would imply an ordering the
 dependencies do not support.
