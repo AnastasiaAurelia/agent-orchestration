@@ -1,0 +1,25 @@
+id: exposed-backup-archive
+
+info:
+  name: Exposed Backup Archive
+  author: diana-security
+  severity: high
+  description: >
+    Diana-curated template (Security Phase 7.4). Checks a small, fixed
+    set of well-known backup-archive filenames at the web root
+    (`backup.zip`, `backup.sql`, `backup.tar.gz`) -- the exact
+    sensitive-path class SEC-064's dynamic requirement names explicitly.
+    Bounded to these three fixed paths; never derived from PR-supplied
+    or discovered content.
+  tags: diana-curated,exposure,backup,sec-064
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/backup.zip"
+      - "{{BaseURL}}/backup.sql"
+      - "{{BaseURL}}/backup.tar.gz"
+    matchers:
+      - type: status
+        status:
+          - 200

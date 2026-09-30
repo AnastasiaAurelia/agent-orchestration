@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "note": "Curated, human-reviewed allowlist of Nuclei template IDs Diana trusts as evidence (Security Phase 7.4). Every template is a real, pinned YAML file committed in diana/security/nuclei/templates/ -- never fetched from Nuclei's community template registry at scan time (the same 'pinned, committed ruleset, never a live external registry' principle diana/security/verifiers/semgrep-rules.yml and gitleaks-config.toml already follow). template_digest is the sha256 of that committed file's exact bytes, recomputed and checked at collection time -- a PR cannot add or alter a template file and have that same PR's evidence trusted against it, since this file and the templates it references both live in the protected base.",
+  "templates": [
+    {
+      "template_id": "exposed-dot-env-file",
+      "template_path": "diana/security/nuclei/templates/exposed-dot-env-file.yaml",
+      "template_digest": "sha256:3f61ad7e792258a5060b0ed3f72bb3ad0dec3ec6fd04a681e040eeb7b7296cee",
+      "control_id": "SEC-064",
+      "requirement": "negative test proving common sensitive file paths (.env, .git/config, backup archives) are not publicly fetchable",
+      "allowed_severity": ["info", "low", "medium", "high", "critical"],
+      "reason": "Detects a publicly fetchable .env file at the web root -- the exact sensitive-path class SEC-064's dynamic requirement names explicitly."
+    },
+    {
+      "template_id": "exposed-dot-git-config",
+      "template_path": "diana/security/nuclei/templates/exposed-dot-git-config.yaml",
+      "template_digest": "sha256:1b53867037433b199d0ca2e49be629e1ee9bdbd5829da2dee015086798ab933c",
+      "control_id": "SEC-064",
+      "requirement": "negative test proving common sensitive file paths (.env, .git/config, backup archives) are not publicly fetchable",
+      "allowed_severity": ["info", "low", "medium", "high", "critical"],
+      "reason": "Detects a publicly fetchable .git/config file -- explicitly named by SEC-064's dynamic requirement."
+    },
+    {
+      "template_id": "exposed-backup-archive",
+      "template_path": "diana/security/nuclei/templates/exposed-backup-archive.yaml",
+      "template_digest": "sha256:5c4289ece798c09250c98979ee331c02182c820113c0fb9669294d5e86e4d448",
+      "control_id": "SEC-064",
+      "requirement": "negative test proving common sensitive file paths (.env, .git/config, backup archives) are not publicly fetchable",
+      "allowed_severity": ["info", "low", "medium", "high", "critical"],
+      "reason": "Detects a publicly fetchable backup archive (.zip/.sql/.tar.gz at well-known paths) -- explicitly named by SEC-064's dynamic requirement."
+    }
+  ]
+}
