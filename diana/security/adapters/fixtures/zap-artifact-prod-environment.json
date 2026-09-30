@@ -1,0 +1,32 @@
+{
+  "artifact_binding": {
+    "sha256": "f3c009556f1860023905b600dd813261ab6358c88bfed8cb4c51280dc5a72335"
+  },
+  "config": {
+    "scan_mode": "passive"
+  },
+  "execution": {
+    "completed": true
+  },
+  "report": {
+    "site": [
+      {
+        "@name": "https://example.com",
+        "alerts": []
+      }
+    ]
+  },
+  "scanned_inputs": [
+    "https://example.com"
+  ],
+  "target": {
+    "base_url": "https://example.com",
+    "commit": "c51ce15a301df2d7804b36d59e9d508b8653249b",
+    "environment": "PROD",
+    "repository": "AnastasiaAurelia/agent-orchestration"
+  },
+  "tool": {
+    "name": "zap",
+    "version": "2.15.0"
+  }
+}
