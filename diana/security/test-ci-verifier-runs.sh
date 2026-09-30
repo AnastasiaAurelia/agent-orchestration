@@ -565,6 +565,10 @@ m.collect_gitleaks_runs = _boom
 m.collect_deterministic_repo_runs = _boom
 m.collect_sensitive_path_fetch_scenario_runs = _boom
 m.collect_github_review_runs = _boom
+m.collect_osv_runs = _boom
+m.collect_trivy_runs = _boom
+m.collect_zap_runs = _boom
+m.collect_nuclei_runs = _boom
 safe_result = m.collect_trusted_runs()
 check("collect_trusted_runs() degrades to [] rather than raising on unexpected failure", safe_result == [])
 

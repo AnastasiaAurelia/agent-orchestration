@@ -118,7 +118,8 @@ fi
 
 # M7: capability_coverage_counts sum to 75 and match the known, manually-
 # cross-checked distribution for the current catalog + Phase 2-4 + Phase
-# 6 remediation rounds A+B implementation (regression pin -- a real change
+# 6 remediation rounds A+B + Phase 7 (OSV/Trivy live wiring, ZAP, Nuclei)
+# implementation (regression pin -- a real change
 # to any adapter, scenario registry, or reviewer authorization should
 # change these numbers, and this test should be updated deliberately,
 # not silently). capability_coverage is a STATIC fact independent of
@@ -128,10 +129,10 @@ import json
 m = json.load(open('$TMP_DIR/matrix.json'))
 c = m['capability_coverage_counts']
 total = c['FULLY_COVERED'] + c['PARTIALLY_COVERED'] + c['NOT_COVERED']
-print(total == 75 and c == {'FULLY_COVERED': 27, 'PARTIALLY_COVERED': 27, 'NOT_COVERED': 21})
+print(total == 75 and c == {'FULLY_COVERED': 27, 'PARTIALLY_COVERED': 32, 'NOT_COVERED': 16})
 ")"
 if [ "$coverage_ok" = "True" ]; then
-  pass "M7: capability_coverage_counts = {FULLY_COVERED:27, PARTIALLY_COVERED:27, NOT_COVERED:21}, sum=75"
+  pass "M7: capability_coverage_counts = {FULLY_COVERED:27, PARTIALLY_COVERED:32, NOT_COVERED:16}, sum=75"
 else
   fail "M7: capability_coverage_counts do not match the expected regression-pinned distribution"
   python3 -c "import json; print(json.load(open('$TMP_DIR/matrix.json'))['capability_coverage_counts'])" >&2

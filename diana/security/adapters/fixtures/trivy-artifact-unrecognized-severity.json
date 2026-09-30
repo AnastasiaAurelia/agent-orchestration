@@ -1,0 +1,39 @@
+{
+  "tool": {
+    "name": "trivy",
+    "version": "0.72.0"
+  },
+  "execution": {
+    "completed": true
+  },
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "c51ce15a301df2d7804b36d59e9d508b8653249b",
+    "root": ".",
+    "scope": "full-repo"
+  },
+  "config": {},
+  "scanned_inputs": [
+    "requirements.txt",
+    "package-lock.json"
+  ],
+  "report": {
+    "Results": [
+      {
+        "Target": "requirements.txt",
+        "Class": "lang-pkgs",
+        "Type": "pip",
+        "Vulnerabilities": [
+          {
+            "VulnerabilityID": "CVE-2024-2222",
+            "PkgName": "django",
+            "Severity": "SUPER_BAD"
+          }
+        ]
+      }
+    ]
+  },
+  "artifact_binding": {
+    "sha256": "a10f5046b6ee3aab4a242562f4816d4304ab2842ab24e68b94949adeaaf17287"
+  }
+}

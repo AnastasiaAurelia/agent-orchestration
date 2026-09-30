@@ -1,0 +1,37 @@
+{
+  "artifact_binding": {
+    "sha256": "fae5937e02708ceb80614c9c8df839e69b8985bf6ac289387823cf0b78a9a3da"
+  },
+  "config": {
+    "template_ids": [
+      "exposed-dot-env-file",
+      "exposed-dot-git-config",
+      "exposed-backup-archive"
+    ]
+  },
+  "execution": {
+    "completed": true
+  },
+  "report": [
+    {
+      "host": "http://127.0.0.1:8321",
+      "info": {
+        "severity": "high"
+      },
+      "template-id": "exposed-dot-git-config"
+    }
+  ],
+  "scanned_inputs": [
+    "http://127.0.0.1:8321"
+  ],
+  "target": {
+    "base_url": "http://127.0.0.1:8321",
+    "commit": "1111111111111111111111111111111111111111",
+    "environment": "LOCAL",
+    "repository": "AnastasiaAurelia/agent-orchestration"
+  },
+  "tool": {
+    "name": "nuclei",
+    "version": "3.3.0"
+  }
+}

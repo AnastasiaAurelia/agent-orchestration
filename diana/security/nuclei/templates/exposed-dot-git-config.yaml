@@ -1,0 +1,27 @@
+id: exposed-dot-git-config
+
+info:
+  name: Exposed .git/config File
+  author: diana-security
+  severity: high
+  description: >
+    Diana-curated template (Security Phase 7.4). Checks whether a
+    repository's `.git/config` is publicly fetchable at the web root --
+    the exact sensitive-path class SEC-064's dynamic requirement names
+    explicitly. Bounded to a single GET; no repository content beyond
+    this one file is ever requested.
+  tags: diana-curated,exposure,git,sec-064
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/.git/config"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: body
+        words:
+          - "[core]"

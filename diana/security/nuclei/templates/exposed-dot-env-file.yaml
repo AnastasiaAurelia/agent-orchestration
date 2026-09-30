@@ -1,0 +1,27 @@
+id: exposed-dot-env-file
+
+info:
+  name: Exposed .env File
+  author: diana-security
+  severity: medium
+  description: >
+    Diana-curated template (Security Phase 7.4). Checks whether a plain
+    `.env` file is publicly fetchable at the web root -- the exact
+    sensitive-path class SEC-064's dynamic requirement names explicitly.
+    Bounded to a single GET against `{{BaseURL}}/.env`; no follow-on
+    requests, no payload beyond the request line itself.
+  tags: diana-curated,exposure,config,sec-064
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/.env"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: body
+        words:
+          - "="
