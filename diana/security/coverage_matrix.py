@@ -63,6 +63,9 @@ import gitleaks_adapter  # noqa: E402
 import osv_scanner_adapter  # noqa: E402
 import semgrep_adapter  # noqa: E402
 import deterministic_repo_adapter  # noqa: E402
+import trivy_adapter  # noqa: E402
+import zap_adapter  # noqa: E402
+import nuclei_adapter  # noqa: E402
 
 sys.path.insert(0, str(SEC_DIR / "dynamic"))
 import scenarios as dynamic_scenarios  # noqa: E402
@@ -83,6 +86,9 @@ STATIC_ADAPTERS = {
     "osv_scanner_adapter": osv_scanner_adapter,
     "semgrep_adapter": semgrep_adapter,
     "deterministic_repo_adapter": deterministic_repo_adapter,
+    "trivy_adapter": trivy_adapter,
+    "zap_adapter": zap_adapter,
+    "nuclei_adapter": nuclei_adapter,
 }
 
 

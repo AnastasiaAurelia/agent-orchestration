@@ -388,7 +388,7 @@ fi
 # real HIGH severity and honest UNPROVEN-driven REQUIRE_HUMAN decision,
 # never the head's fake always-PASS output or weakened severity.
 S3_REPO="$TMP_DIR/s3-repo"
-mkdir -p "$S3_REPO/diana/security/adapters" "$S3_REPO/diana/security/verifiers" "$S3_REPO/diana/security/dynamic" "$S3_REPO/diana/security/reviewer"
+mkdir -p "$S3_REPO/diana/security/adapters" "$S3_REPO/diana/security/verifiers" "$S3_REPO/diana/security/dynamic" "$S3_REPO/diana/security/reviewer" "$S3_REPO/diana/security/nuclei/templates"
 git -C "$S3_REPO" init -q
 git -C "$S3_REPO" config user.email test@test.com
 git -C "$S3_REPO" config user.name test
@@ -407,6 +407,13 @@ cp "$SEC_DIR/adapters/adapter_base.py" "$S3_REPO/diana/security/adapters/adapter
 cp "$SEC_DIR/adapters/semgrep_adapter.py" "$S3_REPO/diana/security/adapters/semgrep_adapter.py"
 cp "$SEC_DIR/adapters/gitleaks_adapter.py" "$S3_REPO/diana/security/adapters/gitleaks_adapter.py"
 cp "$SEC_DIR/adapters/deterministic_repo_adapter.py" "$S3_REPO/diana/security/adapters/deterministic_repo_adapter.py"
+cp "$SEC_DIR/adapters/osv_scanner_adapter.py" "$S3_REPO/diana/security/adapters/osv_scanner_adapter.py"
+cp "$SEC_DIR/adapters/trivy_adapter.py" "$S3_REPO/diana/security/adapters/trivy_adapter.py"
+cp "$SEC_DIR/adapters/zap_adapter.py" "$S3_REPO/diana/security/adapters/zap_adapter.py"
+cp "$SEC_DIR/adapters/nuclei_adapter.py" "$S3_REPO/diana/security/adapters/nuclei_adapter.py"
+cp "$SEC_DIR/provenance.py" "$S3_REPO/diana/security/provenance.py"
+cp "$SEC_DIR/nuclei/allowed_templates.json" "$S3_REPO/diana/security/nuclei/allowed_templates.json"
+cp "$SEC_DIR/nuclei/templates/"*.yaml "$S3_REPO/diana/security/nuclei/templates/"
 cp "$SEC_DIR/verifiers/semgrep-rules.yml" "$S3_REPO/diana/security/verifiers/semgrep-rules.yml"
 cp "$SEC_DIR/verifiers/gitleaks-config.toml" "$S3_REPO/diana/security/verifiers/gitleaks-config.toml"
 cp "$SEC_DIR/dynamic/dynamic_base.py" "$S3_REPO/diana/security/dynamic/dynamic_base.py"
@@ -439,7 +446,14 @@ git -C "$S3_REPO" add diana/security
 git -C "$S3_REPO" commit -q -m "malicious PR: weaken SEC-001 severity + fake always-PASS reducer"
 S3_HEAD_SHA="$(git -C "$S3_REPO" rev-parse HEAD)"
 
-python3 "$RUN_SECURITY_GATE_PY" "$S3_REPO" "$S3_BASE_SHA" "$S3_HEAD_SHA" "$REPO" > "$TMP_DIR/s3-out.json"
+# 280s, not 150s: this scratch run exercises the FULL live pipeline
+# (ci_verifier_runs.py -> security_bundle.py -> security_reducer.py),
+# and ci_verifier_runs.py alone may attempt several bounded (<=60s each)
+# tool downloads sequentially (gitleaks/osv-scanner/Trivy/Nuclei) when
+# none of those tools are already on PATH -- a tighter bound was
+# observed to fail this specific test purely on slow-network sandbox
+# timing, not on any logic defect (see the Phase 7 closure report).
+timeout 280 python3 "$RUN_SECURITY_GATE_PY" "$S3_REPO" "$S3_BASE_SHA" "$S3_HEAD_SHA" "$REPO" > "$TMP_DIR/s3-out.json" || echo '{"decision": "FAIL", "reasons": ["run-security-gate.py did not complete within the test bound (280s)"]}' > "$TMP_DIR/s3-out.json"
 s3_decision="$(get_decision "$TMP_DIR/s3-out.json")"
 s3_mentions_high="$(python3 -c "
 import json
