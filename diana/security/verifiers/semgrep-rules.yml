@@ -15,6 +15,24 @@
 # actually trusted at runtime) -- both must stay in sync with the ids
 # used here, or a real finding/clean-run for these rules would not be
 # attributable to any control at all.
+#
+# diana.mass-assignment-bulk-bind-{py,js} (added for SEC-041 static
+# coverage) are the first rules here NOT scoped to Python only --
+# languages: [javascript, typescript] is used for the JS/TS half,
+# matching this task's explicit JS/TS + Python requirement. Both rules
+# detect only the STATIC, lexical half of SEC-041's two required_evidence
+# items ("request bodies are bound through an explicit allow-list ...,
+# never bulk-assigned to the full model") -- the second item ("negative
+# test proving a privileged/protected field cannot be set via unexpected
+# request body fields") is DYNAMIC_API and is NOT claimed by this rule or
+# by semgrep_adapter.py's SEC-041 authorization. Deliberately does NOT
+# attempt SEC-042 (Parameter Tampering): that control's verification.modes
+# is ["SEMANTIC_REVIEW", "DYNAMIC_API"] only -- STATIC_ANALYZER is not an
+# authorized capability for it, and evidence_model.py forces a control's
+# result to ERROR if a run arrives from a capability outside its
+# verification.modes. Mapping these findings to SEC-042 would therefore
+# actively break that control's result, not just be unauthorized in
+# spirit.
 rules:
   - id: diana.shell-injection-via-concatenation
     languages: [python]
@@ -73,3 +91,81 @@ rules:
           - pattern: yaml.load($DATA)
           - pattern: yaml.load($DATA, Loader=yaml.Loader)
           - pattern: yaml.load($DATA, Loader=yaml.UnsafeLoader)
+
+  - id: diana.mass-assignment-bulk-bind-py
+    languages: [python]
+    severity: ERROR
+    message: >-
+      A request body is unpacked wholesale into a model constructor/update
+      call (full-kwargs bulk bind), or a privileged field (role, admin
+      flag, credits, limit, tier) is written directly from a request
+      object, with no visible explicit allow-list -- maps to SEC-041
+      (Mass Assignment), static half only. Does not claim a dynamic
+      negative test; does not claim SEC-042.
+    patterns:
+      - pattern-either:
+          # Full-kwargs bulk bind from a request/body mapping.
+          - pattern: $MODEL(**request.json)
+          - pattern: $MODEL(**request.POST)
+          - pattern: $MODEL(**request.data)
+          - pattern: $MODEL(**request.form)
+          - pattern: $MODEL.objects.create(**request.json)
+          - pattern: $MODEL.objects.create(**request.POST)
+          - pattern: $MODEL.objects.create(**request.data)
+          - pattern: $QUERYSET.update(**request.json)
+          - pattern: $QUERYSET.update(**request.data)
+          - pattern: $MODEL(**$DATA.dict())
+          - pattern: $MODEL(**$DATA.model_dump())
+          # Direct write of a named privileged field from request input.
+          - pattern: $OBJ.role = request.json[...]
+          - pattern: $OBJ.role = request.json.get(...)
+          - pattern: $OBJ.role = request.data[...]
+          - pattern: $OBJ.role = request.data.get(...)
+          - pattern: $OBJ.is_admin = request.json[...]
+          - pattern: $OBJ.is_admin = request.json.get(...)
+          - pattern: $OBJ.is_admin = request.data[...]
+          - pattern: $OBJ.is_admin = request.data.get(...)
+          - pattern: $OBJ.credits = request.json[...]
+          - pattern: $OBJ.credits = request.json.get(...)
+          - pattern: $OBJ.credits = request.data[...]
+          - pattern: $OBJ.credits = request.data.get(...)
+          - pattern: $OBJ.limit = request.json[...]
+          - pattern: $OBJ.limit = request.json.get(...)
+          - pattern: $OBJ.limit = request.data[...]
+          - pattern: $OBJ.limit = request.data.get(...)
+          - pattern: $OBJ.tier = request.json[...]
+          - pattern: $OBJ.tier = request.json.get(...)
+          - pattern: $OBJ.tier = request.data[...]
+          - pattern: $OBJ.tier = request.data.get(...)
+
+  - id: diana.mass-assignment-bulk-bind-js
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      A request body is bound wholesale to a model update/create call
+      (full-object bulk bind), or a privileged field (role, isAdmin,
+      credits, limit, tier) is written directly from a request object,
+      with no visible explicit allow-list -- maps to SEC-041 (Mass
+      Assignment), static half only. Does not claim a dynamic negative
+      test; does not claim SEC-042.
+    patterns:
+      - pattern-either:
+          # Full-object bulk bind from a request body.
+          - pattern: $MODEL.update(req.body)
+          - pattern: $MODEL.create(req.body)
+          - pattern: $MODEL.findByIdAndUpdate($ID, req.body)
+          - pattern: $MODEL.updateOne($FILTER, req.body)
+          - pattern: Object.assign($OBJ, req.body)
+          - pattern: $QUERY.set(req.body)
+          - pattern: $DOC.update(req.body)
+          # Direct write of a named privileged field from request input.
+          - pattern: $OBJ.role = req.body.role
+          - pattern: $OBJ.role = req.body[...]
+          - pattern: $OBJ.isAdmin = req.body.isAdmin
+          - pattern: $OBJ.isAdmin = req.body[...]
+          - pattern: $OBJ.credits = req.body.credits
+          - pattern: $OBJ.credits = req.body[...]
+          - pattern: $OBJ.limit = req.body.limit
+          - pattern: $OBJ.limit = req.body[...]
+          - pattern: $OBJ.tier = req.body.tier
+          - pattern: $OBJ.tier = req.body[...]
