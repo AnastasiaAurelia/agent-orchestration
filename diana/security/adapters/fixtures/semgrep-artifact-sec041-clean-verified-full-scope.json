@@ -1,0 +1,38 @@
+{
+  "tool": {
+    "name": "semgrep",
+    "version": "1.78.0"
+  },
+  "execution": {
+    "completed": true
+  },
+  "target": {
+    "repository": "AnastasiaAurelia/agent-orchestration",
+    "commit": "c51ce15a301df2d7804b36d59e9d508b8653249b",
+    "root": ".",
+    "scope": "full-repo"
+  },
+  "config": {
+    "rule_map": {
+      "diana.mass-assignment-bulk-bind-py": [
+        "SEC-041",
+        "request bodies are bound through an explicit allow-list of mutable fields, never bulk-assigned to the full model"
+      ],
+      "diana.mass-assignment-bulk-bind-js": [
+        "SEC-041",
+        "request bodies are bound through an explicit allow-list of mutable fields, never bulk-assigned to the full model"
+      ]
+    }
+  },
+  "scanned_inputs": [],
+  "report": {
+    "results": [],
+    "rules_run": [
+      "diana.mass-assignment-bulk-bind-py",
+      "diana.mass-assignment-bulk-bind-js"
+    ]
+  },
+  "artifact_binding": {
+    "sha256": "a7eb6a3cd608c20b71a27363c0218942cffcde2926263b0b4cf840183d6d5fa1"
+  }
+}

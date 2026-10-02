@@ -205,6 +205,8 @@ SEMGREP_LIVE_RULE_MAP: dict[str, list[str]] = {
     "diana.template-injection-via-render": ["SEC-011", semgrep_adapter.SEC011_REQ],
     "diana.jwt-unsafe-verification": ["SEC-021", semgrep_adapter.SEC021_REQ],
     "diana.insecure-deserialization": ["SEC-058", semgrep_adapter.SEC058_REQ],
+    "diana.mass-assignment-bulk-bind-py": ["SEC-041", semgrep_adapter.SEC041_REQ],
+    "diana.mass-assignment-bulk-bind-js": ["SEC-041", semgrep_adapter.SEC041_REQ],
 }
 SEMGREP_LIVE_CONTROL_IDS = sorted({pair[0] for pair in SEMGREP_LIVE_RULE_MAP.values()})
 
@@ -383,8 +385,25 @@ def _find_or_install_semgrep(workdir: Path) -> str | None:
 def _run_semgrep(semgrep_path: str, rules_path: Path, target_root: str) -> dict[str, Any] | None:
     """Runs semgrep --config=rules_path --json against target_root.
     Returns the parsed JSON dict on a clean (exit 0, valid JSON, no
-    semgrep-reported errors) run; None on any failure."""
-    proc = _run([semgrep_path, f"--config={rules_path}", "--json", "--quiet", target_root], timeout=_SUBPROCESS_TIMEOUT_SECONDS)
+    semgrep-reported errors) run; None on any failure.
+
+    `--no-rewrite-rule-ids` is required: by default semgrep rewrites each
+    rule's reported check_id by prefixing it with the (dotted) relative
+    path of the local config file it was loaded from -- e.g.
+    "diana.shell-injection-via-concatenation" becomes
+    "diana.security.verifiers.diana.shell-injection-via-concatenation" in
+    the real JSON report. SEMGREP_LIVE_RULE_MAP's keys, and every rule's
+    bare `id:` in RULES_PATH, are the un-rewritten ids. Without this flag
+    a real run's findings silently never match SEMGREP_LIVE_RULE_MAP for
+    ANY mapped control (discovered while adding SEC-041 coverage; it
+    equally affects the pre-existing SEC-010/011/021/055/056/058
+    mappings) -- fail-closed (never a fabricated PASS, since an unmatched
+    check_id simply contributes nothing) but a real, silent loss of
+    coverage this flag restores."""
+    proc = _run(
+        [semgrep_path, f"--config={rules_path}", "--no-rewrite-rule-ids", "--json", "--quiet", target_root],
+        timeout=_SUBPROCESS_TIMEOUT_SECONDS,
+    )
     if proc is None or proc.returncode != 0:
         return None
     try:

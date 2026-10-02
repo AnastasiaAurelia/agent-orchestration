@@ -58,6 +58,21 @@ PASS, exactly the same composition discipline as every other
   deserialization format, not an unrestricted native deserializer") half
   only.
 
+- `SEC-041` Mass Assignment -- the static ("request bodies are bound
+  through an explicit allow-list of mutable fields, never bulk-assigned
+  to the full model") half only. `SEC-041` also has
+  `dynamic_required=True`; its second `required_evidence` item ("negative
+  test proving a privileged/protected field cannot be set via unexpected
+  request body fields") is `DYNAMIC_API` and is not claimed here.
+
+`SEC-042` (Parameter Tampering) was deliberately NOT added here, even
+though it is closely related to `SEC-041`: its `verification.modes` is
+`["SEMANTIC_REVIEW", "DYNAMIC_API"]` only -- `STATIC_ANALYZER` is not an
+authorized capability for it. `evidence_model.py` forces a control's
+result to `ERROR` when a run arrives from a capability outside its
+`verification.modes`, so mapping a Semgrep finding to `SEC-042` would
+actively break that control, not just be unauthorized in spirit.
+
 `SEC-035` (Server-Side Request Forgery) was deliberately NOT added here:
 its static required_evidence item ("outbound request targets are
 validated/allow-listed and internal/metadata address ranges are
@@ -92,6 +107,7 @@ SEC010_REQ = "no shell command is built via string concatenation/interpolation o
 SEC011_REQ = "request-influenced input is never rendered as template syntax (only as template data)"
 SEC021_REQ = "JWT verification enforces a fixed, expected signing algorithm (no algorithm confusion, no 'none' algorithm accepted)"
 SEC058_REQ = "deserialization of untrusted input uses a safe/restricted format or schema, not an unrestricted native object deserializer"
+SEC041_REQ = "request bodies are bound through an explicit allow-list of mutable fields, never bulk-assigned to the full model"
 
 AUTHORIZED_EVIDENCE = {
     "SEC-055": [SEC055_REQ],
@@ -100,6 +116,7 @@ AUTHORIZED_EVIDENCE = {
     "SEC-011": [SEC011_REQ],
     "SEC-021": [SEC021_REQ],
     "SEC-058": [SEC058_REQ],
+    "SEC-041": [SEC041_REQ],
 }
 
 # TEST-ONLY. Never read by ingest(). Illustrative example rule-ID strings,
@@ -118,6 +135,8 @@ ILLUSTRATIVE_TEST_ONLY_RULE_MAP: dict[str, list[str]] = {
     "diana.template-injection-via-render": ["SEC-011", SEC011_REQ],
     "diana.jwt-unsafe-verification": ["SEC-021", SEC021_REQ],
     "diana.insecure-deserialization": ["SEC-058", SEC058_REQ],
+    "diana.mass-assignment-bulk-bind-py": ["SEC-041", SEC041_REQ],
+    "diana.mass-assignment-bulk-bind-js": ["SEC-041", SEC041_REQ],
 }
 
 

@@ -493,6 +493,77 @@ check_contribution "B5: full-repo-scoped finding is NOT evidence for SEC-065 (ne
 check_contribution "B6: SEC-007 finding under an arbitrary/unenumerated scope string still VIOLATED" \
   "$GITLEAKS" "$FIXTURES/gitleaks-artifact-finding-partial-scope.json" "$EXPECTED_FULL_REPO" SEC-007 VIOLATED
 
+# ==================================================================
+# SEC-041 (Mass Assignment): new STATIC_ANALYZER coverage added for the
+# diana.mass-assignment-bulk-bind-{py,js} Semgrep rules. Mirrors the
+# existing SEC-055/SEC-056 T1/T2/T3/T5/T6/T7 pattern. Every case below
+# also asserts (via check_aggregate's loop over every given control_id)
+# that SEC-042 never appears as a side effect of these fixtures -- there
+# is no rule_map entry anywhere in them that names SEC-042, so this is
+# enforced by construction, not merely by omission.
+# ==================================================================
+
+# M1: same identity + finding -> VIOLATED (Python rule).
+check_contribution "M1 (semgrep/SEC-041): same identity + finding (python rule)" \
+  "$SEMGREP" "$FIXTURES/semgrep-artifact-sec041-finding-verified.json" "$EXPECTED_FULL_REPO" SEC-041 VIOLATED
+
+# M2: wrong repository + finding => NOT VIOLATED (JS rule).
+check_contribution "M2 (semgrep/SEC-041): wrong repository + finding (js rule)" \
+  "$SEMGREP" "$FIXTURES/semgrep-artifact-sec041-finding-verified-wrong-repo.json" "$EXPECTED_FULL_REPO" SEC-041 NONE
+
+# M3: wrong commit + finding => NOT VIOLATED.
+check_contribution "M3 (semgrep/SEC-041): wrong commit + finding" \
+  "$SEMGREP" "$FIXTURES/semgrep-artifact-sec041-finding-verified-wrong-commit.json" "$EXPECTED_FULL_REPO" SEC-041 NONE
+
+# M4: clean + correct identity + full scope + both rules ran satisfies the
+# static requirement (requirement 1), but SEC-041 has dynamic_required=true
+# with a second, DYNAMIC_API-only required_evidence item (a negative test)
+# that this static-only adapter can never supply -- so the CONTROL's
+# overall status correctly stays UNPROVEN, not PASS, even though the static
+# requirement itself is individually satisfied. This mirrors the existing
+# R3 precedent for other dynamic_required controls exactly.
+check_aggregate "M4 (semgrep/SEC-041): clean + correct identity + full scope, static req only -> UNPROVEN (dynamic_required)" \
+  "$SEMGREP" "$FIXTURES/semgrep-artifact-sec041-clean-verified-full-scope.json" "$EXPECTED_FULL_REPO" UNPROVEN SEC-041
+
+# M5: clean + correct identity + partial scope (caller expected full-repo)
+# -> scope not verified -> UNPROVEN, never PASS.
+check_aggregate "M5 (semgrep/SEC-041): clean + correct identity + partial scope -> UNPROVEN" \
+  "$SEMGREP" "$FIXTURES/semgrep-artifact-sec041-clean-verified-partial-scope.json" "$EXPECTED_FULL_REPO" UNPROVEN SEC-041
+
+# M6: clean but no rule_map at all -> the real mapped rule can't be
+# confirmed to have authorized-ly run -> UNPROVEN, never a fabricated PASS.
+check_aggregate "M6 (semgrep/SEC-041): clean + no rule_map -> UNPROVEN" \
+  "$SEMGREP" "$FIXTURES/semgrep-artifact-sec041-clean-no-rule-map.json" "$EXPECTED_FULL_REPO" UNPROVEN SEC-041
+
+# M7: a finding whose check_id is not in rule_map produces no
+# contribution at all -> UNPROVEN, not silently dropped as PASS.
+check_aggregate "M7 (semgrep/SEC-041): unmapped check_id finding -> UNPROVEN" \
+  "$SEMGREP" "$FIXTURES/semgrep-artifact-sec041-unmapped-rule-verified.json" "$EXPECTED_FULL_REPO" UNPROVEN SEC-041
+
+# M8: clean + correct identity + full scope, but the mapped rule never
+# actually ran (empty rules_run) -> UNPROVEN, not SATISFIED.
+check_aggregate "M8 (semgrep/SEC-041): clean but mapped rule never ran -> UNPROVEN" \
+  "$SEMGREP" "$FIXTURES/semgrep-artifact-sec041-rule-not-run.json" "$EXPECTED_FULL_REPO" UNPROVEN SEC-041
+
+# M9: SEC-041 evidence must never leak into SEC-042 (catalog-authorization
+# boundary). Re-run the clean, fully-verified SEC-041 fixture but ask the
+# adapter about SEC-042 as well -- SEC-042 is not in AUTHORIZED_EVIDENCE,
+# so ingest() must silently return nothing for it (the pre-existing
+# "requested but unauthorized control is dropped" behavior every other
+# adapter already relies on -- see AUTHORIZED_EVIDENCE filtering at the
+# top of ingest()), never ERROR and never PASS.
+run_adapter "$SEMGREP" "$FIXTURES/semgrep-artifact-sec041-clean-verified-full-scope.json" "$EXPECTED_FULL_REPO" SEC-041 SEC-042
+runs="$(adapter_runs "$TMP_DIR/adapter_out.json")"
+if echo "$runs" | python3 -c "
+import json, sys
+runs = json.load(sys.stdin)
+assert not any(r['control_id'] == 'SEC-042' for r in runs), runs
+"; then
+  pass "M9: semgrep_adapter never emits a run for SEC-042 (out of its AUTHORIZED_EVIDENCE)"
+else
+  fail "M9: semgrep_adapter emitted a run for SEC-042 -- it must not"
+fi
+
 echo ""
 echo "diana/security/adapters/test-adapters.sh: $pass_count passed, $fail_count failed"
 
