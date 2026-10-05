@@ -678,7 +678,9 @@ POST_M7_PRODUCTION = {"diana/adapters/hermes_live.py",
                       "diana/mutation/remediation_driver.py",
                       "diana/ci/build-gate-input.py",
                       "diana/ci/write-summary.py",
-                      "diana/gate/diana-gate.py"}
+                      "diana/gate/diana-gate.py",
+                      "diana/adapters/hermes.py",
+                      "diana/adapters/hermes_patches.py"}
 # POST-M7-E1-D7: the milestone SUITES this erratum corrects. Test code, never
 # production code -- the same classification M4-ERRATA-001 finding 4 already
 # established, enumerated rather than blanket-excluded.
