@@ -97,6 +97,8 @@ expect_fail "installed-file tampering is detected"   "${MANAGER[@]}" verify --pr
 # Upgrade under a new explicit version, then rollback to the immediately prior
 # verified release.
 printf '0.1.0-dev.2\n' > "$SRC/VERSION"
+git -C "$SRC" add VERSION
+git -C "$SRC" -c user.email=prod@test -c user.name=prod commit -qm 'test: bump runtime version'
 check "bounded runtime upgrade"   "${MANAGER[@]}" upgrade --prefix "$PREFIX" --bin-dir "$BIN"
 check "upgraded runtime verifies"   "${MANAGER[@]}" verify --prefix "$PREFIX" --bin-dir "$BIN"
 check "upgrade activated the new explicit version"   grep -qx '0.1.0-dev.2' "$PREFIX/current/VERSION"
