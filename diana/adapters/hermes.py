@@ -115,20 +115,20 @@ def check_pre_import(
         raise blocking.Blocked(blocking.HERMES_UNREACHABLE, f"no Hermes installation at {home}")
     record("hermes-reachable", str(home))
 
-    version = _patches.hermes_version(str(home))
-    if version != _patches.PINNED_VERSION:
+    identity = _patches.hermes_identity(str(home))
+    status = _patches.identity_certified(identity)
+    if status == "unverifiable":
         raise blocking.Blocked(
             blocking.HERMES_VERSION_PIN_MISMATCH,
-            f"found {version!r}, pinned {_patches.PINNED_VERSION!r}",
+            f"Hermes's own identity mechanism could not verify this install: {identity!r}; "
+            "an unknown or unreachable identity is never treated as a pass",
         )
-    record("hermes-version-pin", version)
-    commit = _patches.hermes_commit(str(home))
-    if commit != _patches.PINNED_COMMIT:
+    if status == "mismatch":
         raise blocking.Blocked(
             blocking.HERMES_COMMIT_PIN_MISMATCH,
-            f"found {commit!r}, pinned {_patches.PINNED_COMMIT!r}",
+            f"found {identity!r}, none of {_patches.CERTIFIED_IDENTITIES!r} matched",
         )
-    record("hermes-commit-pin", commit)
+    record("hermes-identity-pin", f"{identity.get('source')}:{identity.get('sha')}")
 
     if str(env.get("HERMES_SAFE_MODE", "")).strip() != "1":
         raise blocking.Blocked(
@@ -175,22 +175,22 @@ def check(
         raise blocking.Blocked(blocking.HERMES_UNREACHABLE, f"no Hermes installation at {home}")
     record("hermes-reachable", str(home))
 
-    # 2/3 -- version pin (C1). The behavioral probes below are the real
+    # 2/3 -- identity pin (C1). The behavioral probes below are the real
     # tripwire; the pin is what makes an upstream change legible.
-    version = _patches.hermes_version(str(home))
-    if version != _patches.PINNED_VERSION:
+    identity = _patches.hermes_identity(str(home))
+    status = _patches.identity_certified(identity)
+    if status == "unverifiable":
         raise blocking.Blocked(
             blocking.HERMES_VERSION_PIN_MISMATCH,
-            f"found {version!r}, pinned {_patches.PINNED_VERSION!r}",
+            f"Hermes's own identity mechanism could not verify this install: {identity!r}; "
+            "an unknown or unreachable identity is never treated as a pass",
         )
-    record("hermes-version-pin", version)
-    commit = _patches.hermes_commit(str(home))
-    if commit != _patches.PINNED_COMMIT:
+    if status == "mismatch":
         raise blocking.Blocked(
             blocking.HERMES_COMMIT_PIN_MISMATCH,
-            f"found {commit!r}, pinned {_patches.PINNED_COMMIT!r}",
+            f"found {identity!r}, none of {_patches.CERTIFIED_IDENTITIES!r} matched",
         )
-    record("hermes-commit-pin", commit)
+    record("hermes-identity-pin", f"{identity.get('source')}:{identity.get('sha')}")
 
     # 4 -- safe mode ON (D23)
     if str(env.get("HERMES_SAFE_MODE", "")).strip() != "1":

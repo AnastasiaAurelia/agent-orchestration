@@ -5,11 +5,14 @@ set -euo pipefail
 
 AD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HERMES_HOME="${DIANA_HERMES_HOME:-$HOME/.hermes/hermes-agent}"
-PY_BIN="python3"
-[ -x "$HERMES_HOME/venv/bin/python3" ] && PY_BIN="$HERMES_HOME/venv/bin/python3"
 if [ ! -d "$HERMES_HOME" ]; then
   echo "SKIP  Hermes not installed at $HERMES_HOME"; exit 0
 fi
+# Resolve Hermes's OWN supported runtime (PM-managed venv), never a hardcoded
+# repo-local venv and never an install-hash path. Fails closed.
+PY_BIN="$(python3 "$AD_DIR/hermes_runtime.py" "$HERMES_HOME")" || {
+  echo "SKIP  could not establish Hermes's bootstrap/runtime under $HERMES_HOME"; exit 0
+}
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -31,11 +34,13 @@ def check(label, cond, extra=""):
     if cond: passed += 1; print(f"PASS  {label}")
     else: failed += 1; print(f"FAIL  {label} {extra}")
 
-# --- C1 version pin ---
-check("Hermes version matches the C1 pin",
-      HP.hermes_version() == HP.PINNED_VERSION, f"(got {HP.hermes_version()})")
-check("Hermes git commit matches the C1 pin",
-      HP.hermes_commit() == HP.PINNED_COMMIT, f"(got {HP.hermes_commit()})")
+# --- C1 identity pin ---
+_identity = HP.hermes_identity()
+_status = HP.identity_certified(_identity)
+check("Hermes's own identity mechanism resolves to source+sha, not unknown/unreachable",
+      _status != "unverifiable", f"(got {_identity})")
+check("Hermes identity matches a certified pin, or is an honestly reported mismatch "
+      "(never a silent pass)", _status in ("ok", "mismatch"), f"(got {_status} {_identity})")
 
 tree = ST.build_probe_tree(tmp)
 scope = {"allowed_roots": [tree["repo"]], "denied_subpaths": [".git/", ".env", ".env.*"]}

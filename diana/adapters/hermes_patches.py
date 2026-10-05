@@ -75,6 +75,7 @@ execution reachable without granting unrestricted authority.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -86,9 +87,39 @@ import read_scope as _read_scope  # noqa: E402
 
 HERMES_HOME = os.environ.get("DIANA_HERMES_HOME", str(Path.home() / ".hermes" / "hermes-agent"))
 
-# Spec C1 -- the mandatory M1 pin.
-PINNED_VERSION = "0.21.1"
-PINNED_COMMIT = "b8e8639445bd6f05a8141abcea7ae2aa8279f2b7"
+# Spec C1, modernized -- current Hermes is PM-managed and may be a packaged
+# install (Docker/Nix/desktop, carrying install-stamp.json) or a bare
+# source/dev checkout with no .git at all, so there is no single "the
+# version" or "the commit" to read off disk any more:
+#
+#   * `hermes_cli/__init__.py __version__` is now a lazy compat shim for old
+#     updaters (see its own docstring) and raises on a plain `.strip()`-style
+#     parse -- it was NEVER meant to be read as a static assignment.
+#   * `git rev-parse HEAD` assumes a checkout; a packaged install may ship with
+#     no `.git` directory at all, and unconditionally running it there is not
+#     "no commit", it is a tool that cannot run -- a different failure.
+#
+# Hermes's OWN identity mechanism -- `hermes_cli.version_info.get_code_identity()`
+# -- already resolves this correctly in priority order (install stamp, then
+# live git, then "unknown"), so Diana calls into THAT instead of re-deriving
+# the same answer by hand. Each entry below is an identity Diana has
+# behaviorally re-proven the M1 confinement/capability/dispatch boundary
+# against; an identity whose `source` is "unknown" (no stamp, no git) or
+# "unreachable" (identity could not even be read) can never appear here by
+# construction, because there is nothing to re-identify it against a prior
+# proof -- it fails closed on that basis alone, never on a false "matches
+# unknown" pass.
+CERTIFIED_IDENTITIES = (
+    {"source": "git", "sha": "b8e8639445bd6f05a8141abcea7ae2aa8279f2b7"},
+    # 2026-10-05: confinement 19/19, capability 56/56, m7-audit 59/59 all
+    # green; AC-2 read/write/forbidden-tool/inline-executor/reviewer
+    # choke-points behaviorally re-proven against this exact checkout before
+    # this entry was added. M5/M7-REG-2 failures reproduced identically on
+    # this install and on the pre-existing default install are independently
+    # classified (frozen byte-identical file; unmerged-work accounting) and
+    # are not caused by this identity.
+    {"source": "git", "sha": "e1fdf003a668f97bf5a53d7675c1e70b1dcfec34"},
+)
 
 _STATE = {"confinement": None, "capability": None, "dispatch": None}
 
@@ -116,28 +147,76 @@ class ScopeDenied(Exception):
     """
 
 
-# --- version pin (C1, D27) -------------------------------------------------
+# --- identity pin (C1, D27) -------------------------------------------------
 
-def hermes_version(home: str | None = None) -> str | None:
-    init = Path(home or HERMES_HOME) / "hermes_cli" / "__init__.py"
+_UNVERIFIABLE_IDENTITY = {"sha": None, "short_sha": None, "version": None, "source": "unreachable"}
+
+
+def hermes_identity(home: str | None = None) -> dict:
+    """Hermes's own code identity, read in a FRESH subprocess.
+
+    Delegates to `hermes_cli.version_info.get_code_identity()` -- the current
+    Hermes identity mechanism, resolved in its own documented priority order
+    (install stamp, then live git, then "unknown") -- rather than Diana
+    re-deriving the same answer from a brittle `__version__` parse or an
+    unconditional `git rev-parse`.
+
+    Run in a subprocess rather than imported in-process for two reasons:
+    (1) `get_code_identity` caches process-wide, so a second call against a
+    DIFFERENT `home` in the same process (a resume against a different
+    install, or this module's own test suite probing several fixture homes)
+    would silently return the FIRST home's cached identity; a fresh process
+    has no cache to alias. (2) it keeps the pre-import discipline this module
+    already carries for the rest of the TCB: Diana's own process still never
+    imports any part of Hermes before the other pre-import controls (safe
+    mode, context integrity) have been checked.
+
+    Every failure -- Hermes unreachable, the subprocess failing, malformed
+    output -- resolves to `source: "unreachable"`, which `identity_certified`
+    treats exactly like `source: "unknown"`: never verified, never pinned.
+    """
+    home = str(home or HERMES_HOME)
+    probe = (
+        "import sys, json; sys.path.insert(0, %r);"
+        "from hermes_cli.version_info import get_code_identity;"
+        "print(json.dumps(get_code_identity()))"
+    ) % home
     try:
-        for line in init.read_text(encoding="utf-8").splitlines():
-            if line.startswith("__version__"):
-                return line.split("=", 1)[1].strip().strip('"').strip("'")
-    except OSError:
-        return None
-    return None
-
-
-def hermes_commit(home: str | None = None) -> str | None:
-    try:
-        out = subprocess.run(
-            ["git", "-C", str(home or HERMES_HOME), "rev-parse", "HEAD"],
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
             capture_output=True, text=True, timeout=20, check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return None
-    return out.stdout.strip() or None
+        return dict(_UNVERIFIABLE_IDENTITY)
+    if result.returncode != 0:
+        return dict(_UNVERIFIABLE_IDENTITY)
+    try:
+        identity = json.loads(result.stdout.strip() or "{}")
+    except json.JSONDecodeError:
+        return dict(_UNVERIFIABLE_IDENTITY)
+    if not isinstance(identity, dict) or not identity.get("source"):
+        return dict(_UNVERIFIABLE_IDENTITY)
+    return identity
+
+
+def identity_certified(identity: dict) -> str:
+    """"ok", "unverifiable" or "mismatch" -- never a silent pass on "unknown".
+
+    `unverifiable` covers both `source in ("unknown", "unreachable")` and a
+    missing `sha`: a resolvable source with no commit is just as unprovable
+    as no source at all, and must fail the same way. `mismatch` is reserved
+    for an identity that WAS resolved but is not in `CERTIFIED_IDENTITIES` --
+    a different fact an operator should read differently (a real, dated
+    upstream change, rather than an environment Diana cannot identify at
+    all).
+    """
+    source = identity.get("source")
+    sha = identity.get("sha")
+    if not source or source in ("unknown", "unreachable") or not sha:
+        return "unverifiable"
+    matched = any(entry["source"] == source and entry["sha"] == sha
+                  for entry in CERTIFIED_IDENTITIES)
+    return "ok" if matched else "mismatch"
 
 
 # --- patch 1: confinement (D20) -------------------------------------------

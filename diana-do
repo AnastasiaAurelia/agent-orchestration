@@ -11,6 +11,24 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HERMES_HOME="${DIANA_HERMES_HOME:-$HOME/.hermes/hermes-agent}"
-PY_BIN="python3"; [ -x "$HERMES_HOME/venv/bin/python3" ] && PY_BIN="$HERMES_HOME/venv/bin/python3"
 export HERMES_SAFE_MODE="${HERMES_SAFE_MODE:-1}"
+# Resolve Hermes's OWN supported runtime (its PM-managed dependency venv) --
+# never a hardcoded repo-local venv and never an install-hash path. Fails
+# closed: an unresolvable runtime stops here, it never falls back to an
+# ambient python3 that lacks Hermes's dependencies.
+# Resolution happens in bash, before any interpreter is known to be able to run
+# product.py at all -- there is no python here that is confirmed to carry
+# Hermes's own dependencies, so blocking.Blocked cannot be raised from inside
+# product.py yet. The message below mirrors product.py's own refusal
+# vocabulary (blocking.HERMES_UNREACHABLE, EXIT_BLOCKED=3) exactly, so a
+# runtime-resolution failure reads identically to any other Diana refusal
+# regardless of which side of the python boundary it is raised on.
+_err_file="$(mktemp)"
+PY_BIN="$(python3 "$HERE/diana/adapters/hermes_runtime.py" "$HERMES_HOME" 2>"$_err_file")" || {
+  detail="$(cat "$_err_file" 2>/dev/null)"
+  rm -f "$_err_file"
+  printf '\nREFUSED BY DIANA  [hermes-unreachable]\n  %s\n' "$detail" >&2
+  exit 3
+}
+rm -f "$_err_file"
 exec "$PY_BIN" "$HERE/diana/product/product.py" "$@"
