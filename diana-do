@@ -11,6 +11,24 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HERMES_HOME="${DIANA_HERMES_HOME:-$HOME/.hermes/hermes-agent}"
+
+# Operator diagnostics are deliberately stdlib-only and run BEFORE Hermes
+# runtime activation so they can explain a broken/missing Hermes bootstrap.
+# This is not a governed execution fallback: only the non-authority-bearing
+# version/doctor commands take this path. Any real run still requires Hermes
+# PM resolution below and fails closed if it cannot be established.
+case "${1:-}" in
+  version)
+    exec python3 "$HERE/diana/product/release.py" version
+    ;;
+  doctor)
+    exec python3 "$HERE/diana/product/release.py" doctor "$HERMES_HOME"
+    ;;
+  doctor-json)
+    exec python3 "$HERE/diana/product/release.py" doctor-json "$HERMES_HOME"
+    ;;
+esac
+
 export HERMES_SAFE_MODE="${HERMES_SAFE_MODE:-1}"
 # Resolve Hermes's OWN supported runtime (its PM-managed dependency venv) --
 # never a hardcoded repo-local venv and never an install-hash path. Fails
