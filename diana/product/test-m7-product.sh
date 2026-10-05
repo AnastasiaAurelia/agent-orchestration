@@ -518,24 +518,25 @@ frozen = ["install.sh", "diana/ship/ship.py", "diana/adapters/ao.py",
 frozen += [f"diana/commands/{n}" for n in
            ("diana-ship.md","fix.md","review.md","ship.md","orchestrate.md","loop-audit.md")]
 # POST-M7-E1-D1 (docs/architecture/DIANA-POST-M7-ERRATA-001.md): the pre-existing
-# production files ALREADY-ACCEPTED (merged) post-M7 work replaced. This set is
-# frozen and closed -- §POST-M7-E1-D3 names diana/adapters/hermes_patches.py
-# explicitly as a file accepted post-M7 work does NOT touch. Do not add this
-# session's own (unmerged, "do not merge yet") Hermes-runtime-modernization
-# files here: that would misrepresent in-flight, unaccepted work as already
-# accepted. A correctly-written erratum for THIS work can only be authored once
-# it is itself merged, exactly as ERRATA-001 was written after #65/#66 landed.
+# production files ALREADY-ACCEPTED (merged) post-M7 work replaced. ERRATA-002
+# extends the original closed set with the two pre-existing adapter files
+# replaced by merged PR #72. New files introduced by #72 (for example
+# hermes_runtime.py) remain additions and are therefore not replacement-set
+# members. The comparison below remains exact set equality.
 POST_M7_PRODUCTION = {"diana/adapters/hermes_live.py",
                       "diana/multiactor/actors.py",
                       "diana/multiactor/executors.py",
                       "diana/mutation/remediation_driver.py",
                       "diana/ci/build-gate-input.py",
                       "diana/ci/write-summary.py",
-                      "diana/gate/diana-gate.py"}
+                      "diana/gate/diana-gate.py",
+                      "diana/adapters/hermes.py",
+                      "diana/adapters/hermes_patches.py"}
 # POST-M7-E1-D7: the milestone SUITES this erratum corrects. Test code, never
 # production code -- the same classification M4-ERRATA-001 finding 4 already
 # established, enumerated rather than blanket-excluded. Same rule as above:
-# this session's own unmerged test-harness edits are deliberately NOT added.
+# PR #72's test-harness edits are already covered by the same enumerated harness
+# set; no wildcard harness exclusion is introduced.
 POST_M7_HARNESS = {"diana/mutation/test-m4-bounded-mutation.sh",
                    "diana/multiactor/test-m6-multiactor.sh",
                    "diana/product/test-m7-product.sh"}
