@@ -40,6 +40,45 @@ env -u DIANA_HERMES_HOME SECRET_TOKEN='must-not-appear'   python3 "$SRC/diana/pr
 check "doctor refuses a missing Hermes runtime" test "$doctor_rc" -eq 3
 check "doctor never prints credential values"   bash -c '! grep -q "must-not-appear" "$1"' _ "$TMP/doctor.json"
 
+# A stored proposal is release-bound. Create it, then change only Diana's
+# declared release version and prove the old approval cannot be reused.
+python3 - "$SRC" "$TMP" <<'PY'
+import subprocess, sys, textwrap
+from pathlib import Path
+src, tmp = Path(sys.argv[1]), Path(sys.argv[2])
+target = tmp / "release-bound-target"
+(target / "src" / "core").mkdir(parents=True)
+(target / "src" / "auth").mkdir(parents=True)
+(target / "tests").mkdir()
+(target / "src" / "core" / "calc.py").write_text("def add(a,b):\n    return a-b\n")
+(target / "check.py").write_text(textwrap.dedent("""\
+    import sys
+    sys.path.insert(0, "src")
+    from core.calc import add
+    sys.exit(0 if add(2,3) == 5 else 1)
+"""))
+g=lambda *a: subprocess.run(["git","-C",str(target),*a],capture_output=True,text=True)
+g("init","-q"); g("config","user.email","prod@test"); g("config","user.name","prod")
+g("add","-A"); g("commit","-qm","init")
+for sub in ("product","multiactor","unattended","runtime","mutation","adapters","profile"):
+    sys.path.insert(0, str(src / "diana" / sub))
+import proposal, refusal
+base = tmp / "release-bound-proposals"
+p = proposal.build(
+    "Fix the failing tests in this repo, but don't touch auth or deployment",
+    str(target), base=str(base))
+(src / "VERSION").write_text("9.9.9-release-change\n")
+try:
+    proposal.load(p["proposal_digest"], str(base))
+except refusal.Refused as exc:
+    if exc.code != refusal.PROPOSAL_STALE:
+        raise SystemExit(f"wrong refusal: {exc.code}")
+else:
+    raise SystemExit("proposal survived a Diana release identity change")
+print("release binding refused stale approval")
+PY
+check "proposal approval is bound to Diana release identity" test "$?" -eq 0
+
 check "fresh governed-runtime install"   "${MANAGER[@]}" install --prefix "$PREFIX" --bin-dir "$BIN"
 check "installed runtime verifies"   "${MANAGER[@]}" verify --prefix "$PREFIX" --bin-dir "$BIN"
 check "launcher is Diana-managed symlink" test -L "$BIN/diana-do"
