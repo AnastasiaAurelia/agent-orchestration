@@ -4,15 +4,43 @@ set -euo pipefail
 
 AD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HERMES_HOME="${DIANA_HERMES_HOME:-$HOME/.hermes/hermes-agent}"
-PY_BIN="python3"
-[ -x "$HERMES_HOME/venv/bin/python3" ] && PY_BIN="$HERMES_HOME/venv/bin/python3"
 if [ ! -d "$HERMES_HOME" ]; then
   echo "SKIP  Hermes not installed at $HERMES_HOME"; exit 0
 fi
+# Resolve Hermes's OWN supported runtime (PM-managed venv), never a hardcoded
+# repo-local venv and never an install-hash path. Fails closed.
+PY_BIN="$(python3 "$AD_DIR/hermes_runtime.py" "$HERMES_HOME")" || {
+  echo "SKIP  could not establish Hermes's bootstrap/runtime under $HERMES_HOME"; exit 0
+}
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 export HERMES_SAFE_MODE=1
+
+# This suite's single-bad-condition matrix (each case flips exactly ONE
+# control and expects every OTHER control, including the C1 identity pin, to
+# stay green) needs a Hermes install whose identity Diana can actually
+# CERTIFY. An install with no install-stamp.json and no .git resolves to
+# `source: "unknown"` by Hermes's own identity mechanism -- correctly
+# fail-closed, but it means the identity control fires first for every single
+# case below and masks the one under test. That is an environment-provisioning
+# gap, not a Diana defect: skip with a loud, specific reason rather than
+# reporting a false pass OR a false "the matrix is broken".
+IDENTITY_STATUS="$("$PY_BIN" - "$AD_DIR" "$HERMES_HOME" <<'IDPY'
+import sys
+ad_dir, hermes_home = sys.argv[1], sys.argv[2]
+sys.path.insert(0, ad_dir)
+import hermes_patches as HP
+identity = HP.hermes_identity(hermes_home)
+print(HP.identity_certified(identity))
+IDPY
+)"
+if [ "$IDENTITY_STATUS" != "ok" ]; then
+  echo "SKIP  Hermes at $HERMES_HOME has no certifiable identity (status=$IDENTITY_STATUS;" \
+       "no install-stamp.json and no .git -- see hermes_patches.hermes_identity). The" \
+       "single-bad-condition matrix cannot isolate its cases without a certified identity."
+  exit 0
+fi
 
 "$PY_BIN" - "$AD_DIR" "$TMP_DIR" "$HERMES_HOME" <<'PY'
 import json, os, sys

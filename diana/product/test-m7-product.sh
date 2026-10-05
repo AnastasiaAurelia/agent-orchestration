@@ -12,8 +12,12 @@ PROD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIANA_DIR="$(cd "$PROD_DIR/.." && pwd)"
 REPO_DIR="$(cd "$DIANA_DIR/.." && pwd)"
 HERMES_HOME="${DIANA_HERMES_HOME:-$HOME/.hermes/hermes-agent}"
-PY_BIN="python3"; [ -x "$HERMES_HOME/venv/bin/python3" ] && PY_BIN="$HERMES_HOME/venv/bin/python3"
 [ -d "$HERMES_HOME" ] || { echo "SKIP  Hermes not installed at $HERMES_HOME"; exit 0; }
+# Resolve Hermes's OWN supported runtime (PM-managed venv), never a hardcoded
+# repo-local venv and never an install-hash path. Fails closed.
+PY_BIN="$(python3 "$DIANA_DIR/adapters/hermes_runtime.py" "$HERMES_HOME")" || {
+  echo "SKIP  could not establish Hermes's bootstrap/runtime under $HERMES_HOME"; exit 0
+}
 TMP_DIR="$(mktemp -d)"; trap 'rm -rf "$TMP_DIR"' EXIT
 export HERMES_SAFE_MODE=1 DIANA_HERMES_HOME="$HERMES_HOME"
 "$PY_BIN" - "$DIANA_DIR" "$TMP_DIR" "$REPO_DIR" "$HERMES_HOME" <<'PY'
@@ -513,7 +517,14 @@ frozen = ["install.sh", "diana/ship/ship.py", "diana/adapters/ao.py",
           "diana/ci/map-gate-result.py", "diana/gate/diana-gate.py"]
 frozen += [f"diana/commands/{n}" for n in
            ("diana-ship.md","fix.md","review.md","ship.md","orchestrate.md","loop-audit.md")]
-# POST-M7-E1-D1: the pre-existing production files accepted post-M7 work replaced.
+# POST-M7-E1-D1 (docs/architecture/DIANA-POST-M7-ERRATA-001.md): the pre-existing
+# production files ALREADY-ACCEPTED (merged) post-M7 work replaced. This set is
+# frozen and closed -- §POST-M7-E1-D3 names diana/adapters/hermes_patches.py
+# explicitly as a file accepted post-M7 work does NOT touch. Do not add this
+# session's own (unmerged, "do not merge yet") Hermes-runtime-modernization
+# files here: that would misrepresent in-flight, unaccepted work as already
+# accepted. A correctly-written erratum for THIS work can only be authored once
+# it is itself merged, exactly as ERRATA-001 was written after #65/#66 landed.
 POST_M7_PRODUCTION = {"diana/adapters/hermes_live.py",
                       "diana/multiactor/actors.py",
                       "diana/multiactor/executors.py",
@@ -523,7 +534,8 @@ POST_M7_PRODUCTION = {"diana/adapters/hermes_live.py",
                       "diana/gate/diana-gate.py"}
 # POST-M7-E1-D7: the milestone SUITES this erratum corrects. Test code, never
 # production code -- the same classification M4-ERRATA-001 finding 4 already
-# established, enumerated rather than blanket-excluded.
+# established, enumerated rather than blanket-excluded. Same rule as above:
+# this session's own unmerged test-harness edits are deliberately NOT added.
 POST_M7_HARNESS = {"diana/mutation/test-m4-bounded-mutation.sh",
                    "diana/multiactor/test-m6-multiactor.sh",
                    "diana/product/test-m7-product.sh"}

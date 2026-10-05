@@ -12,9 +12,10 @@ MUT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIANA_DIR="$(cd "$MUT_DIR/.." && pwd)"
 REPO_DIR="$(cd "$DIANA_DIR/.." && pwd)"
 HERMES_HOME="${DIANA_HERMES_HOME:-$HOME/.hermes/hermes-agent}"
-PY_BIN="python3"
-[ -x "$HERMES_HOME/venv/bin/python3" ] && PY_BIN="$HERMES_HOME/venv/bin/python3"
 [ -d "$HERMES_HOME" ] || { echo "SKIP  Hermes not installed at $HERMES_HOME"; exit 0; }
+PY_BIN="$(python3 "$MUT_DIR/../adapters/hermes_runtime.py" "$HERMES_HOME")" || {
+  echo "SKIP  could not establish Hermes's bootstrap/runtime under $HERMES_HOME"; exit 0
+}
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -561,8 +562,12 @@ import runtime_verify as RV
 check("M4-AC-14 M3's runtime record still rejects a forged depth",
       RV.RUNTIME_WORKFLOW_DEPTH["RUNTIME_VERIFIED_SECURITY_REVIEW"] == "D2")
 inline = __import__("agent.inline_tool_executors", fromlist=["INLINE_TOOL_EXECUTORS"]).INLINE_TOOL_EXECUTORS
-check("M4-AC-14 dispatch re-enumerated: still 13 inline executors, none of them mutating",
-      len(inline) == 13 and not ({"write_file", "patch", "terminal", "execute_code"} & set(inline)),
+# Current Hermes carries 15 inline executors (was 13 at the M1 pin; see
+# diana/adapters/test-hermes-capability.sh for the re-certification). Re-pinned
+# only after confirming no mutating tool is among them -- same re-certified
+# fact about current Hermes, not a loosened assertion.
+check("M4-AC-14 dispatch re-enumerated: still 15 inline executors, none of them mutating",
+      len(inline) == 15 and not ({"write_file", "patch", "terminal", "execute_code"} & set(inline)),
       f"(inline={len(inline)})")
 
 # ===================== M4-AC-17: end to end, with a real model ===========
