@@ -59,6 +59,18 @@ def _git_commit(root: Path = SOURCE_ROOT) -> str:
     return value
 
 
+def _source_clean(root: Path = SOURCE_ROOT) -> bool:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain", "--",
+             "diana", "diana-do", "VERSION"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0 and not proc.stdout.strip()
+
+
 def _certified_identities() -> list[dict]:
     import hermes_patches
     return [dict(x) for x in hermes_patches.CERTIFIED_IDENTITIES]
@@ -195,6 +207,10 @@ def install(prefix: Path, bin_dir: Path, *, require_existing: bool) -> dict:
 
     version = _version()
     commit = _git_commit()
+    if not _source_clean():
+        raise ManagedRuntimeError(
+            "runtime-bearing source files are dirty; commit/review the exact source before installation"
+        )
     rid = _release_id(version, commit)
     destination = releases / rid
     if destination.exists():
