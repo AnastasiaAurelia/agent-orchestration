@@ -20,6 +20,26 @@ PY_BIN="$(python3 "$MUT_DIR/../adapters/hermes_runtime.py" "$HERMES_HOME")" || {
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 export HERMES_SAFE_MODE=1
+# F-A7 (ERRATA-002): real terminal dispatch here goes through TWO independent
+# gates -- Diana's own patched authorization (which this whole suite exists to
+# prove) and, separately, Hermes's OWN `approvals.mode: smart` discretionary
+# command-approval layer, which asks an auxiliary LLM / prompts interactively
+# for shell commands it heuristically flags as risky. In a non-interactive
+# test subprocess there is no human to answer that prompt, so it auto-denies
+# -- a Hermes approval-layer interaction, not a Diana policy defect (Diana's
+# own decision for the in-scope case is provably correct: the call reaches
+# this point at all only because Diana's gate already allowed it; every case
+# Diana refuses is refused before Hermes's approval layer is ever reached).
+# HERMES_YOLO_MODE is Hermes's own documented, supported non-interactive/CI
+# bypass for exactly this discretionary layer (frozen at process import,
+# cannot be toggled mid-run by any in-process code -- see tools/approval.py).
+# It does not touch, weaken, or substitute for Diana's own enforcement: every
+# F-A7 refusal case below (omitted workdir, out-of-scope workdir, the named/
+# omitted asymmetry) is re-run under this same flag and must still refuse,
+# proving a Diana-denied operation cannot bypass through this mechanism.
+# Test-only: scoped to this script's own subprocess, never written to any
+# Hermes config, never applied to the live install.
+export HERMES_YOLO_MODE=1
 
 "$PY_BIN" - "$MUT_DIR" "$TMP_DIR" "$REPO_DIR" "$HERMES_HOME" <<'PY'
 import json, os, shutil, subprocess, sys
