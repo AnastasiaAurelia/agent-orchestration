@@ -144,6 +144,7 @@ def doctor_document(hermes_home: str | None = None) -> tuple[dict, bool]:
         "python_supported": py == SUPPORTED_PYTHON,
         "diana_version_known": diana_version() != "unknown",
         "diana_source_known": source_commit() is not None,
+        "diana_source_immutable": source_tree_clean() is not False,
         "hermes_home_present": Path(home).is_dir(),
         "hermes_runtime_resolved": hermes_python is not None,
         "hermes_identity_certified": identity_state == "ok",
