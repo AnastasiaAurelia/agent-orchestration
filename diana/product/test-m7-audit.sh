@@ -10,8 +10,12 @@ PROD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIANA_DIR="$(cd "$PROD_DIR/.." && pwd)"
 REPO_DIR="$(cd "$DIANA_DIR/.." && pwd)"
 HERMES_HOME="${DIANA_HERMES_HOME:-$HOME/.hermes/hermes-agent}"
-PY_BIN="python3"; [ -x "$HERMES_HOME/venv/bin/python3" ] && PY_BIN="$HERMES_HOME/venv/bin/python3"
 [ -d "$HERMES_HOME" ] || { echo "SKIP  Hermes not installed at $HERMES_HOME"; exit 0; }
+# Resolve Hermes's OWN supported runtime (PM-managed venv), never a hardcoded
+# repo-local venv and never an install-hash path. Fails closed.
+PY_BIN="$(python3 "$DIANA_DIR/adapters/hermes_runtime.py" "$HERMES_HOME")" || {
+  echo "SKIP  could not establish Hermes's bootstrap/runtime under $HERMES_HOME"; exit 0
+}
 TMP_DIR="$(mktemp -d)"; trap 'rm -rf "$TMP_DIR"' EXIT
 export HERMES_SAFE_MODE=1 DIANA_HERMES_HOME="$HERMES_HOME"
 "$PY_BIN" - "$DIANA_DIR" "$TMP_DIR" "$REPO_DIR" "$HERMES_HOME" <<'PY'

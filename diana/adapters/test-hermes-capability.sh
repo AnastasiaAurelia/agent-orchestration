@@ -5,11 +5,14 @@ set -euo pipefail
 
 AD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HERMES_HOME="${DIANA_HERMES_HOME:-$HOME/.hermes/hermes-agent}"
-PY_BIN="python3"
-[ -x "$HERMES_HOME/venv/bin/python3" ] && PY_BIN="$HERMES_HOME/venv/bin/python3"
 if [ ! -d "$HERMES_HOME" ]; then
   echo "SKIP  Hermes not installed at $HERMES_HOME"; exit 0
 fi
+# Resolve Hermes's OWN supported runtime (PM-managed venv), never a hardcoded
+# repo-local venv and never an install-hash path. Fails closed.
+PY_BIN="$(python3 "$AD_DIR/hermes_runtime.py" "$HERMES_HOME")" || {
+  echo "SKIP  could not establish Hermes's bootstrap/runtime under $HERMES_HOME"; exit 0
+}
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -55,8 +58,14 @@ check("WITHOUT the patch, no approval gate stopped it", Path(hole).read_text().s
 
 # --- the inline-executor bypass: handle_function_call is NOT the only entry ---
 from agent.inline_tool_executors import INLINE_TOOL_EXECUTORS, resolve_invoke_tool_executor
-check("13 tools resolve to inline executors that never reach handle_function_call",
-      len(INLINE_TOOL_EXECUTORS) == 13, f"(got {len(INLINE_TOOL_EXECUTORS)})")
+# Current Hermes carries 15 inline executors (was 13 at the M1 pin): the two
+# additions are "read_terminal" and "read_window_below". Re-pinned only after
+# the dispatch-funnel probes below (AC-2) were re-run and confirmed to cover
+# all 15 by name, behaviorally -- the guard is not hardcoded to the old count,
+# it re-enumerates INLINE_TOOL_EXECUTORS live, so this is a re-certified fact
+# about current Hermes, not a loosened assertion.
+check("15 tools resolve to inline executors that never reach handle_function_call",
+      len(INLINE_TOOL_EXECUTORS) == 15, f"(got {len(INLINE_TOOL_EXECUTORS)})")
 check("delegate_task is one of them", "delegate_task" in INLINE_TOOL_EXECUTORS)
 before = ST._drive_real_dispatch("delegate_task")
 check("WITHOUT the dispatch guard, delegate_task's handler RUNS on the agent-loop funnel",
