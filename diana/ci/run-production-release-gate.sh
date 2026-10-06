@@ -34,6 +34,33 @@ required() {
   rm -f "$out"
 }
 
+required_known_m5_exception() {
+  local out
+  out="$(mktemp)"
+  echo "=== M5 unattended (governed historical accounting exception) ==="
+  set +e
+  bash diana/unattended/test-m5-unattended.sh >"$out" 2>&1
+  local rc=$?
+  set -e
+  cat "$out"
+  local fail_lines
+  fail_lines="$(grep -c '^FAIL  ' "$out" || true)"
+  if grep -Eq '(^|[[:space:]])SKIP([[:space:]]|$)' "$out"; then
+    echo "RELEASE-FAIL  M5 unattended skipped"
+    fail=$((fail+1))
+  elif [ "$rc" -eq 0 ]; then
+    echo "RELEASE-FAIL  M5 unattended unexpectedly lost its governed frozen exception"
+    fail=$((fail+1))
+  elif [ "$fail_lines" -ne 1 ] || ! grep -Fq       "FAIL  M5-REG-2 modified pre-existing PRODUCTION code equals M5's declared set exactly" "$out"; then
+    echo "RELEASE-FAIL  M5 unattended differs from the one bounded historical exception"
+    fail=$((fail+1))
+  else
+    echo "RELEASE-PASS  M5 unattended substantive suite ran; only the exact frozen accounting exception remains"
+    pass=$((pass+1))
+  fi
+  rm -f "$out"
+}
+
 [ "$(uname -s)" = "Linux" ] || {
   echo "RELEASE-FAIL unsupported OS: $(uname -s) (Linux required)"
   exit 3
@@ -47,6 +74,7 @@ PY
 
 # Product/distribution first. If the installed/runtime story is not healthy,
 # historical milestone evidence cannot make the release shippable.
+required "runtime version" ./diana-do version
 required "operator doctor" ./diana-do doctor
 required "production distribution" bash diana/product/test-production-release.sh
 required "post-M7 accounting" bash diana/ci/test-post-m7-replacement-set.sh
@@ -61,10 +89,12 @@ required "diana-do runtime fail-closed" bash diana/adapters/test-diana-do-runtim
 required "M4 bounded mutation" bash diana/mutation/test-m4-bounded-mutation.sh
 required "M5 journal" bash diana/unattended/test-m5-journal.sh
 required "M5 ownership" bash diana/unattended/test-m5-ownership.sh
-# M5 unattended has one historically governed frozen accounting failure under
-# ERRATA-001/002. It is NOT silently converted to green here. The maintained
-# repo-wide accounting assertion above must pass, while the substantive M5
-# suites below still run.
+required "M5 proofs" python3 diana/unattended/test_m5_proofs.py
+# Run the frozen M5 unattended suite too. It is accepted only when its sole
+# failure is exactly the immutable historical M5-REG-2 accounting clause
+# superseded by the repo-wide exact reconciliation above. Any second failure,
+# skip, or changed failure label is a release failure.
+required_known_m5_exception
 required "M6 review" bash diana/multiactor/test-m6-review.sh
 required "M6 lease" bash diana/multiactor/test-m6-lease.sh
 required "M6 multiactor" bash diana/multiactor/test-m6-multiactor.sh
