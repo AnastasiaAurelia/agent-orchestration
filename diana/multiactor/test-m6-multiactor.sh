@@ -1022,6 +1022,11 @@ POST_M7_HARNESS = {"diana/adapters/test-hermes-capability.sh",
                    "diana/security/test-ci-verifier-runs.sh",
                    "diana/security/test-coverage-matrix.sh",
                    "diana/security/test-security-gate.sh"}
+
+# PR #74 candidate-only harness classification. This is not accepted-history
+# accounting and must not be copied into ERRATA-002 before merge. The file is a
+# Python proof/test runner, not production runtime code.
+PR74_CANDIDATE_HARNESS = {"diana/unattended/test_m5_proofs.py"}
 M6_DECLARED = set(M6_PRODUCTION)      # pristine: M6's own claim
 # A post-M7 replacement is visible as a MODIFICATION only at a base where the
 # file already existed; where it did not, the same file is an ADDITION and the
@@ -1049,7 +1054,7 @@ since_freeze = [l.split("\t") for l in git("diff", "--name-status", FREEZE).stri
 # Test-harness corrections are test code, not production code (M4-ERRATA-001
 # finding 4, applied consistently). Bounded by an enumerated set, not excluded
 # wholesale: an unlisted harness edit still fails the check below.
-is_harness = lambda q: q.rsplit("/", 1)[-1].startswith("test-") and q.endswith(".sh")
+is_harness = lambda q: ((q.rsplit("/", 1)[-1].startswith("test-") and q.endswith(".sh")) or q in PR74_CANDIDATE_HARNESS)
 mod_harness = {p for st, p in since_freeze if st.startswith("M") and is_harness(p)}
 mod_since_freeze = {p for st, p in since_freeze
                     if st.startswith("M") and not is_doc(p) and not is_harness(p)}
