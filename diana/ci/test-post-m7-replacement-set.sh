@@ -70,6 +70,11 @@ POST_M7_HARNESS = {"diana/adapters/test-hermes-capability.sh",
                    "diana/security/test-ci-verifier-runs.sh",
                    "diana/security/test-coverage-matrix.sh",
                    "diana/security/test-security-gate.sh"}
+
+# PR #74 candidate-only harness classification. This is not accepted-history
+# accounting and must not be copied into ERRATA-002 before merge. The file is a
+# Python proof/test runner, not production runtime code.
+PR74_CANDIDATE_HARNESS = {"diana/unattended/test_m5_proofs.py"}
 DOCS_MANIFEST = {".gitignore", "README.md"}
 POST_M7_DOCS = {"MEMORY.md",
                  "diana/security/README.md",
@@ -93,7 +98,7 @@ MILESTONES = [
 ]
 
 is_doc = lambda q: q.startswith("docs/") or q in (DOCS_MANIFEST | POST_M7_DOCS)
-is_harness = lambda q: q.rsplit("/", 1)[-1].startswith("test-") and q.endswith(".sh")
+is_harness = lambda q: ((q.rsplit("/", 1)[-1].startswith("test-") and q.endswith(".sh")) or q in PR74_CANDIDATE_HARNESS)
 
 print("=== every milestone's replacement statement, by set equality ===")
 for label, base, declared, declared_harness in MILESTONES:
@@ -114,7 +119,7 @@ for label, base, declared, declared_harness in MILESTONES:
     check(f"{label} its own declared set is entirely present and unreduced",
           declared <= production and declared <= permitted)
     permitted_harness = declared_harness | {
-        q for q in POST_M7_HARNESS if existed_at(base, q)}
+        q for q in (POST_M7_HARNESS | PR74_CANDIDATE_HARNESS) if existed_at(base, q)}
     check(f"{label} harness corrections are enumerated, not blanket-excluded",
           harness == permitted_harness,
           f"(got {sorted(harness)} want {sorted(permitted_harness)})")
