@@ -9,7 +9,9 @@
 # One stable invocation. No Python module path, no runtime class, no journal
 # API, no M1-M6 terminology required to use it.
 set -uo pipefail
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve the managed launcher symlink before locating the packaged Diana tree.
+SOURCE_PATH="$(readlink -f "${BASH_SOURCE[0]}")" || exit 3
+HERE="$(cd "$(dirname "$SOURCE_PATH")" && pwd)"
 # HERMES_HOME is Hermes's DATA/PROFILE home. DIANA_HERMES_HOME is the exact
 # certified SOURCE checkout Diana imports/resolves. A live Hermes shell may
 # already export HERMES_HOME; assigning to an exported shell variable preserves
