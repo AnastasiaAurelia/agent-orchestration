@@ -135,3 +135,46 @@ Key outcomes:
 - installed manifest/file mismatch → `runtime-install.sh verify` refuses.
 
 Do not fix these by broadening identity matching, bypassing PM runtime discovery, disabling release checks or editing frozen proof suites.
+
+
+## Release-manifest authentication
+
+The installed `release-manifest.json` is not trusted merely because its file hashes are internally consistent.
+
+The runtime manager authenticates the complete manifest with HMAC-SHA256 using a local 32-byte trust key. By default the key lives at:
+
+`~/.local/state/diana/runtime-trust.key`
+
+The key:
+- must be a regular non-symlink file;
+- must be owned by the current user;
+- must not grant group/other permissions;
+- must live outside the governed runtime prefix.
+
+Override only for a managed/test environment with:
+
+`DIANA_RUNTIME_TRUST_FILE=/path/outside/runtime/prefix/key`
+
+or `--trust-file`.
+
+This protects against a process that can rewrite the runtime prefix but cannot access the external trust key. It is not a claim of resistance to a full same-user account compromise.
+
+A forged runtime file plus a forged, self-consistent manifest is still refused if the manifest authentication cannot be reproduced.
+
+## Interrupted install / upgrade / rollback
+
+The manager uses two fail-closed markers:
+
+- `.staging/` — incomplete staged release content;
+- `transition.json` — activation/rollback symlink transition in progress.
+
+A non-empty stale staging directory or a leftover transition marker is treated as ambiguous state and causes verification/upgrade/rollback to refuse.
+
+Do not delete these markers simply to make a command pass without first establishing which release is authoritative.
+
+Catchable activation failures attempt to restore the previous verified state. A hard process crash may leave the transition marker intentionally; the next command must refuse rather than infer completion.
+
+## Trust-key lifecycle
+
+`runtime-install.sh uninstall` removes only the Diana-managed runtime prefix and launcher. It intentionally does **not** delete the external trust key because that key may authenticate another managed Diana prefix.
+
