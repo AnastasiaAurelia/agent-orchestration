@@ -120,8 +120,7 @@ for label, base, declared, declared_harness in MILESTONES:
           f"(got {sorted(harness)} want {sorted(permitted_harness)})")
     check(f"{label} nothing was deleted", deleted == [], f"({deleted})")
 
-print("
-=== the statement M5's own frozen suite can no longer make ===")
+print("\n=== the statement M5's own frozen suite can no longer make ===")
 m5_declared = {"diana/runtime/blocking.py"}
 rows = [l.split("\t") for l in git("diff", "--name-status", "69f5569").strip().splitlines() if l]
 m5_production = {p for st, p in rows if st.startswith("M")
@@ -137,8 +136,7 @@ falsify("M5's own suite still reports this one failure, because its constant is 
         git("diff", "--name-only", FREEZE, "--",
             "diana/unattended/test-m5-unattended.sh").strip() == "")
 
-print("
-=== the accounting is exhaustive and nothing was quietly excluded ===")
+print("\n=== the accounting is exhaustive and nothing was quietly excluded ===")
 check("every accounted production file is a real path in the repository",
       all((git("cat-file", "-e", f"HEAD:{q}") or True) and
           subprocess.run(["git", "-C", repo, "cat-file", "-e", f"HEAD:{q}"],
@@ -165,7 +163,6 @@ falsify("the accounted set is NOT a wildcard: a file nobody accounted for would 
         and "diana/mutation/mutation_policy.py" not in POST_M7_PRODUCTION
         and "diana/runtime/contract.py" not in POST_M7_PRODUCTION)
 
-print(f"
-{passed} passed, {failed} failed, {falsifiers} falsifiers")
+print(f"\n{passed} passed, {failed} failed, {falsifiers} falsifiers")
 sys.exit(1 if failed else 0)
 PY
