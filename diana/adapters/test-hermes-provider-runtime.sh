@@ -42,7 +42,7 @@ provider_name = "claude-subscription-directsdk-experimental"
 model_name = "claude-opus-test"
 calls = []
 
-def load_config_readonly():
+def load_config():
     return {"model": {"provider": provider_name, "default": model_name}}
 
 def resolve_runtime_provider(*, requested=None, explicit_api_key=None,
@@ -66,7 +66,7 @@ def resolve_runtime_provider(*, requested=None, explicit_api_key=None,
         "source": "process",
     }
 
-cfg_mod.load_config_readonly = load_config_readonly
+cfg_mod.load_config = load_config
 rp_mod.resolve_runtime_provider = resolve_runtime_provider
 sys.modules["hermes_cli"] = pkg
 sys.modules["hermes_cli.config"] = cfg_mod
@@ -88,6 +88,25 @@ check("external-process args are preserved",
       cfg["args"] == ["--acp", "--stdio"])
 check("resolved api_mode is preserved",
       cfg["api_mode"] == "chat_completions")
+
+# Reproduce the real Builder failure class deterministically: Hermes's in-process
+# merged-config cache yields an empty model block, while a fresh interpreter sees
+# the correct non-secret model selector. Diana must recover through ONLY that
+# fresh selector and still use Hermes's canonical runtime resolver for auth.
+fresh_calls = []
+def empty_load_config():
+    return {}
+cfg_mod.load_config = empty_load_config
+def fake_fresh(home):
+    fresh_calls.append(str(home))
+    return {"provider": provider_name, "model": model_name, "base_url": ""}
+HL._fresh_model_config = fake_fresh
+cfg_from_corrupt_cache = HL.provider_config("/tmp/fake-certified-hermes")
+check("corrupted in-process model cache triggers fresh selector fallback",
+      fresh_calls == ["/tmp/fake-certified-hermes"])
+check("fresh selector fallback still resolves through Hermes runtime provider",
+      cfg_from_corrupt_cache["provider"] == provider_name)
+cfg_mod.load_config = load_config
 
 # Prove the launch tuple reaches AIAgent, not just provider_config().
 captured = {}
