@@ -199,24 +199,41 @@ def hermes_identity(home: str | None = None) -> dict:
     return identity
 
 
+# Raw, no-I/O identity classification (spec: fix/behavioral-runtime-compatibility).
+# This is deliberately NOT the full governed-run decision: "unlisted" means only
+# "exact, verifiable, not in the hand-reviewed registry" -- it is NEITHER a pass
+# NOR a refusal by itself. The caller (hermes.py's check_pre_import/check, or
+# release.py's doctor) decides what an "unlisted" identity means by running the
+# bounded compat_preflight behavioral preflight: a passing preflight makes it
+# "compatible-unlisted" (allowed, recorded as unlisted); a failing one makes it
+# "incompatible" (refused). Only an explicit, reviewed addition to
+# CERTIFIED_IDENTITIES ever changes an identity into "certified" -- no runtime
+# path promotes "unlisted" into the registry.
+IDENTITY_CERTIFIED = "certified"
+IDENTITY_UNLISTED = "unlisted"
+IDENTITY_UNVERIFIABLE = "unverifiable"
+
+
 def identity_certified(identity: dict) -> str:
-    """"ok", "unverifiable" or "mismatch" -- never a silent pass on "unknown".
+    """"certified", "unverifiable" or "unlisted" -- never a silent pass on "unknown".
 
     `unverifiable` covers both `source in ("unknown", "unreachable")` and a
     missing `sha`: a resolvable source with no commit is just as unprovable
-    as no source at all, and must fail the same way. `mismatch` is reserved
-    for an identity that WAS resolved but is not in `CERTIFIED_IDENTITIES` --
-    a different fact an operator should read differently (a real, dated
-    upstream change, rather than an environment Diana cannot identify at
-    all).
+    as no source at all, and must fail the same way. `unlisted` is reserved
+    for an identity that WAS resolved -- an exact, verifiable git identity --
+    but is not in `CERTIFIED_IDENTITIES`: a different fact an operator should
+    read differently (a real, dated upstream change that may be a perfectly
+    compatible upgrade, rather than an environment Diana cannot identify at
+    all). `unlisted` is NOT a refusal on its own; see `IDENTITY_UNLISTED`'s
+    module docstring for how a caller must resolve it.
     """
     source = identity.get("source")
     sha = identity.get("sha")
     if not source or source in ("unknown", "unreachable") or not sha:
-        return "unverifiable"
+        return IDENTITY_UNVERIFIABLE
     matched = any(entry["source"] == source and entry["sha"] == sha
                   for entry in CERTIFIED_IDENTITIES)
-    return "ok" if matched else "mismatch"
+    return IDENTITY_CERTIFIED if matched else IDENTITY_UNLISTED
 
 
 # --- patch 1: confinement (D20) -------------------------------------------

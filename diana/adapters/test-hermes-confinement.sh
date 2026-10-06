@@ -39,8 +39,9 @@ _identity = HP.hermes_identity()
 _status = HP.identity_certified(_identity)
 check("Hermes's own identity mechanism resolves to source+sha, not unknown/unreachable",
       _status != "unverifiable", f"(got {_identity})")
-check("Hermes identity matches a certified pin, or is an honestly reported mismatch "
-      "(never a silent pass)", _status in ("ok", "mismatch"), f"(got {_status} {_identity})")
+check("Hermes identity matches a certified pin, or is an honestly reported unlisted "
+      "exact identity (never a silent pass)", _status in ("certified", "unlisted"),
+      f"(got {_status} {_identity})")
 
 tree = ST.build_probe_tree(tmp)
 scope = {"allowed_roots": [tree["repo"]], "denied_subpaths": [".git/", ".env", ".env.*"]}

@@ -35,7 +35,7 @@ identity = HP.hermes_identity(hermes_home)
 print(HP.identity_certified(identity))
 IDPY
 )"
-if [ "$IDENTITY_STATUS" != "ok" ]; then
+if [ "$IDENTITY_STATUS" != "certified" ]; then
   echo "SKIP  Hermes at $HERMES_HOME has no certifiable identity (status=$IDENTITY_STATUS;" \
        "no install-stamp.json and no .git -- see hermes_patches.hermes_identity). The" \
        "single-bad-condition matrix cannot isolate its cases without a certified identity."
