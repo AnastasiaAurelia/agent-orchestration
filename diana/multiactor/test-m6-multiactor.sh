@@ -1067,7 +1067,7 @@ check("M6-E1-AC-1 the set is neither larger nor smaller than declared",
 check("M6-E1-AC-1 M6's OWN declared four are all still there, unchanged by this erratum",
       M6_DECLARED <= mod_since_freeze and len(M6_DECLARED) == 4)
 check("M6-E1-AC-1 test-harness corrections are classified separately and enumerated",
-      mod_harness <= POST_M7_HARNESS, f"(got {sorted(mod_harness)})")
+      mod_harness <= (POST_M7_HARNESS | PR74_CANDIDATE_HARNESS), f"(got {sorted(mod_harness)})")
 EXCLUDED = ["diana/adapters/hermes_patches.py", "diana/mutation/mutation_policy.py",
             "diana/runtime/contract.py", "diana/adapters/ao.py", "diana/unattended/recovery.py",
             "diana/unattended/ownership.py", "diana/unattended/workitems.py",
