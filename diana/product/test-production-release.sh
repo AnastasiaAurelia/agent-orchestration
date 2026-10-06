@@ -85,6 +85,12 @@ git -C "$SRC" checkout -q -- VERSION
 check "fresh governed-runtime install"   "${MANAGER[@]}" install --prefix "$PREFIX" --bin-dir "$BIN"
 check "installed runtime verifies with authenticated manifest"   "${MANAGER[@]}" verify --prefix "$PREFIX" --bin-dir "$BIN"
 check "launcher is Diana-managed symlink" test -L "$BIN/diana-do"
+
+DIANA_RUNTIME_TRUST_FILE="$TRUST" "$BIN/diana-do" doctor-json "$TMP/no-hermes" \
+  >"$TMP/installed-doctor.json" 2>/dev/null && installed_doctor_rc=0 || installed_doctor_rc=$?
+check "installed doctor still fails closed without Hermes" test "$installed_doctor_rc" -eq 3
+check "installed doctor authenticates its release before diagnosing Hermes" \
+  grep -Fq '"manifest_authenticated": true' "$TMP/installed-doctor.json"
 check "trust key is outside runtime prefix"   bash -c 'case "$1" in "$2"/*) exit 1;; *) exit 0;; esac' _ "$TRUST" "$PREFIX"
 check "trust key is private"   bash -c '[ "$(stat -c %a "$1")" = 600 ]' _ "$TRUST"
 
