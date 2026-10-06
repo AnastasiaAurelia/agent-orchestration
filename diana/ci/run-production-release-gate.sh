@@ -36,7 +36,7 @@ required() {
   local rc=$?
   set -e
   cat "$out"
-  if grep -Eq '(^|[[:space:]])SKIP([[:space:]]|$)' "$out"; then
+  if grep -Eq '^[[:space:]]*SKIP([[:space:]]|$)' "$out"; then
     echo "RELEASE-FAIL  $label skipped"
     fail=$((fail+1))
   elif [ "$rc" -ne 0 ]; then
@@ -60,7 +60,7 @@ required_known_m5_exception() {
   cat "$out"
   local fail_lines
   fail_lines="$(grep -c '^FAIL  ' "$out" || true)"
-  if grep -Eq '(^|[[:space:]])SKIP([[:space:]]|$)' "$out"; then
+  if grep -Eq '^[[:space:]]*SKIP([[:space:]]|$)' "$out"; then
     echo "RELEASE-FAIL  M5 unattended skipped"
     fail=$((fail+1))
   elif [ "$rc" -eq 0 ]; then
