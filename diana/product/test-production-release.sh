@@ -102,7 +102,8 @@ check "fresh governed-runtime install"   "${MANAGER[@]}" install --prefix "$PREF
 check "installed runtime verifies with authenticated manifest"   "${MANAGER[@]}" verify --prefix "$PREFIX" --bin-dir "$BIN"
 check "launcher is Diana-managed symlink" test -L "$BIN/diana-do"
 
-DIANA_RUNTIME_TRUST_FILE="$TRUST" "$BIN/diana-do" doctor-json "$TMP/no-hermes" \
+DIANA_RUNTIME_TRUST_FILE="$TRUST" DIANA_HERMES_HOME="$TMP/no-hermes" \
+  "$BIN/diana-do" doctor-json \
   >"$TMP/installed-doctor.json" 2>/dev/null && installed_doctor_rc=0 || installed_doctor_rc=$?
 check "installed doctor still fails closed without Hermes" test "$installed_doctor_rc" -eq 3
 check "installed doctor authenticates its release before diagnosing Hermes" \
