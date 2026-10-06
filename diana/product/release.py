@@ -27,7 +27,9 @@ if str(ADAPTERS) not in sys.path:
 
 RELEASE_SCHEMA_VERSION = 1
 SUPPORTED_SYSTEM = "Linux"
-SUPPORTED_PYTHON = (3, 11)
+SUPPORTED_BOOTSTRAP_PYTHON = (3, 11)
+SUPPORTED_HERMES_RUNTIME_PYTHON_MIN = (3, 11)
+SUPPORTED_HERMES_RUNTIME_PYTHON_MAX_EXCLUSIVE = (3, 15)
 VERSION_FILE = DIANA_ROOT / "VERSION"
 MANIFEST_NAME = "release-manifest.json"
 MANAGER_SCHEMA = 2
@@ -211,6 +213,35 @@ def _resolve_hermes_python(home: str) -> tuple[str | None, str | None]:
     return str(python), None
 
 
+def _python_version(python: str) -> tuple[tuple[int, int] | None, str | None]:
+    try:
+        proc = subprocess.run(
+            [python, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip()
+        return None, detail or f"python version probe exited {proc.returncode}"
+    try:
+        major_s, minor_s = proc.stdout.strip().split(".", 1)
+        return (int(major_s), int(minor_s)), None
+    except (ValueError, AttributeError) as exc:
+        return None, f"invalid python version output: {proc.stdout.strip()!r} ({exc})"
+
+
+def _runtime_python_supported(version: tuple[int, int] | None) -> bool:
+    return bool(
+        version is not None
+        and SUPPORTED_HERMES_RUNTIME_PYTHON_MIN <= version
+        < SUPPORTED_HERMES_RUNTIME_PYTHON_MAX_EXCLUSIVE
+    )
+
+
 def _hermes_identity(python: str, home: str) -> tuple[dict | None, str | None]:
     probe = (
         "import sys,json;"
@@ -259,7 +290,10 @@ def version_document() -> dict:
         "diana_version": diana_version(),
         "source_commit": source_commit(),
         "supported_system": SUPPORTED_SYSTEM,
-        "supported_python": f"{SUPPORTED_PYTHON[0]}.{SUPPORTED_PYTHON[1]}",
+        "supported_bootstrap_python": (
+            f"{SUPPORTED_BOOTSTRAP_PYTHON[0]}.{SUPPORTED_BOOTSTRAP_PYTHON[1]}"
+        ),
+        "supported_hermes_runtime_python": ">=3.11,<3.15",
         "certified_hermes_identities": list(_certified_identities()),
     }
 
@@ -269,8 +303,12 @@ def doctor_document(hermes_home: str | None = None) -> tuple[dict, bool]:
         "DIANA_HERMES_HOME", str(Path.home() / ".hermes" / "hermes-agent")
     )
     system = platform.system()
-    py = (sys.version_info.major, sys.version_info.minor)
+    bootstrap_py = (sys.version_info.major, sys.version_info.minor)
     hermes_python, runtime_error = _resolve_hermes_python(home)
+    hermes_runtime_py = None
+    hermes_runtime_py_error = None
+    if hermes_python:
+        hermes_runtime_py, hermes_runtime_py_error = _python_version(hermes_python)
     identity = None
     identity_error = None
     if hermes_python:
@@ -284,7 +322,8 @@ def doctor_document(hermes_home: str | None = None) -> tuple[dict, bool]:
     )
     checks = {
         "platform_supported": system == SUPPORTED_SYSTEM,
-        "python_supported": py == SUPPORTED_PYTHON,
+        "bootstrap_python_supported": bootstrap_py == SUPPORTED_BOOTSTRAP_PYTHON,
+        "hermes_runtime_python_supported": _runtime_python_supported(hermes_runtime_py),
         "diana_version_known": diana_version() != "unknown",
         "diana_source_known": source_commit() is not None,
         "diana_source_authenticated": source_authenticated,
@@ -303,12 +342,31 @@ def doctor_document(hermes_home: str | None = None) -> tuple[dict, bool]:
         "manifest_error": manifest_error,
         "source_tree_clean": source_clean,
         "platform": {"actual": system, "supported": [SUPPORTED_SYSTEM]},
+        "bootstrap_python": {
+            "actual": f"{bootstrap_py[0]}.{bootstrap_py[1]}",
+            "supported": [
+                f"{SUPPORTED_BOOTSTRAP_PYTHON[0]}.{SUPPORTED_BOOTSTRAP_PYTHON[1]}"
+            ],
+        },
+        # Backward-compatible alias for older consumers; explicitly bootstrap
+        # Python, never the PM-managed Hermes execution interpreter.
         "python": {
-            "actual": f"{py[0]}.{py[1]}",
-            "supported": [f"{SUPPORTED_PYTHON[0]}.{SUPPORTED_PYTHON[1]}"],
+            "actual": f"{bootstrap_py[0]}.{bootstrap_py[1]}",
+            "supported": [
+                f"{SUPPORTED_BOOTSTRAP_PYTHON[0]}.{SUPPORTED_BOOTSTRAP_PYTHON[1]}"
+            ],
+            "role": "bootstrap",
         },
         "hermes_home": home,
         "hermes_python": hermes_python,
+        "hermes_runtime_python": {
+            "actual": (
+                f"{hermes_runtime_py[0]}.{hermes_runtime_py[1]}"
+                if hermes_runtime_py is not None else None
+            ),
+            "supported": ">=3.11,<3.15",
+            "error": hermes_runtime_py_error,
+        },
         "hermes_runtime_error": runtime_error,
         "hermes_identity": identity,
         "hermes_identity_error": identity_error,
@@ -323,9 +381,13 @@ def print_human_doctor(doc: dict) -> None:
     print(f"INFO  diana_version={doc['diana_version']}")
     print(f"INFO  source_commit={doc['source_commit'] or 'unknown'}")
     print(f"INFO  platform={doc['platform']['actual']}")
-    print(f"INFO  python={doc['python']['actual']}")
+    print(f"INFO  bootstrap_python={doc['bootstrap_python']['actual']}")
     print(f"INFO  hermes_home={doc['hermes_home']}")
     print(f"INFO  hermes_python={doc['hermes_python'] or 'unresolved'}")
+    print(
+        "INFO  hermes_runtime_python="
+        f"{doc['hermes_runtime_python']['actual'] or 'unresolved'}"
+    )
     identity = doc.get("hermes_identity") or {}
     print(f"INFO  hermes_identity_source={identity.get('source', 'unverifiable')}")
     print(f"INFO  hermes_identity_sha={identity.get('sha') or 'unverifiable'}")
