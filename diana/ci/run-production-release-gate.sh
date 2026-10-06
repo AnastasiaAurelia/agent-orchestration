@@ -8,6 +8,21 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
+# Resolve ONE Hermes home at gate entry and export it explicitly. Child suites
+# must certify the same runtime rather than independently falling back to a
+# different profile/default because DIANA_HERMES_HOME was only a shell-local
+# variable in the invoking terminal.
+HERMES_HOME="${DIANA_HERMES_HOME:-$HOME/.hermes/hermes-agent}"
+export DIANA_HERMES_HOME="$HERMES_HOME"
+HERMES_PYTHON="$(python3 "$ROOT/diana/adapters/hermes_runtime.py" "$HERMES_HOME" 2>&1)" || {
+  echo "RELEASE-FAIL Hermes PM runtime could not be resolved for $HERMES_HOME"
+  echo "$HERMES_PYTHON"
+  exit 3
+}
+export DIANA_HERMES_PYTHON="$HERMES_PYTHON"
+echo "RELEASE-INFO DIANA_HERMES_HOME=$DIANA_HERMES_HOME"
+echo "RELEASE-INFO DIANA_HERMES_PYTHON=$DIANA_HERMES_PYTHON"
+
 fail=0
 pass=0
 
@@ -68,8 +83,20 @@ required_known_m5_exception() {
 python3 - <<'PY'
 import sys
 if sys.version_info[:2] != (3, 11):
-    raise SystemExit(f"RELEASE-FAIL Python {sys.version_info.major}.{sys.version_info.minor}; 3.11 required")
-print("RELEASE-PASS Python 3.11")
+    raise SystemExit(
+        f"RELEASE-FAIL bootstrap Python {sys.version_info.major}.{sys.version_info.minor}; 3.11 required"
+    )
+print("RELEASE-PASS bootstrap Python 3.11")
+PY
+
+"$HERMES_PYTHON" - <<'PY'
+import sys
+v = sys.version_info[:2]
+if not ((3, 11) <= v < (3, 15)):
+    raise SystemExit(
+        f"RELEASE-FAIL Hermes runtime Python {v[0]}.{v[1]}; supported >=3.11,<3.15"
+    )
+print(f"RELEASE-PASS Hermes runtime Python {v[0]}.{v[1]}")
 PY
 
 # Product/distribution first. If the installed/runtime story is not healthy,
@@ -83,6 +110,7 @@ required "post-M7 accounting" bash diana/ci/test-post-m7-replacement-set.sh
 required "Hermes confinement" bash diana/adapters/test-hermes-confinement.sh
 required "Hermes capability" bash diana/adapters/test-hermes-capability.sh
 required "Hermes preflight" bash diana/adapters/test-hermes-preflight.sh
+required "Hermes provider runtime" bash diana/adapters/test-hermes-provider-runtime.sh
 required "diana-do runtime fail-closed" bash diana/adapters/test-diana-do-runtime-failclosed.sh
 
 # Milestone/runtime evidence.
