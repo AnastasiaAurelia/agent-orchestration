@@ -194,6 +194,8 @@ def _validate_bin_dir(bin_dir: Path) -> Path:
 
 def _validate_trust_file(trust_file: Path, prefix: Path) -> Path:
     raw = trust_file.expanduser()
+    if raw.is_symlink():
+        raise ManagedRuntimeError(f"runtime trust key must not be a symlink: {raw}")
     # The trust anchor must not be forgeable by an actor limited to the runtime
     # prefix. This does not claim protection from a same-user compromise that can
     # also read/write the trust-key path.
@@ -222,11 +224,12 @@ def _load_trust_key(trust_file: Path, *, create: bool) -> bytes:
         return key
     if not create:
         raise ManagedRuntimeError(f"runtime trust key does not exist: {trust_file}")
-    trust_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    try:
-        os.chmod(trust_file.parent, 0o700)
-    except OSError:
-        pass
+    parent = trust_file.parent
+    if parent.exists():
+        if parent.is_symlink() or not parent.is_dir():
+            raise ManagedRuntimeError(f"runtime trust-key parent is not a regular directory: {parent}")
+    else:
+        parent.mkdir(parents=True, mode=0o700)
     key = secrets.token_bytes(32)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     fd = os.open(trust_file, flags, 0o600)
@@ -529,8 +532,6 @@ def uninstall(prefix: Path, bin_dir: Path, trust_file: Path) -> None:
     prefix = _validate_prefix(prefix)
     bin_dir = _validate_bin_dir(bin_dir)
     trust_file = _validate_trust_file(trust_file, prefix)
-    _assert_no_transition(prefix)
-    trust_key = _load_trust_key(trust_file, create=False)
 
     launcher = bin_dir / "diana-do"
     expected = (prefix / "current" / "diana-do").resolve(strict=False)
@@ -539,7 +540,12 @@ def uninstall(prefix: Path, bin_dir: Path, trust_file: Path) -> None:
             raise ManagedRuntimeError(f"refusing to remove unmanaged launcher {launcher}")
 
     if not prefix.exists():
+        if launcher.exists() or launcher.is_symlink():
+            launcher.unlink()
         return
+
+    _assert_no_transition(prefix)
+    trust_key = _load_trust_key(trust_file, create=False)
     unexpected = {p.name for p in prefix.iterdir()} - ALLOWED_PREFIX_ENTRIES
     if unexpected:
         raise ManagedRuntimeError(
