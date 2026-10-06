@@ -53,3 +53,46 @@ The hardening implementation should proceed in this order:
 7. operator runbook and final adversarial review.
 
 macOS portability remains explicitly out of scope.
+
+
+## Hardening follow-up findings
+
+### M7 153/2 root cause
+
+The observed `153 passed / 2 failed` M7 product result was not a new product-path defect introduced by production hardening. The two failures were accounting classification failures inherited from an incomplete post-M7 reconciliation.
+
+The first draft of PR #73 accounted for the current-Hermes repair but omitted already-accepted security-evidence replacements, bounded harness edits, and three non-`docs/` documentation files. Reconstructing the exact modified sets from the frozen M4/M5/M6/M7 bases showed those omissions deterministically.
+
+PR #73 has now been corrected so the reconstructed production and harness sets have **zero extra and zero missing paths for M4, M5, M6 and M7**. The hardening branch is synced with that corrected accounting state. A fresh M7 run is still required as execution evidence, but the `153/2` accounting root cause is identified and corrected rather than hidden.
+
+### Release-manifest trust boundary
+
+The first hardening implementation only proved file ↔ manifest self-consistency. An actor able to rewrite the runtime prefix could therefore rewrite a runtime file and its matching manifest hash together.
+
+The candidate manager now authenticates the complete manifest with HMAC-SHA256 using a 32-byte local trust key stored **outside** the runtime prefix. Verification rejects:
+- missing or malformed authentication;
+- manifest forgery with recomputed file hashes but stale/unknown authentication;
+- a trust key located inside the runtime prefix;
+- a symlinked trust key;
+- group/other-readable trust-key permissions.
+
+This closes the specific prefix-only forgery gap. It does **not** claim resistance to a same-user compromise that can also read or rewrite the external trust key; that remains outside this distribution-layer guarantee.
+
+### Interrupted upgrade / rollback state
+
+Upgrade and rollback now write a durable `transition.json` marker before changing `current` / `previous` symlinks. A hard crash that leaves this marker makes later verification/upgrade/rollback refuse ambiguous state instead of guessing which release is authoritative.
+
+A non-empty stale `.staging` directory is likewise refused. Catchable activation failures restore the prior verified state where possible; a hard crash remains fail-closed via the transition marker.
+
+### Accounting impact of PR #74
+
+PR #74 must still merge **after** PR #73. However, its production-facing hardening files are:
+- `diana-do`
+- `diana/product/proposal.py`
+- `diana/product/release.py`
+- `diana/product/runtime_install.py`
+
+All four are **additions**, not modifications, relative to the frozen M4, M5 and M7 accounting bases (and likewise do not constitute a pre-existing replacement at the relevant earlier bases). Therefore, under the current replacement-set accounting model, PR #74 does **not** require a speculative new post-merge replacement erratum merely because it contains production code.
+
+If future accepted work replaces a file that already existed at a frozen milestone base, that later accepted replacement must be reconciled after merge. No such exception is pre-registered for unmerged #74.
+
