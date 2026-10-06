@@ -110,44 +110,69 @@ def FAIL_V():
 print("=== A — an OAuth-backed provider resolves through Hermes, and fails closed ===")
 
 import hermes_cli.config as _hcfg
-_REAL_LOADER = _hcfg.load_config_readonly
-FAKE_HOME = str(tmp / "fake-hermes" / "hermes-agent")   # no .env anywhere near it
+import hermes_cli.runtime_provider as _hrp
+_REAL_LOADER = _hcfg.load_config
+_REAL_RUNTIME_RESOLVER = _hrp.resolve_runtime_provider
+FAKE_HOME = str(tmp / "fake-hermes" / "hermes-agent")   # source-only fixture
 Path(FAKE_HOME).mkdir(parents=True, exist_ok=True)
 
 def with_config(provider, model, fn):
-    _hcfg.load_config_readonly = lambda *a, **k: {
+    _hcfg.load_config = lambda *a, **k: {
         "model": {"provider": provider, "default": model, "base_url": ""}}
     try:
         return fn()
     finally:
-        _hcfg.load_config_readonly = _REAL_LOADER
+        _hcfg.load_config = _REAL_LOADER
 
 SECRET = "eyJhbGciOiJIUzI1NiJ9." + ("x" * 120) + ".signature-not-a-real-token"
-calls = {"n": 0}
-def resolver_ok():
+calls = {"n": 0, "last": None}
+def resolver_ok(*, requested=None, explicit_api_key=None,
+                explicit_base_url=None, target_model=None):
     calls["n"] += 1
-    return {"api_key": SECRET, "base_url": "https://chatgpt.com/backend-api/codex"}
-def resolver_raises():
+    calls["last"] = (requested, explicit_api_key, explicit_base_url, target_model)
+    return {
+        "provider": requested,
+        "requested_provider": requested,
+        "api_key": SECRET,
+        "base_url": "https://chatgpt.com/backend-api/codex",
+        "api_mode": "chat_completions",
+        "command": "",
+        "args": [],
+        "source": "oauth",
+    }
+
+def resolver_raises(**kwargs):
     calls["n"] += 1
     raise RuntimeError(f"no credentials; token was {SECRET}")
-def resolver_empty():
-    calls["n"] += 1
-    return {"api_key": "   "}
 
-_REAL_RESOLVER = HL.OAUTH_RESOLVERS["openai-codex"]
-HL.OAUTH_RESOLVERS["openai-codex"] = resolver_ok
+def resolver_empty(*, requested=None, **kwargs):
+    calls["n"] += 1
+    return {
+        "provider": requested or "openai-codex",
+        "requested_provider": requested or "openai-codex",
+        "api_key": "   ",
+        "base_url": "",
+        "api_mode": "chat_completions",
+        "command": "",
+        "args": [],
+        "source": "oauth",
+    }
+
+_hrp.resolve_runtime_provider = resolver_ok
 calls["n"] = 0
 cfg = with_config("openai-codex", "gpt-5.6-sol",
                   lambda: HL.provider_config(FAKE_HOME))
-check("A openai-codex with NO environment API key obtains its credential through "
-      "Hermes's own auth resolver", calls["n"] == 1 and cfg["api_key"] == SECRET,
+check("A provider runtime is delegated to Hermes's canonical resolver",
+      calls["n"] == 1 and cfg["api_key"] == SECRET,
       f"(calls={calls['n']})")
-check("A the RESOLVED credential is what the turn would use, and the resolver's "
-      "base_url is adopted",
+check("A Diana passes provider/model to Hermes without fabricating an explicit key",
+      calls["last"] == ("openai-codex", None, None, "gpt-5.6-sol"),
+      f"(last={calls['last']!r})")
+check("A the RESOLVED credential/base_url are what the turn would use",
       cfg["provider"] == "openai-codex" and cfg["model"] == "gpt-5.6-sol"
       and cfg["base_url"] == "https://chatgpt.com/backend-api/codex")
 
-HL.OAUTH_RESOLVERS["openai-codex"] = resolver_raises
+_hrp.resolve_runtime_provider = resolver_raises
 calls["n"] = 0
 raised = {}
 def _grab():
@@ -156,31 +181,22 @@ def _grab():
     except blocking.Blocked as exc:
         raised["code"], raised["detail"] = exc.code, exc.detail
 _grab()
-check("A a resolver that raises fails CLOSED with hermes-provider-unavailable",
+check("A a canonical resolver exception fails CLOSED with hermes-provider-unavailable",
       raised.get("code") == blocking.HERMES_PROVIDER_UNAVAILABLE, f"({raised.get('code')})")
-check("A the refusal detail never carries the token, even when the underlying "
-      "exception text did",
+check("A the refusal detail never carries the token, even when the resolver exception did",
       SECRET not in raised.get("detail", "") and "<redacted>" in raised.get("detail", ""),
       f"({raised.get('detail')})")
 
-HL.OAUTH_RESOLVERS["openai-codex"] = resolver_empty
+_hrp.resolve_runtime_provider = resolver_empty
 raised.clear(); _grab()
-check("A a resolver returning no usable credential fails closed too; Diana never "
-      "substitutes a placeholder key",
+check("A an incomplete canonical runtime fails closed; Diana never invents a key",
       raised.get("code") == blocking.HERMES_PROVIDER_UNAVAILABLE, f"({raised.get('code')})")
 
-calls["n"] = 0
-HL.OAUTH_RESOLVERS["openai-codex"] = resolver_ok
-key_code = code_of(lambda: with_config("some-keyed-provider", "m-1",
-                                       lambda: HL.provider_config(FAKE_HOME)))
-check("A provider validation is NOT weakened: an ordinary API-key provider with no "
-      "key is still refused", key_code == blocking.HERMES_PROVIDER_UNAVAILABLE, f"({key_code})")
-falsify("A and the OAuth resolver was never consulted for it, so the OAuth path is "
-        "a closed per-provider map and not a general fallback", calls["n"] == 0,
-        f"(calls={calls['n']})")
-check("A the OAuth provider map is closed and explicit",
-      tuple(HL.OAUTH_RESOLVERS) == ("openai-codex",), f"({tuple(HL.OAUTH_RESOLVERS)})")
-HL.OAUTH_RESOLVERS["openai-codex"] = _REAL_RESOLVER
+falsify("A the retired Diana-specific OAuth resolver table is gone, so provider "
+        "selection cannot drift into a second auth matrix",
+        not hasattr(HL, "OAUTH_RESOLVERS"))
+_hrp.resolve_runtime_provider = _REAL_RUNTIME_RESOLVER
+_hcfg.load_config = _REAL_LOADER
 
 # ======================================================================
 print("\n=== the model seam: Hermes's own run_agent, replaced. No live model. ===")
