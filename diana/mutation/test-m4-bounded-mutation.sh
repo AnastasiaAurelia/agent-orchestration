@@ -123,14 +123,13 @@ paths, why = MP.extract_paths("write_file", {"path": "/a/b.txt", "content": "x"}
 check("M4-AC-4 write_file.path is extracted", paths == {"/a/b.txt"} and why is None)
 paths, why = MP.extract_paths("patch", {"mode": "replace", "path": "/a/b.txt"})
 check("M4-AC-4 patch replace-mode path is extracted", paths == {"/a/b.txt"} and why is None)
-v4a = ("*** Begin Patch
+v4a = """*** Begin Patch
 *** Update File: /a/u.txt
 *** Add File: /a/c.txt
-"
-       "*** Delete File: /a/d.txt
+*** Delete File: /a/d.txt
 *** Move File: /a/from.txt -> /a/to.txt
 *** End Patch
-")
+"""
 paths, why = MP.extract_paths("patch", {"mode": "patch", "patch": v4a})
 check("M4-AC-4 every V4A header path is extracted, both Move endpoints included",
       paths == {"/a/u.txt", "/a/c.txt", "/a/d.txt", "/a/from.txt", "/a/to.txt"} and why is None,
