@@ -14,6 +14,7 @@ import hmac
 import json
 import os
 import platform
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -73,6 +74,11 @@ def _authenticated_manifest() -> tuple[dict | None, str | None]:
     try:
         if trust_file.is_symlink() or not trust_file.is_file():
             return None, "runtime trust key unavailable"
+        st = trust_file.stat()
+        if hasattr(os, "getuid") and st.st_uid != os.getuid():
+            return None, "runtime trust key is not owned by the current user"
+        if stat.S_IMODE(st.st_mode) & 0o077:
+            return None, "runtime trust key permissions are not private"
         key = trust_file.read_bytes()
     except OSError as exc:
         return None, f"runtime trust key unreadable: {exc}"
@@ -131,7 +137,7 @@ def source_tree_clean() -> bool | None:
     try:
         proc = subprocess.run(
             ["git", "-C", str(DIANA_ROOT), "status", "--porcelain", "--",
-             "diana", "diana-do", "VERSION"],
+             "diana", "diana-do", "VERSION", "runtime-install.sh"],
             capture_output=True, text=True, timeout=10, check=False,
         )
     except (OSError, subprocess.SubprocessError):
