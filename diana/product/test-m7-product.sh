@@ -560,6 +560,11 @@ POST_M7_HARNESS = {"diana/adapters/test-hermes-capability.sh",
                    "diana/security/test-ci-verifier-runs.sh",
                    "diana/security/test-coverage-matrix.sh",
                    "diana/security/test-security-gate.sh"}
+
+# PR #74 candidate-only harness classification. This is not accepted-history
+# accounting and must not be copied into ERRATA-002 before merge. The file is a
+# Python proof/test runner, not production runtime code.
+PR74_CANDIDATE_HARNESS = {"diana/unattended/test_m5_proofs.py"}
 for path in frozen:
     # POST-M7-E1-D6: a frozen path that accepted post-M7 work replaced must be in
     # the enumerated set above; every other frozen path is still required to be
@@ -577,7 +582,7 @@ POST_M7_DOCS = {"MEMORY.md",
                  "diana/security/README.md",
                  "diana/security/adapters/README.md"}
 is_doc = lambda q: q.startswith("docs/") or q in ({".gitignore", "README.md"} | POST_M7_DOCS)
-is_harness = lambda q: q.rsplit("/", 1)[-1].startswith("test-") and q.endswith(".sh")
+is_harness = lambda q: ((q.rsplit("/", 1)[-1].startswith("test-") and q.endswith(".sh")) or q in PR74_CANDIDATE_HARNESS)
 mod_harness = {p for p in modified if is_harness(p)}
 mod_production = {p for p in modified if not is_doc(p) and not is_harness(p)}
 # POST-M7-E1-D4: M7 itself replaced NOTHING pre-existing, which is still the
