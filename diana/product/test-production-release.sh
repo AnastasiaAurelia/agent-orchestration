@@ -36,6 +36,22 @@ MANAGER=(python3 "$SRC/diana/product/runtime_install.py")
 
 check "version command is deterministic JSON"   python3 "$SRC/diana/product/release.py" version
 
+python3 - "$SRC" <<'PY'
+import sys
+from pathlib import Path
+src=Path(sys.argv[1])
+sys.path.insert(0, str(src / "diana" / "product"))
+import release
+doc=release.version_document()
+assert doc["supported_bootstrap_python"] == "3.11"
+assert doc["supported_hermes_runtime_python"] == ">=3.11,<3.15"
+assert release._runtime_python_supported((3, 11))
+assert release._runtime_python_supported((3, 14))
+assert not release._runtime_python_supported((3, 10))
+assert not release._runtime_python_supported((3, 15))
+PY
+check "bootstrap/runtime Python support roles are distinct" test "$?" -eq 0
+
 # No Hermes is required for VERSION. Doctor must fail closed rather than turn a
 # missing runtime into a green diagnostic, and must not print unrelated secret
 # values from the environment.
