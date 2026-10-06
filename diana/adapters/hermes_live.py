@@ -35,7 +35,6 @@ reconciliation and M2 does not revive it (M2-D13).
 
 from __future__ import annotations
 
-import contextlib
 import os
 import re
 import sys
@@ -96,31 +95,47 @@ def _redact(text: object) -> str:
     return _TOKEN_LIKE.sub("<redacted>", str(text))
 
 
-@contextlib.contextmanager
-def _hermes_home_scope(home: str | Path):
-    """Bind Hermes's own config/runtime APIs to the exact checkout/profile.
+def _fresh_model_config(home: Path) -> dict:
+    """Recover only provider/model/base_url in a fresh Hermes interpreter.
 
-    Hermes config lookup does NOT follow sys.path: it resolves its data/config
-    home through hermes_constants.get_hermes_home(). Merely importing code from
-    DIANA_HERMES_HOME can therefore execute the right source while reading the
-    WRONG config profile. Use Hermes's supported context-local override instead
-    of mutating process-global HERMES_HOME.
+    A real Builder reproduced an in-process shared-config-cache corruption:
+    the model block was empty in the long-lived process and populated in a
+    fresh process with the same environment. This fallback returns no secret;
+    Hermes's canonical runtime resolver still owns credentials below.
     """
-    home = str(home)
+    probe = (
+        "import json,sys;sys.path.insert(0,%r);"
+        "from hermes_cli.config import load_config;"
+        "c=load_config() or {};"
+        "m=c.get('model') if isinstance(c.get('model'),dict) else {};"
+        "print(json.dumps({'provider':str(m.get('provider') or ''),"
+        "'model':str(m.get('default') or m.get('model') or ''),"
+        "'base_url':str(m.get('base_url') or '')}))"
+    ) % str(home)
     try:
-        from hermes_constants import set_hermes_home_override, reset_hermes_home_override
-    except Exception as exc:
+        proc = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
         raise blocking.Blocked(
-            blocking.HERMES_UNREACHABLE,
-            f"could not bind Hermes home {home!r}: {type(exc).__name__}: "
-            f"{_redact(exc)[:200]}",
+            blocking.HERMES_PROVIDER_UNAVAILABLE,
+            f"fresh Hermes config read failed ({type(exc).__name__}: {_redact(exc)[:180]})",
         ) from None
-    token = set_hermes_home_override(home)
+    if proc.returncode != 0:
+        detail = _redact((proc.stderr or proc.stdout).strip())[:220]
+        raise blocking.Blocked(
+            blocking.HERMES_PROVIDER_UNAVAILABLE,
+            f"fresh Hermes config read exited {proc.returncode}: {detail}",
+        )
     try:
-        yield
-    finally:
-        reset_hermes_home_override(token)
-
+        value = json.loads(proc.stdout.strip() or "{}")
+    except json.JSONDecodeError as exc:
+        raise blocking.Blocked(
+            blocking.HERMES_PROVIDER_UNAVAILABLE,
+            f"fresh Hermes config read returned invalid JSON: {exc}",
+        ) from None
+    return value if isinstance(value, dict) else {}
 
 def provider_config(hermes_home: str | None = None) -> dict:
     """Resolve the configured model through Hermes's OWN runtime resolver.
@@ -137,14 +152,14 @@ def provider_config(hermes_home: str | None = None) -> dict:
     try:
         if str(home) not in sys.path:
             sys.path.insert(0, str(home))
-        from hermes_cli.config import load_config_readonly
+        from hermes_cli.config import load_config
         from hermes_cli.runtime_provider import resolve_runtime_provider
 
-        # Critical: source checkout selection (sys.path) and Hermes data/config
-        # home selection are separate mechanisms. Bind BOTH to the same exact
-        # DIANA_HERMES_HOME for this call.
-        with _hermes_home_scope(home):
-            config = load_config_readonly() or {}
+        # Source checkout selection (sys.path) and Hermes's data/profile home
+        # are distinct. Do not retarget Hermes config to the source checkout.
+        # Use the defensive-copy API so Diana never holds the shared readonly
+        # cache object in a security-critical path.
+        config = load_config() or {}
     except blocking.Blocked:
         raise
     except Exception as exc:
@@ -158,14 +173,17 @@ def provider_config(hermes_home: str | None = None) -> dict:
     provider = str(model_cfg.get("provider") or "").strip()
     model = str(model_cfg.get("default") or model_cfg.get("model") or "").strip()
     if not provider or not model:
+        fresh = _fresh_model_config(home)
+        provider = str(fresh.get("provider") or "").strip()
+        model = str(fresh.get("model") or "").strip()
+    if not provider or not model:
         raise blocking.Blocked(
             blocking.HERMES_PROVIDER_UNAVAILABLE,
             f"provider={provider!r} model={model!r}: Hermes model configuration is incomplete",
         )
 
     try:
-        with _hermes_home_scope(home):
-            runtime = resolve_runtime_provider(requested=provider, target_model=model) or {}
+        runtime = resolve_runtime_provider(requested=provider, target_model=model) or {}
     except BaseException as exc:  # noqa: BLE001 - every provider resolution failure is fail-closed
         raise blocking.Blocked(
             blocking.HERMES_PROVIDER_UNAVAILABLE,
@@ -249,18 +267,17 @@ def build_agent(contract_block: dict, *, hermes_home: str | None = None,
     os.environ["TERMINAL_CWD"] = contract_block["target"]["repo_root"]
     from run_agent import AIAgent
 
-    with _hermes_home_scope(home):
-        agent = AIAgent(
-            model=cfg["model"], api_key=cfg["api_key"], base_url=cfg["base_url"],
-            provider=cfg["provider"], requested_provider=cfg["requested_provider"],
-            api_mode=cfg["api_mode"] or None,
-            command=cfg["command"] or None, args=cfg["args"],
-            quiet_mode=True, save_trajectories=False,
-            enabled_toolsets=["file"], max_iterations=MAX_ITERATIONS,
-            # M2-D9: one variable at a time. Skills, memory and AGENTS.md injection
-            # are additional context surfaces belonging to their own milestone.
-            skip_context_files=True, skip_memory=True,
-        )
+    agent = AIAgent(
+        model=cfg["model"], api_key=cfg["api_key"], base_url=cfg["base_url"],
+        provider=cfg["provider"], requested_provider=cfg["requested_provider"],
+        api_mode=cfg["api_mode"] or None,
+        command=cfg["command"] or None, args=cfg["args"],
+        quiet_mode=True, save_trajectories=False,
+        enabled_toolsets=["file"], max_iterations=MAX_ITERATIONS,
+        # M2-D9: one variable at a time. Skills, memory and AGENTS.md injection
+        # are additional context surfaces belonging to their own milestone.
+        skip_context_files=True, skip_memory=True,
+    )
     if allowed_tools is not None:
         shown = narrow_tool_schemas(agent, allowed=allowed_tools)
     elif narrow:
@@ -379,12 +396,7 @@ class LiveTurnDriver:
 
         def run_turn():
             try:
-                # ContextVars do not provide a portable guarantee of implicit
-                # inheritance into this worker thread. Re-bind the exact Hermes
-                # home inside the thread that actually executes agent.chat().
-                home = str(self.hermes_home or _patches.HERMES_HOME)
-                with _hermes_home_scope(home):
-                    outcome["final"] = agent.chat(message)
+                outcome["final"] = agent.chat(message)
             except BaseException as exc:  # noqa: BLE001 - recorded, then re-raised as Blocked
                 outcome["error"] = f"{type(exc).__name__}: {exc}"
 
