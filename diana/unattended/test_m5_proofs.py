@@ -9,8 +9,16 @@ import json
 from pathlib import Path
 import socket
 import subprocess
+import sys
 import tempfile
 from unittest.mock import patch
+
+_HERE = Path(__file__).resolve().parent
+_DIANA = _HERE.parent
+for _sub in ("unattended", "runtime", "mutation", "adapters", "profile", "advisory", "security"):
+    _path = str(_DIANA / _sub)
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
 import artifact
 import evidence_model
