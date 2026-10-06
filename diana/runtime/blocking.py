@@ -21,6 +21,13 @@ from __future__ import annotations
 HERMES_UNREACHABLE = "hermes-unreachable"
 HERMES_VERSION_PIN_MISMATCH = "hermes-version-pin-mismatch"
 HERMES_COMMIT_PIN_MISMATCH = "hermes-commit-pin-mismatch"
+# An exact, verifiable Hermes identity that is NOT in CERTIFIED_IDENTITIES
+# failed its bounded behavioral compatibility preflight (or the preflight
+# itself could not be run) -- distinct from HERMES_COMMIT_PIN_MISMATCH, which
+# no longer fires for a merely-unlisted identity (spec:
+# fix/behavioral-runtime-compatibility). An operator reading this code knows
+# the SHA was actually exercised and found incompatible, not just unknown.
+HERMES_COMPATIBILITY_PREFLIGHT_FAILED = "hermes-compatibility-preflight-failed"
 SAFE_MODE_NOT_ENABLED = "hermes-safe-mode-not-enabled"
 BACKGROUND_REVIEW_ENABLED = "hermes-background-review-enabled"
 SIDE_QUESTION_ENABLED = "hermes-side-question-enabled"

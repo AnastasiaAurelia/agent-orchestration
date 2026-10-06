@@ -991,6 +991,9 @@ M6_PRODUCTION = {"diana/runtime/blocking.py", "diana/unattended/journal.py",
 POST_M7_PRODUCTION = {"diana/adapters/hermes.py",
                       "diana/adapters/hermes_live.py",
                       "diana/adapters/hermes_patches.py",
+                      # fix/behavioral-runtime-compatibility: new
+                      # HERMES_COMPATIBILITY_PREFLIGHT_FAILED reason code.
+                      "diana/runtime/blocking.py",
                       "diana/ci/build-gate-input.py",
                       "diana/ci/run-security-gate.py",
                       "diana/ci/write-summary.py",

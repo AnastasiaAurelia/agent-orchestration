@@ -43,12 +43,23 @@ src=Path(sys.argv[1])
 sys.path.insert(0, str(src / "diana" / "product"))
 import release
 doc=release.version_document()
-assert doc["supported_bootstrap_python"] == "3.11"
+assert doc["supported_bootstrap_python"] == ">=3.11,<3.15"
+assert doc["supported_python"] == ">=3.11,<3.15"
 assert doc["supported_hermes_runtime_python"] == ">=3.11,<3.15"
 assert release._runtime_python_supported((3, 11))
 assert release._runtime_python_supported((3, 14))
 assert not release._runtime_python_supported((3, 10))
 assert not release._runtime_python_supported((3, 15))
+# Bootstrap Python is now an explicit range (>=3.11,<3.15), not an exact pin:
+# 3.11/3.12/3.13/3.14 are all accepted bootstrap interpreters, 3.10 and 3.15
+# are both refused (spec: fix/behavioral-runtime-compatibility).
+assert not release._bootstrap_python_supported((3, 10))
+assert release._bootstrap_python_supported((3, 11))
+assert release._bootstrap_python_supported((3, 12))
+assert release._bootstrap_python_supported((3, 13))
+assert release._bootstrap_python_supported((3, 14))
+assert not release._bootstrap_python_supported((3, 15))
+assert not release._bootstrap_python_supported(None)
 PY
 check "bootstrap/runtime Python support roles are distinct" test "$?" -eq 0
 

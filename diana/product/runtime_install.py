@@ -149,7 +149,11 @@ def _manifest_for(
         "diana_version": version,
         "source_commit": source_commit,
         "supported_systems": ["Linux"],
-        "supported_python": ["3.11"],
+        # A RANGE, matching release.py's SUPPORTED_BOOTSTRAP_PYTHON_RANGE: an
+        # ordinary compatible bootstrap-interpreter upgrade (3.11->3.14) is
+        # not a release-manifest incompatibility (spec:
+        # fix/behavioral-runtime-compatibility).
+        "supported_python": [">=3.11,<3.15"],
         "certified_hermes_identities": _certified_identities(),
         "files": files,
     }

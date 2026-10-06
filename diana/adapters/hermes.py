@@ -48,6 +48,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "runtime"))
 import blocking  # noqa: E402
+import compat_preflight as _compat  # noqa: E402
 import hermes_patches as _patches  # noqa: E402
 import selftest as _selftest  # noqa: E402
 
@@ -86,6 +87,63 @@ def _auxiliary(config: dict, name: str) -> dict:
     return block if isinstance(block, dict) else {}
 
 
+# In-process only -- never persisted, never shared across runs. Bound to the
+# exact (source, sha, PREFLIGHT_VERSION) triple so a stale result can never
+# authorize a different identity or a different (newer or older) preflight
+# contract; a bump of `compat_preflight.PREFLIGHT_VERSION` invalidates every
+# entry automatically because it becomes part of the key. This only avoids
+# running the (expensive, but still bounded) behavioral preflight twice
+# within the SAME governed-run process, which calls this gate once before
+# Hermes is imported and once again once the real contract scope is known.
+_IDENTITY_GATE_CACHE: dict[tuple, dict] = {}
+
+
+def resolve_identity_gate(home: str, *, identity: dict | None = None) -> dict:
+    """The one Hermes-identity decision both preflight entries share.
+
+    Returns `{"state", "identity", "detail", "preflight"}` where `state` is one
+    of `hermes_patches.IDENTITY_CERTIFIED`, `"compatible-unlisted"`,
+    `"incompatible"`, or `hermes_patches.IDENTITY_UNVERIFIABLE`.
+
+    `certified` and `unverifiable` are the raw, no-I/O classification and
+    never import Hermes beyond the identity probe itself (unchanged from
+    before this module existed). `unlisted` is resolved HERE by running the
+    bounded `compat_preflight` behavioral preflight against this exact,
+    already-verified identity -- never a silent pass, never a permanent
+    promotion into `CERTIFIED_IDENTITIES` (spec:
+    fix/behavioral-runtime-compatibility).
+    """
+    identity = identity if identity is not None else _patches.hermes_identity(home)
+    raw = _patches.identity_certified(identity)
+    if raw in (_patches.IDENTITY_CERTIFIED, _patches.IDENTITY_UNVERIFIABLE):
+        return {"state": raw, "identity": identity, "detail": "", "preflight": None}
+    # raw == IDENTITY_UNLISTED: exact, verifiable, not in the hand-reviewed
+    # registry. Never a silent pass -- prove it, or refuse.
+    cache_key = (identity.get("source"), identity.get("sha"), _compat.PREFLIGHT_VERSION)
+    cached = _IDENTITY_GATE_CACHE.get(cache_key)
+    if cached is not None:
+        return dict(cached)
+    try:
+        report = _compat.run(home)
+    except Exception as exc:  # noqa: BLE001 - the preflight itself must never fail open
+        return {
+            "state": "incompatible", "identity": identity,
+            "detail": f"compatibility preflight raised {type(exc).__name__}: {exc}",
+            "preflight": None,
+        }
+    if report.get("result") == "compatible":
+        outcome = {"state": "compatible-unlisted", "identity": identity, "detail": "", "preflight": report}
+    else:
+        failed = [c["check"] for c in report.get("checks", []) if not c.get("ok")]
+        outcome = {
+            "state": "incompatible", "identity": identity,
+            "detail": f"compatibility preflight failed: {', '.join(failed) or 'no checks ran'}",
+            "preflight": report,
+        }
+    _IDENTITY_GATE_CACHE[cache_key] = dict(outcome)
+    return outcome
+
+
 def check_pre_import(
     *,
     repo_root: str,
@@ -115,20 +173,24 @@ def check_pre_import(
         raise blocking.Blocked(blocking.HERMES_UNREACHABLE, f"no Hermes installation at {home}")
     record("hermes-reachable", str(home))
 
-    identity = _patches.hermes_identity(str(home))
-    status = _patches.identity_certified(identity)
-    if status == "unverifiable":
+    gate = resolve_identity_gate(str(home))
+    identity, status = gate["identity"], gate["state"]
+    if status == _patches.IDENTITY_UNVERIFIABLE:
         raise blocking.Blocked(
             blocking.HERMES_VERSION_PIN_MISMATCH,
             f"Hermes's own identity mechanism could not verify this install: {identity!r}; "
             "an unknown or unreachable identity is never treated as a pass",
         )
-    if status == "mismatch":
+    if status == "incompatible":
         raise blocking.Blocked(
-            blocking.HERMES_COMMIT_PIN_MISMATCH,
-            f"found {identity!r}, none of {_patches.CERTIFIED_IDENTITIES!r} matched",
+            blocking.HERMES_COMPATIBILITY_PREFLIGHT_FAILED,
+            f"found {identity!r}, not in {_patches.CERTIFIED_IDENTITIES!r}; {gate['detail']}",
         )
-    record("hermes-identity-pin", f"{identity.get('source')}:{identity.get('sha')}")
+    # status in (IDENTITY_CERTIFIED, "compatible-unlisted") -- both proceed.
+    record(
+        "hermes-identity-pin",
+        f"{identity.get('source')}:{identity.get('sha')} ({status})",
+    )
 
     if str(env.get("HERMES_SAFE_MODE", "")).strip() != "1":
         raise blocking.Blocked(
@@ -176,21 +238,29 @@ def check(
     record("hermes-reachable", str(home))
 
     # 2/3 -- identity pin (C1). The behavioral probes below are the real
-    # tripwire; the pin is what makes an upstream change legible.
-    identity = _patches.hermes_identity(str(home))
-    status = _patches.identity_certified(identity)
-    if status == "unverifiable":
+    # tripwire; the pin is what makes an upstream change legible. For an
+    # exact, verifiable identity NOT in CERTIFIED_IDENTITIES, this gate itself
+    # already ran the bounded compat_preflight behavioral preflight (spec:
+    # fix/behavioral-runtime-compatibility) -- re-running it here would be
+    # redundant work, not additional safety, so this call reuses its result
+    # when `check_pre_import` already resolved the same identity.
+    gate = resolve_identity_gate(str(home))
+    identity, status = gate["identity"], gate["state"]
+    if status == _patches.IDENTITY_UNVERIFIABLE:
         raise blocking.Blocked(
             blocking.HERMES_VERSION_PIN_MISMATCH,
             f"Hermes's own identity mechanism could not verify this install: {identity!r}; "
             "an unknown or unreachable identity is never treated as a pass",
         )
-    if status == "mismatch":
+    if status == "incompatible":
         raise blocking.Blocked(
-            blocking.HERMES_COMMIT_PIN_MISMATCH,
-            f"found {identity!r}, none of {_patches.CERTIFIED_IDENTITIES!r} matched",
+            blocking.HERMES_COMPATIBILITY_PREFLIGHT_FAILED,
+            f"found {identity!r}, not in {_patches.CERTIFIED_IDENTITIES!r}; {gate['detail']}",
         )
-    record("hermes-identity-pin", f"{identity.get('source')}:{identity.get('sha')}")
+    record(
+        "hermes-identity-pin",
+        f"{identity.get('source')}:{identity.get('sha')} ({status})",
+    )
 
     # 4 -- safe mode ON (D23)
     if str(env.get("HERMES_SAFE_MODE", "")).strip() != "1":

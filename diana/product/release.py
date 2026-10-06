@@ -27,9 +27,19 @@ if str(ADAPTERS) not in sys.path:
 
 RELEASE_SCHEMA_VERSION = 1
 SUPPORTED_SYSTEM = "Linux"
-SUPPORTED_BOOTSTRAP_PYTHON = (3, 11)
+# The Python that invokes release.py / diana-do diagnostics. A RANGE, not an
+# exact pin: an ordinary compatible bootstrap-interpreter upgrade (3.11 ->
+# 3.12/3.13/3.14) must not be indistinguishable from a genuinely unsupported
+# one (<=3.10 or >=3.15). Mirrors the shape already used for the Hermes
+# runtime interpreter below.
+SUPPORTED_BOOTSTRAP_PYTHON_MIN = (3, 11)
+SUPPORTED_BOOTSTRAP_PYTHON_MAX_EXCLUSIVE = (3, 15)
 SUPPORTED_HERMES_RUNTIME_PYTHON_MIN = (3, 11)
 SUPPORTED_HERMES_RUNTIME_PYTHON_MAX_EXCLUSIVE = (3, 15)
+SUPPORTED_BOOTSTRAP_PYTHON_RANGE = (
+    f">={SUPPORTED_BOOTSTRAP_PYTHON_MIN[0]}.{SUPPORTED_BOOTSTRAP_PYTHON_MIN[1]},"
+    f"<{SUPPORTED_BOOTSTRAP_PYTHON_MAX_EXCLUSIVE[0]}.{SUPPORTED_BOOTSTRAP_PYTHON_MAX_EXCLUSIVE[1]}"
+)
 VERSION_FILE = DIANA_ROOT / "VERSION"
 MANIFEST_NAME = "release-manifest.json"
 MANAGER_SCHEMA = 2
@@ -242,6 +252,14 @@ def _runtime_python_supported(version: tuple[int, int] | None) -> bool:
     )
 
 
+def _bootstrap_python_supported(version: tuple[int, int] | None) -> bool:
+    return bool(
+        version is not None
+        and SUPPORTED_BOOTSTRAP_PYTHON_MIN <= version
+        < SUPPORTED_BOOTSTRAP_PYTHON_MAX_EXCLUSIVE
+    )
+
+
 def _hermes_identity(python: str, home: str) -> tuple[dict | None, str | None]:
     probe = (
         "import sys,json;"
@@ -272,16 +290,65 @@ def _hermes_identity(python: str, home: str) -> tuple[dict | None, str | None]:
 
 
 def _identity_state(identity: dict | None) -> str:
+    """Raw, no-I/O classification only: "certified", "unlisted" or
+    "unverifiable". Reuses `hermes_patches.identity_certified` instead of a
+    second, drifting reimplementation of the same decision.
+    """
     if not identity:
         return "unverifiable"
-    source = identity.get("source")
-    sha = identity.get("sha")
-    if not source or source in {"unknown", "unreachable"} or not sha:
-        return "unverifiable"
-    return "ok" if any(
-        item.get("source") == source and item.get("sha") == sha
-        for item in _certified_identities()
-    ) else "mismatch"
+    import hermes_patches  # local Diana module, stdlib-only at import time
+
+    return hermes_patches.identity_certified(identity)
+
+
+def _run_compatibility_preflight(home: str, python: str) -> dict:
+    """Run `compat_preflight.py` under the resolved Hermes-runtime Python.
+
+    `release.py` runs under the BOOTSTRAP interpreter, never Hermes's own
+    PM-managed one, so -- exactly like `_hermes_identity`/`_python_version`
+    above -- the actual behavioral preflight has to be driven as a subprocess
+    under the interpreter that can import Hermes's dependencies at all.
+    """
+    script = ADAPTERS / "compat_preflight.py"
+    try:
+        proc = subprocess.run(
+            [python, str(script), home],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"result": "incompatible", "error": f"{type(exc).__name__}: {exc}"}
+    try:
+        report = json.loads(proc.stdout.strip() or "{}")
+    except json.JSONDecodeError:
+        report = None
+    if not isinstance(report, dict) or report.get("result") not in ("compatible", "incompatible"):
+        detail = (proc.stderr or proc.stdout).strip()[:400]
+        return {
+            "result": "incompatible",
+            "error": detail or f"compatibility preflight exited {proc.returncode} with no parseable result",
+        }
+    return report
+
+
+def _hermes_compatibility(identity: dict | None, home: str, python: str | None) -> dict:
+    """The full identity decision: "certified", "compatible-unlisted",
+    "incompatible" or "unverifiable". Only the "unlisted" raw classification
+    triggers the bounded behavioral preflight -- a certified identity never
+    pays that cost, and an unverifiable one cannot run it at all.
+    """
+    raw = _identity_state(identity)
+    if raw != "unlisted":
+        return {"state": raw, "preflight": None}
+    if not python:
+        return {
+            "state": "incompatible",
+            "preflight": {"result": "incompatible",
+                          "error": "no resolved Hermes runtime Python to run the "
+                                   "compatibility preflight under"},
+        }
+    report = _run_compatibility_preflight(home, python)
+    state = "compatible-unlisted" if report.get("result") == "compatible" else "incompatible"
+    return {"state": state, "preflight": report}
 
 
 def version_document() -> dict:
@@ -290,14 +357,12 @@ def version_document() -> dict:
         "diana_version": diana_version(),
         "source_commit": source_commit(),
         "supported_system": SUPPORTED_SYSTEM,
-        "supported_bootstrap_python": (
-            f"{SUPPORTED_BOOTSTRAP_PYTHON[0]}.{SUPPORTED_BOOTSTRAP_PYTHON[1]}"
-        ),
+        # A RANGE string, not a single-version implication: 3.11 through 3.14
+        # (exclusive of 3.15) are all supported bootstrap interpreters.
+        "supported_bootstrap_python": SUPPORTED_BOOTSTRAP_PYTHON_RANGE,
         # Compatibility alias: historically this field meant the Python that
         # invokes release.py / diana-do diagnostics. It remains bootstrap-only.
-        "supported_python": (
-            f"{SUPPORTED_BOOTSTRAP_PYTHON[0]}.{SUPPORTED_BOOTSTRAP_PYTHON[1]}"
-        ),
+        "supported_python": SUPPORTED_BOOTSTRAP_PYTHON_RANGE,
         "supported_hermes_runtime_python": ">=3.11,<3.15",
         "certified_hermes_identities": list(_certified_identities()),
     }
@@ -318,7 +383,8 @@ def doctor_document(hermes_home: str | None = None) -> tuple[dict, bool]:
     identity_error = None
     if hermes_python:
         identity, identity_error = _hermes_identity(hermes_python, home)
-    identity_state = _identity_state(identity)
+    compat = _hermes_compatibility(identity, home, hermes_python)
+    identity_state = compat["state"]
     manifest_present = (DIANA_ROOT / MANIFEST_NAME).exists()
     authenticated_manifest, manifest_error = _authenticated_manifest()
     source_clean = source_tree_clean()
@@ -327,14 +393,19 @@ def doctor_document(hermes_home: str | None = None) -> tuple[dict, bool]:
     )
     checks = {
         "platform_supported": system == SUPPORTED_SYSTEM,
-        "bootstrap_python_supported": bootstrap_py == SUPPORTED_BOOTSTRAP_PYTHON,
+        "bootstrap_python_supported": _bootstrap_python_supported(bootstrap_py),
         "hermes_runtime_python_supported": _runtime_python_supported(hermes_runtime_py),
         "diana_version_known": diana_version() != "unknown",
         "diana_source_known": source_commit() is not None,
         "diana_source_authenticated": source_authenticated,
         "hermes_home_present": Path(home).is_dir(),
         "hermes_runtime_resolved": hermes_python is not None,
-        "hermes_identity_certified": identity_state == "ok",
+        # Verifiable and compatibility-preflight are the two GATING facts.
+        # "known certified" (hermes_identity_known, below) is informational
+        # only -- an unlisted-but-proven-compatible identity must not refuse,
+        # so it deliberately does not appear in `checks`.
+        "hermes_identity_verifiable": identity_state != "unverifiable",
+        "hermes_compatibility_preflight": identity_state in ("certified", "compatible-unlisted"),
     }
     safe = all(checks.values())
     return {
@@ -349,17 +420,13 @@ def doctor_document(hermes_home: str | None = None) -> tuple[dict, bool]:
         "platform": {"actual": system, "supported": [SUPPORTED_SYSTEM]},
         "bootstrap_python": {
             "actual": f"{bootstrap_py[0]}.{bootstrap_py[1]}",
-            "supported": [
-                f"{SUPPORTED_BOOTSTRAP_PYTHON[0]}.{SUPPORTED_BOOTSTRAP_PYTHON[1]}"
-            ],
+            "supported": SUPPORTED_BOOTSTRAP_PYTHON_RANGE,
         },
         # Backward-compatible alias for older consumers; explicitly bootstrap
         # Python, never the PM-managed Hermes execution interpreter.
         "python": {
             "actual": f"{bootstrap_py[0]}.{bootstrap_py[1]}",
-            "supported": [
-                f"{SUPPORTED_BOOTSTRAP_PYTHON[0]}.{SUPPORTED_BOOTSTRAP_PYTHON[1]}"
-            ],
+            "supported": SUPPORTED_BOOTSTRAP_PYTHON_RANGE,
             "role": "bootstrap",
         },
         "hermes_home": home,
@@ -375,7 +442,12 @@ def doctor_document(hermes_home: str | None = None) -> tuple[dict, bool]:
         "hermes_runtime_error": runtime_error,
         "hermes_identity": identity,
         "hermes_identity_error": identity_error,
+        # Machine-readable identity state: "certified", "compatible-unlisted",
+        # "incompatible" or "unverifiable". Never overloads "certified" to
+        # mean merely compatible.
         "hermes_identity_state": identity_state,
+        "hermes_identity_known": identity_state == "certified",
+        "hermes_compatibility_preflight_report": compat["preflight"],
         "checks": checks,
     }, safe
 
@@ -383,6 +455,14 @@ def doctor_document(hermes_home: str | None = None) -> tuple[dict, bool]:
 def print_human_doctor(doc: dict) -> None:
     for key, ok in doc["checks"].items():
         print(f"{'PASS' if ok else 'FAIL'}  {key}")
+    # hermes_identity_known is deliberately NOT a gating check (see
+    # doctor_document): an unlisted-but-proven-compatible identity must not
+    # read as a failure, only as a WARN an operator can act on if they choose
+    # to (e.g. by reviewing and adding it to CERTIFIED_IDENTITIES).
+    identity = doc.get("hermes_identity") or {}
+    if doc["hermes_identity_state"] == "compatible-unlisted":
+        sha = identity.get("sha") or "unverifiable"
+        print(f"WARN  hermes_identity_known            {sha} not in certified registry")
     print(f"INFO  diana_version={doc['diana_version']}")
     print(f"INFO  source_commit={doc['source_commit'] or 'unknown'}")
     print(f"INFO  platform={doc['platform']['actual']}")
@@ -393,10 +473,16 @@ def print_human_doctor(doc: dict) -> None:
         "INFO  hermes_runtime_python="
         f"{doc['hermes_runtime_python']['actual'] or 'unresolved'}"
     )
-    identity = doc.get("hermes_identity") or {}
     print(f"INFO  hermes_identity_source={identity.get('source', 'unverifiable')}")
     print(f"INFO  hermes_identity_sha={identity.get('sha') or 'unverifiable'}")
     print(f"INFO  hermes_identity_state={doc['hermes_identity_state']}")
+    if doc["hermes_identity_state"] == "incompatible":
+        report = doc.get("hermes_compatibility_preflight_report") or {}
+        failed = [c["check"] for c in report.get("checks", []) if not c.get("ok")]
+        print(
+            "INFO  hermes_compatibility_preflight_failed="
+            f"{', '.join(failed) or report.get('error', 'unknown')}"
+        )
     print(
         "READY  governed-run bootstrap"
         if doc["safe_to_start_governed_run"]
