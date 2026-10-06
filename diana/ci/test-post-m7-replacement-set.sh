@@ -38,15 +38,20 @@ def falsify(label, cond, extra=""):
     check("[falsifier] " + label, cond, extra)
 
 # POST-M7-E1-D1, verbatim.
-POST_M7_PRODUCTION = {"diana/adapters/hermes_live.py",
+POST_M7_PRODUCTION = {"diana/adapters/hermes.py",
+                      "diana/adapters/hermes_live.py",
+                      "diana/adapters/hermes_patches.py",
+                      "diana/ci/build-gate-input.py",
+                      "diana/ci/run-security-gate.py",
+                      "diana/ci/write-summary.py",
+                      "diana/gate/diana-gate.py",
                       "diana/multiactor/actors.py",
                       "diana/multiactor/executors.py",
                       "diana/mutation/remediation_driver.py",
-                      "diana/ci/build-gate-input.py",
-                      "diana/ci/write-summary.py",
-                      "diana/gate/diana-gate.py",
-                      "diana/adapters/hermes.py",
-                      "diana/adapters/hermes_patches.py"}
+                      "diana/security/adapters/semgrep_adapter.py",
+                      "diana/security/ci_verifier_runs.py",
+                      "diana/security/coverage_matrix.py",
+                      "diana/security/verifiers/semgrep-rules.yml"}
 # POST-M7-E1-D7, verbatim.
 POST_M7_HARNESS = {"diana/adapters/test-hermes-capability.sh",
                    "diana/adapters/test-hermes-confinement.sh",
@@ -65,7 +70,8 @@ POST_M7_HARNESS = {"diana/adapters/test-hermes-capability.sh",
                    "diana/security/test-ci-verifier-runs.sh",
                    "diana/security/test-coverage-matrix.sh",
                    "diana/security/test-security-gate.sh"}
-DOCS_MANIFEST = {".gitignore", "README.md"}\nPOST_M7_DOCS = {"MEMORY.md",
+DOCS_MANIFEST = {".gitignore", "README.md"}
+POST_M7_DOCS = {"MEMORY.md",
                  "diana/security/README.md",
                  "diana/security/adapters/README.md"}
 
@@ -114,7 +120,8 @@ for label, base, declared, declared_harness in MILESTONES:
           f"(got {sorted(harness)} want {sorted(permitted_harness)})")
     check(f"{label} nothing was deleted", deleted == [], f"({deleted})")
 
-print("\n=== the statement M5's own frozen suite can no longer make ===")
+print("
+=== the statement M5's own frozen suite can no longer make ===")
 m5_declared = {"diana/runtime/blocking.py"}
 rows = [l.split("\t") for l in git("diff", "--name-status", "69f5569").strip().splitlines() if l]
 m5_production = {p for st, p in rows if st.startswith("M")
@@ -130,7 +137,8 @@ falsify("M5's own suite still reports this one failure, because its constant is 
         git("diff", "--name-only", FREEZE, "--",
             "diana/unattended/test-m5-unattended.sh").strip() == "")
 
-print("\n=== the accounting is exhaustive and nothing was quietly excluded ===")
+print("
+=== the accounting is exhaustive and nothing was quietly excluded ===")
 check("every accounted production file is a real path in the repository",
       all((git("cat-file", "-e", f"HEAD:{q}") or True) and
           subprocess.run(["git", "-C", repo, "cat-file", "-e", f"HEAD:{q}"],
@@ -157,6 +165,7 @@ falsify("the accounted set is NOT a wildcard: a file nobody accounted for would 
         and "diana/mutation/mutation_policy.py" not in POST_M7_PRODUCTION
         and "diana/runtime/contract.py" not in POST_M7_PRODUCTION)
 
-print(f"\n{passed} passed, {failed} failed, {falsifiers} falsifiers")
+print(f"
+{passed} passed, {failed} failed, {falsifiers} falsifiers")
 sys.exit(1 if failed else 0)
 PY
