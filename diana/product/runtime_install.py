@@ -271,7 +271,7 @@ def _copy_source(staging: Path) -> None:
     shutil.copytree(SOURCE_ROOT / "diana", staging / "diana", symlinks=False)
 
 
-def _verify_release(release: Path, trust_key: bytes) -> dict:
+def _verify_release(release: Path, trust_key: bytes, *, require_identity_name: bool = True) -> dict:
     if not release.is_dir() or release.is_symlink():
         raise ManagedRuntimeError(f"release is not a regular directory: {release}")
     manifest_path = release / MANIFEST
@@ -300,7 +300,7 @@ def _verify_release(release: Path, trust_key: bytes) -> dict:
     ):
         raise ManagedRuntimeError("release manifest source commit is malformed")
     expected_rid = _release_id(str(doc.get("diana_version")), commit)
-    if release.name != expected_rid:
+    if require_identity_name and release.name != expected_rid:
         raise ManagedRuntimeError(
             f"release directory identity mismatch: {release.name} != {expected_rid}"
         )
@@ -428,7 +428,7 @@ def install(
                 encoding="utf-8",
             )
             os.chmod(staging / MANIFEST, 0o600)
-            _verify_release(staging, trust_key)
+            _verify_release(staging, trust_key, require_identity_name=False)
             os.replace(staging, destination)
         finally:
             if staging.exists():
