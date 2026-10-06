@@ -523,23 +523,42 @@ frozen += [f"diana/commands/{n}" for n in
 # replaced by merged PR #72. New files introduced by #72 (for example
 # hermes_runtime.py) remain additions and are therefore not replacement-set
 # members. The comparison below remains exact set equality.
-POST_M7_PRODUCTION = {"diana/adapters/hermes_live.py",
+POST_M7_PRODUCTION = {"diana/adapters/hermes.py",
+                      "diana/adapters/hermes_live.py",
+                      "diana/adapters/hermes_patches.py",
+                      "diana/ci/build-gate-input.py",
+                      "diana/ci/run-security-gate.py",
+                      "diana/ci/write-summary.py",
+                      "diana/gate/diana-gate.py",
                       "diana/multiactor/actors.py",
                       "diana/multiactor/executors.py",
                       "diana/mutation/remediation_driver.py",
-                      "diana/ci/build-gate-input.py",
-                      "diana/ci/write-summary.py",
-                      "diana/gate/diana-gate.py",
-                      "diana/adapters/hermes.py",
-                      "diana/adapters/hermes_patches.py"}
+                      "diana/security/adapters/semgrep_adapter.py",
+                      "diana/security/ci_verifier_runs.py",
+                      "diana/security/coverage_matrix.py",
+                      "diana/security/verifiers/semgrep-rules.yml"}
 # POST-M7-E1-D7: the milestone SUITES this erratum corrects. Test code, never
 # production code -- the same classification M4-ERRATA-001 finding 4 already
 # established, enumerated rather than blanket-excluded. Same rule as above:
 # PR #72's test-harness edits are already covered by the same enumerated harness
 # set; no wildcard harness exclusion is introduced.
-POST_M7_HARNESS = {"diana/mutation/test-m4-bounded-mutation.sh",
+POST_M7_HARNESS = {"diana/adapters/test-hermes-capability.sh",
+                   "diana/adapters/test-hermes-confinement.sh",
+                   "diana/adapters/test-hermes-preflight.sh",
+                   "diana/advisory/test-acceptance.sh",
+                   "diana/advisory/test-m2-live-turn.sh",
+                   "diana/advisory/test-run.sh",
+                   "diana/multiactor/test-m6-audit.sh",
+                   "diana/multiactor/test-m6-lease.sh",
                    "diana/multiactor/test-m6-multiactor.sh",
-                   "diana/product/test-m7-product.sh"}
+                   "diana/multiactor/test-m6-review.sh",
+                   "diana/multiactor/test-m6-thirdpass.sh",
+                   "diana/mutation/test-m4-bounded-mutation.sh",
+                   "diana/product/test-m7-product.sh",
+                   "diana/security/adapters/test-adapters.sh",
+                   "diana/security/test-ci-verifier-runs.sh",
+                   "diana/security/test-coverage-matrix.sh",
+                   "diana/security/test-security-gate.sh"}
 for path in frozen:
     # POST-M7-E1-D6: a frozen path that accepted post-M7 work replaced must be in
     # the enumerated set above; every other frozen path is still required to be
@@ -553,7 +572,9 @@ for path in frozen:
 changed = [l.split("\t") for l in git("diff","--name-status",BASE).strip().splitlines() if l]
 modified = {p for st,p in changed if st.startswith("M")}
 # POST-M7-E1-D2: README.md is documentation.
-is_doc = lambda q: q.startswith("docs/") or q in {".gitignore", "README.md"}
+POST_M7_DOCS = {"MEMORY.md",
+                 "diana/security/README.md",
+                 "diana/security/adapters/README.md"}\nis_doc = lambda q: q.startswith("docs/") or q in ({".gitignore", "README.md"} | POST_M7_DOCS)
 is_harness = lambda q: q.rsplit("/", 1)[-1].startswith("test-") and q.endswith(".sh")
 mod_harness = {p for p in modified if is_harness(p)}
 mod_production = {p for p in modified if not is_doc(p) and not is_harness(p)}
