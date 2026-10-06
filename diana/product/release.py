@@ -9,6 +9,8 @@ It grants no authority and runs no model call.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import platform
@@ -27,6 +29,59 @@ SUPPORTED_SYSTEM = "Linux"
 SUPPORTED_PYTHON = (3, 11)
 VERSION_FILE = DIANA_ROOT / "VERSION"
 MANIFEST_NAME = "release-manifest.json"
+MANAGER_SCHEMA = 2
+
+
+def _default_trust_file() -> Path:
+    return Path(os.environ.get(
+        "DIANA_RUNTIME_TRUST_FILE",
+        str(Path.home() / ".local" / "state" / "diana" / "runtime-trust.key"),
+    )).expanduser()
+
+
+def _manifest_payload(doc: dict) -> bytes:
+    payload = {k: v for k, v in doc.items() if k != "auth"}
+    return json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+
+
+def _authenticated_manifest() -> tuple[dict | None, str | None]:
+    """Return an authenticated installed-release manifest, never an asserted one.
+
+    The HMAC key lives outside the runtime prefix. This protects against an
+    attacker limited to rewriting the installed runtime prefix; it does not
+    claim protection from a same-user compromise that can also read the key.
+    """
+    manifest = DIANA_ROOT / MANIFEST_NAME
+    if not manifest.exists():
+        return None, None
+    if manifest.is_symlink() or not manifest.is_file():
+        return None, "manifest is not a regular file"
+    try:
+        doc = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"manifest unreadable: {exc}"
+    if not isinstance(doc, dict) or doc.get("runtime_manager_schema") != MANAGER_SCHEMA:
+        return None, "manifest schema mismatch"
+    auth = doc.get("auth")
+    if not isinstance(auth, dict) or set(auth) != {"type", "value"}:
+        return None, "manifest authentication missing"
+    if auth.get("type") != "hmac-sha256" or not isinstance(auth.get("value"), str):
+        return None, "manifest authentication scheme unsupported"
+    trust_file = _default_trust_file()
+    try:
+        if trust_file.is_symlink() or not trust_file.is_file():
+            return None, "runtime trust key unavailable"
+        key = trust_file.read_bytes()
+    except OSError as exc:
+        return None, f"runtime trust key unreadable: {exc}"
+    if len(key) != 32:
+        return None, "runtime trust key length invalid"
+    expected = hmac.new(key, _manifest_payload(doc), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(auth["value"], expected):
+        return None, "manifest authentication mismatch"
+    return doc, None
 
 
 def diana_version() -> str:
@@ -38,11 +93,10 @@ def diana_version() -> str:
 
 
 def source_commit() -> str | None:
-    manifest = DIANA_ROOT / MANIFEST_NAME
-    if manifest.is_file():
-        try:
-            data = json.loads(manifest.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+    manifest_path = DIANA_ROOT / MANIFEST_NAME
+    if manifest_path.exists() or manifest_path.is_symlink():
+        data, _ = _authenticated_manifest()
+        if data is None:
             return None
         value = data.get("source_commit")
         return value if isinstance(value, str) and value else None
@@ -72,6 +126,8 @@ def source_tree_clean() -> bool | None:
     module, keeping this diagnostic path's only dependency on the stdlib
     `subprocess` call already used by `source_commit()` above.
     """
+    if (DIANA_ROOT / MANIFEST_NAME).exists():
+        return None
     try:
         proc = subprocess.run(
             ["git", "-C", str(DIANA_ROOT), "status", "--porcelain", "--",
@@ -181,12 +237,18 @@ def doctor_document(hermes_home: str | None = None) -> tuple[dict, bool]:
     if hermes_python:
         identity, identity_error = _hermes_identity(hermes_python, home)
     identity_state = _identity_state(identity)
+    manifest_present = (DIANA_ROOT / MANIFEST_NAME).exists()
+    authenticated_manifest, manifest_error = _authenticated_manifest()
+    source_clean = source_tree_clean()
+    source_authenticated = (
+        authenticated_manifest is not None if manifest_present else source_clean is True
+    )
     checks = {
         "platform_supported": system == SUPPORTED_SYSTEM,
         "python_supported": py == SUPPORTED_PYTHON,
         "diana_version_known": diana_version() != "unknown",
         "diana_source_known": source_commit() is not None,
-        "diana_source_immutable": source_tree_clean() is not False,
+        "diana_source_authenticated": source_authenticated,
         "hermes_home_present": Path(home).is_dir(),
         "hermes_runtime_resolved": hermes_python is not None,
         "hermes_identity_certified": identity_state == "ok",
@@ -197,6 +259,10 @@ def doctor_document(hermes_home: str | None = None) -> tuple[dict, bool]:
         "safe_to_start_governed_run": safe,
         "diana_version": diana_version(),
         "source_commit": source_commit(),
+        "manifest_present": manifest_present,
+        "manifest_authenticated": authenticated_manifest is not None if manifest_present else None,
+        "manifest_error": manifest_error,
+        "source_tree_clean": source_clean,
         "platform": {"actual": system, "supported": [SUPPORTED_SYSTEM]},
         "python": {
             "actual": f"{py[0]}.{py[1]}",
