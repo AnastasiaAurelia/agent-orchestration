@@ -293,6 +293,11 @@ def version_document() -> dict:
         "supported_bootstrap_python": (
             f"{SUPPORTED_BOOTSTRAP_PYTHON[0]}.{SUPPORTED_BOOTSTRAP_PYTHON[1]}"
         ),
+        # Compatibility alias: historically this field meant the Python that
+        # invokes release.py / diana-do diagnostics. It remains bootstrap-only.
+        "supported_python": (
+            f"{SUPPORTED_BOOTSTRAP_PYTHON[0]}.{SUPPORTED_BOOTSTRAP_PYTHON[1]}"
+        ),
         "supported_hermes_runtime_python": ">=3.11,<3.15",
         "certified_hermes_identities": list(_certified_identities()),
     }
