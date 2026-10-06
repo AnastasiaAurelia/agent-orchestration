@@ -79,6 +79,16 @@ print("release binding refused stale approval")
 PY
 check "proposal approval is bound to Diana release identity" test "$?" -eq 0
 
+# The release-binding probe above deliberately rewrote $SRC/VERSION on disk,
+# uncommitted, to prove a proposal goes stale without a commit. That mutation
+# must not leak into the install/upgrade/rollback tests below: the installer
+# is REQUIRED to refuse a dirty source (dirty-source refusal is itself a
+# production acceptance criterion), so an uncleaned $SRC would make every
+# subsequent "fresh governed-runtime install" step fail for the wrong reason
+# -- not because dirty-source refusal is broken, but because this test script
+# left the fixture dirty. Restore the clean, committed VERSION before using
+# $SRC for anything that expects a clean source tree.
+git -C "$SRC" checkout -q -- VERSION
 check "fresh governed-runtime install"   "${MANAGER[@]}" install --prefix "$PREFIX" --bin-dir "$BIN"
 check "installed runtime verifies"   "${MANAGER[@]}" verify --prefix "$PREFIX" --bin-dir "$BIN"
 check "launcher is Diana-managed symlink" test -L "$BIN/diana-do"
@@ -90,7 +100,15 @@ expect_fail "unmanaged launcher collision is refused"   "${MANAGER[@]}" install 
 check "foreign launcher was not overwritten"   grep -qx 'foreign' "$TMP/collision-bin/diana-do"
 
 # Corruption of an installed file must make verification fail.
+# `cp -a` copies the `current` symlink *itself*, not a copy of what it
+# points at -- its target is still the ORIGINAL, absolute $PREFIX/releases/...
+# directory. Without repointing it, the tamper write below goes straight
+# through the symlink into the real, shared release directory and
+# permanently corrupts $PREFIX for every later step (upgrade/rollback/
+# uninstall), rather than exercising an isolated negative case.
 cp -a "$PREFIX" "$TMP/corrupt-prefix"
+corrupt_rid="$(basename "$(readlink "$PREFIX/current")")"
+ln -sfn "$TMP/corrupt-prefix/releases/$corrupt_rid" "$TMP/corrupt-prefix/current"
 printf 'tampered\n' > "$TMP/corrupt-prefix/current/VERSION"
 expect_fail "installed-file tampering is detected"   "${MANAGER[@]}" verify --prefix "$TMP/corrupt-prefix" --bin-dir "$BIN"
 
