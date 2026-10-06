@@ -71,32 +71,20 @@ MAX_OBSERVATION_CHARS = 2000
 DENIED_MARKER = "diana:"
 
 
-# --- provider credentials -------------------------------------------------
+# --- provider runtime resolution -------------------------------------------
 #
-# Historically every provider was assumed to carry an environment API key. An
-# OAuth-backed provider has no such key and was therefore unreachable, which is
-# a live-run outage rather than a security property: Diana refused a provider
-# Hermes itself can authenticate.
+# Diana must not re-implement Hermes's provider/authentication matrix. Current
+# certified Hermes supports API-key, OAuth/auth-store and external-process model
+# providers behind one authoritative resolver:
+# hermes_cli.runtime_provider.resolve_runtime_provider().
 #
-# The fix keeps the fail-closed direction exactly. A provider NOT named below
-# still requires its key and is refused without one; a provider named below may
-# obtain its credential from Hermes's own auth store and is refused when that
-# store cannot produce one. Diana never reads, caches, writes or records the
-# token: it is held in memory for the single turn and the turn record carries
-# provider, model and base_url and nothing else (M2-D5).
+# Re-deriving only `<PROVIDER>_API_KEY` plus one OAuth special case made Diana
+# reject providers Hermes itself could run (notably external-process providers,
+# whose "api_key" is an intentional non-secret placeholder and whose real auth
+# belongs to the subprocess). The security boundary here is fail-closed runtime
+# resolution under an EXACT certified Hermes identity, not a second, drifting
+# provider allowlist maintained by Diana.
 
-
-def _resolve_codex_credentials() -> dict:
-    """The one call into Hermes's Codex auth store. A seam, so a test can prove
-    both the resolved and the unresolvable case without a live provider."""
-    from hermes_cli.auth import resolve_codex_runtime_credentials
-
-    return resolve_codex_runtime_credentials() or {}
-
-
-# Closed map: provider -> the Hermes resolver that owns its credential. Adding a
-# provider here is a deliberate edit, never configuration and never inference.
-OAUTH_RESOLVERS = {"openai-codex": _resolve_codex_credentials}
 
 # A run of token-shaped characters. Nothing credential-adjacent reaches a reason
 # string, a log line or an artifact without passing through `_redact` first.
@@ -107,91 +95,88 @@ def _redact(text: object) -> str:
     return _TOKEN_LIKE.sub("<redacted>", str(text))
 
 
-def _oauth_credentials(provider: str, model: str, base_url: str) -> tuple[str, str]:
-    """(api_key, base_url) from Hermes's auth store, or Blocked.
-
-    Every failure -- resolver missing, resolver raising, resolver returning
-    nothing usable -- is HERMES_PROVIDER_UNAVAILABLE. Diana does not substitute
-    a placeholder key, and an unresolvable credential never becomes a turn.
-    """
-    resolver = OAUTH_RESOLVERS.get(provider)
-    if resolver is None:  # pragma: no cover - callers gate on the same map
-        raise blocking.Blocked(
-            blocking.HERMES_PROVIDER_UNAVAILABLE,
-            f"provider={provider!r} has no OAuth resolver")
-    try:
-        creds = resolver() or {}
-    except BaseException as exc:  # noqa: BLE001 - every failure is fail-closed
-        raise blocking.Blocked(
-            blocking.HERMES_PROVIDER_UNAVAILABLE,
-            f"provider={provider!r} model={model!r}: Hermes could not resolve an OAuth "
-            f"runtime credential ({type(exc).__name__}: {_redact(exc)[:200]})") from None
-    api_key = str(creds.get("api_key") or "").strip()
-    resolved_base = str(creds.get("base_url") or base_url).strip()
-    if not api_key:
-        raise blocking.Blocked(
-            blocking.HERMES_PROVIDER_UNAVAILABLE,
-            f"provider={provider!r} model={model!r}: Hermes's auth store returned no "
-            "usable credential, and Diana does not substitute one")
-    return api_key, resolved_base
-
-
 def provider_config(hermes_home: str | None = None) -> dict:
-    """Provider, model, base_url and key from Hermes's own configuration.
+    """Resolve the configured model through Hermes's OWN runtime resolver.
 
-    Read from Hermes rather than re-specified by Diana: the point of M2 is that
-    the product's real model runs, not a model Diana picked.
+    Diana still chooses no provider and fabricates no credential. The provider
+    and model come from Hermes's merged read-only configuration; the credential,
+    endpoint, API mode and any external-process launch tuple come from the
+    resolver shipped by the exact certified Hermes checkout.
+
+    Any missing/unknown/unresolvable runtime remains HERMES_PROVIDER_UNAVAILABLE.
     """
+
     home = Path(hermes_home or _patches.HERMES_HOME)
-    hermes_root = home.parent
-    config: dict = {}
     try:
         if str(home) not in sys.path:
             sys.path.insert(0, str(home))
         from hermes_cli.config import load_config_readonly
+        from hermes_cli.runtime_provider import resolve_runtime_provider
 
         config = load_config_readonly() or {}
     except Exception as exc:
         raise blocking.Blocked(
-            blocking.HERMES_UNREACHABLE, f"could not read Hermes config: {exc}"
+            blocking.HERMES_UNREACHABLE,
+            f"could not load Hermes runtime/config resolver: {type(exc).__name__}: "
+            f"{_redact(exc)[:200]}",
         ) from None
 
     model_cfg = config.get("model") if isinstance(config.get("model"), dict) else {}
     provider = str(model_cfg.get("provider") or "").strip()
     model = str(model_cfg.get("default") or model_cfg.get("model") or "").strip()
-    base_url = str(model_cfg.get("base_url") or "").strip()
-
-    env_file = hermes_root / ".env"
-    env: dict[str, str] = {}
-    try:
-        for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                key, _, value = line.partition("=")
-                if value.strip():
-                    env[key.strip()] = value.strip()
-    except OSError:
-        pass
-
-    prefix = provider.upper().replace("-", "_")
-    api_key = env.get(f"{prefix}_API_KEY") or os.environ.get(f"{prefix}_API_KEY") or ""
-    base_url = env.get(f"{prefix}_BASE_URL") or base_url
-
-    # An OAuth-backed provider keeps its runtime credential in Hermes's own auth
-    # store, not in `.env`. Only a provider named in `OAUTH_RESOLVERS` may take
-    # this path, and only when no environment key was found -- an explicit key
-    # still wins, and every other provider still requires one.
-    if provider in OAUTH_RESOLVERS and not api_key:
-        api_key, base_url = _oauth_credentials(provider, model, base_url)
-
-    if not (provider and model and api_key):
-        # No key means M2 acceptance cannot run. It must say so rather than
-        # quietly substituting a scripted turn and calling the turn live.
+    if not provider or not model:
         raise blocking.Blocked(
             blocking.HERMES_PROVIDER_UNAVAILABLE,
-            f"provider={provider!r} model={model!r} api_key={'set' if api_key else 'MISSING'}",
+            f"provider={provider!r} model={model!r}: Hermes model configuration is incomplete",
         )
-    return {"provider": provider, "model": model, "base_url": base_url, "api_key": api_key}
+
+    try:
+        runtime = resolve_runtime_provider(requested=provider, target_model=model) or {}
+    except BaseException as exc:  # noqa: BLE001 - every provider resolution failure is fail-closed
+        raise blocking.Blocked(
+            blocking.HERMES_PROVIDER_UNAVAILABLE,
+            f"provider={provider!r} model={model!r}: Hermes runtime resolver refused "
+            f"({type(exc).__name__}: {_redact(exc)[:220]})",
+        ) from None
+
+    if not isinstance(runtime, dict):
+        raise blocking.Blocked(
+            blocking.HERMES_PROVIDER_UNAVAILABLE,
+            f"provider={provider!r} model={model!r}: Hermes runtime resolver returned "
+            f"{type(runtime).__name__}, not an object",
+        )
+
+    resolved_provider = str(runtime.get("provider") or "").strip()
+    requested_provider = str(runtime.get("requested_provider") or provider).strip()
+    api_key = runtime.get("api_key")
+    base_url = str(runtime.get("base_url") or "").strip()
+    api_mode = str(runtime.get("api_mode") or "").strip()
+    command = str(runtime.get("command") or "").strip()
+    raw_args = runtime.get("args") or []
+    args = [str(x) for x in raw_args] if isinstance(raw_args, (list, tuple)) else []
+
+    # Every Hermes runtime path that is actually executable yields a non-empty
+    # api_key-shaped value. For external-process providers this is deliberately a
+    # NON-SECRET provider-specific placeholder while the subprocess owns auth;
+    # treating emptiness as acceptable here would make a broken resolver look
+    # runnable, so Diana keeps the fail-closed check.
+    if not resolved_provider or not api_key:
+        raise blocking.Blocked(
+            blocking.HERMES_PROVIDER_UNAVAILABLE,
+            f"provider={provider!r} model={model!r}: Hermes runtime resolution was incomplete",
+        )
+
+    return {
+        "provider": resolved_provider,
+        "requested_provider": requested_provider,
+        "model": model,
+        "base_url": base_url,
+        "api_key": api_key,
+        "api_mode": api_mode,
+        "command": command,
+        "args": args,
+        "runtime_source": str(runtime.get("source") or "").strip(),
+    }
 
 
 def _iterations_used(agent) -> int | None:
@@ -232,7 +217,10 @@ def build_agent(contract_block: dict, *, hermes_home: str | None = None,
 
     agent = AIAgent(
         model=cfg["model"], api_key=cfg["api_key"], base_url=cfg["base_url"],
-        provider=cfg["provider"], quiet_mode=True, save_trajectories=False,
+        provider=cfg["provider"], requested_provider=cfg["requested_provider"],
+        api_mode=cfg["api_mode"] or None,
+        command=cfg["command"] or None, args=cfg["args"],
+        quiet_mode=True, save_trajectories=False,
         enabled_toolsets=["file"], max_iterations=MAX_ITERATIONS,
         # M2-D9: one variable at a time. Skills, memory and AGENTS.md injection
         # are additional context surfaces belonging to their own milestone.
