@@ -123,8 +123,14 @@ paths, why = MP.extract_paths("write_file", {"path": "/a/b.txt", "content": "x"}
 check("M4-AC-4 write_file.path is extracted", paths == {"/a/b.txt"} and why is None)
 paths, why = MP.extract_paths("patch", {"mode": "replace", "path": "/a/b.txt"})
 check("M4-AC-4 patch replace-mode path is extracted", paths == {"/a/b.txt"} and why is None)
-v4a = ("*** Begin Patch\n*** Update File: /a/u.txt\n*** Add File: /a/c.txt\n"
-       "*** Delete File: /a/d.txt\n*** Move File: /a/from.txt -> /a/to.txt\n*** End Patch\n")
+v4a = ("*** Begin Patch
+*** Update File: /a/u.txt
+*** Add File: /a/c.txt
+"
+       "*** Delete File: /a/d.txt
+*** Move File: /a/from.txt -> /a/to.txt
+*** End Patch
+")
 paths, why = MP.extract_paths("patch", {"mode": "patch", "patch": v4a})
 check("M4-AC-4 every V4A header path is extracted, both Move endpoints included",
       paths == {"/a/u.txt", "/a/c.txt", "/a/d.txt", "/a/from.txt", "/a/to.txt"} and why is None,
@@ -141,27 +147,33 @@ for bad, label in (
     paths, why = MP.extract_paths("patch", bad)
     check(f"M4-AC-5 {label} is uninterpretable", why is not None, f"(got {why})")
 check("M4-AC-5 a lenient V4A header (no space after ***) is still extracted",
-      MP.extract_paths("patch", {"mode": "patch", "patch": "***Update File: /a/z.txt\n"})[0] == {"/a/z.txt"})
+      MP.extract_paths("patch", {"mode": "patch", "patch": "***Update File: /a/z.txt
+"})[0] == {"/a/z.txt"})
 
 # Audit finding: `patch_tool` collects `path` into `_paths_to_check` BEFORE it
 # branches on mode, so a V4A call may smuggle a second path through an argument
 # the mode's documented shape does not use. M4-D7 is literal about "every path".
 paths, why = MP.extract_paths(
-    "patch", {"mode": "patch", "patch": "*** Update File: /a/u.txt\n", "path": "/outside/p.txt"})
+    "patch", {"mode": "patch", "patch": "*** Update File: /a/u.txt
+", "path": "/outside/p.txt"})
 check("M4-AC-4 a V4A call ALSO carrying `path` has that path extracted too",
       paths == {"/a/u.txt", "/outside/p.txt"} and why is None, f"(got {sorted(paths)})")
 paths, why = MP.extract_paths(
-    "patch", {"mode": "patch", "patch": "*** Update File: /a/u.txt\n", "path": 7})
+    "patch", {"mode": "patch", "patch": "*** Update File: /a/u.txt
+", "path": 7})
 check("M4-AC-5 a V4A call carrying a non-string `path` is uninterpretable", why is not None)
 
 # ===================== M4-AC-1..6: write policy through REAL dispatch =====
 print("--- M4-AC-1..6: write policy on the real dispatch path ---")
 root = fresh("write")
 sub = Path(root, "src"); sub.mkdir(exist_ok=True)
-(sub / "editable.py").write_text("VALUE = 1\n")
+(sub / "editable.py").write_text("VALUE = 1
+")
 outside_repo = Path(tmp, "outside"); outside_repo.mkdir(exist_ok=True)
-secret = outside_repo / "secret.txt"; secret.write_text("ORIGINAL\n")
-readonly_file = Path(root, "readonly.py"); readonly_file.write_text("KEEP = True\n")
+secret = outside_repo / "secret.txt"; secret.write_text("ORIGINAL
+")
+readonly_file = Path(root, "readonly.py"); readonly_file.write_text("KEEP = True
+")
 
 cb = envelope_for(root, write_sub="src")          # write only src/, read all of root
 RM.install(cb, require_preflight=False)
@@ -174,10 +186,12 @@ def call(name, args):
 
 def refused(out): return "diana:" in out
 
-r = call("write_file", {"path": str(sub / "new.py"), "content": "OK = 1\n"})
+r = call("write_file", {"path": str(sub / "new.py"), "content": "OK = 1
+"})
 check("M4-AC-1 an allowed write inside write_scope succeeds", not refused(r), f"({r[:140]})")
 check("M4-AC-1 the intended content actually landed on disk",
-      (sub / "new.py").exists() and (sub / "new.py").read_text() == "OK = 1\n")
+      (sub / "new.py").exists() and (sub / "new.py").read_text() == "OK = 1
+")
 
 before_bytes = readonly_file.read_bytes()
 r = call("write_file", {"path": str(readonly_file), "content": "PWNED"})
@@ -194,7 +208,8 @@ check("M4-AC-2 a denied write creates no parent directory", not Path(root, "nodi
 
 r = call("write_file", {"path": str(secret), "content": "PWNED"})
 check("M4-AC-3 a write outside the repository entirely is refused", refused(r))
-check("M4-AC-3 that target is byte-identical", secret.read_text() == "ORIGINAL\n")
+check("M4-AC-3 that target is byte-identical", secret.read_text() == "ORIGINAL
+")
 r = call("write_file", {"path": str(sub / ".." / ".." / "traversal.py"), "content": "x"})
 check("M4-AC-3 path traversal out of write_scope is refused on the canonicalized path",
       refused(r) and not Path(tmp, "traversal.py").exists() and not Path(root, "traversal.py").exists())
@@ -203,23 +218,44 @@ try: os.symlink(secret, link)
 except FileExistsError: pass
 r = call("write_file", {"path": str(link), "content": "PWNED-VIA-SYMLINK"})
 check("M4-AC-3 a symlink escaping write_scope is refused after canonicalization", refused(r))
-check("M4-AC-3 the symlink target is byte-identical", secret.read_text() == "ORIGINAL\n")
+check("M4-AC-3 the symlink target is byte-identical", secret.read_text() == "ORIGINAL
+")
 
 for op, body, target in (
-    ("Update", f"*** Begin Patch\n*** Update File: {secret}\n@@\n-ORIGINAL\n+PWNED\n*** End Patch\n", secret),
-    ("Add", f"*** Begin Patch\n*** Add File: {outside_repo / 'v4a-add.txt'}\n+x\n*** End Patch\n", outside_repo / "v4a-add.txt"),
-    ("Delete", f"*** Begin Patch\n*** Delete File: {secret}\n*** End Patch\n", secret),
+    ("Update", f"*** Begin Patch
+*** Update File: {secret}
+@@
+-ORIGINAL
++PWNED
+*** End Patch
+", secret),
+    ("Add", f"*** Begin Patch
+*** Add File: {outside_repo / 'v4a-add.txt'}
++x
+*** End Patch
+", outside_repo / "v4a-add.txt"),
+    ("Delete", f"*** Begin Patch
+*** Delete File: {secret}
+*** End Patch
+", secret),
 ):
     r = call("patch", {"mode": "patch", "patch": body})
     check(f"M4-AC-4 V4A {op} naming an out-of-scope path is refused", refused(r), f"({r[:140]})")
 check("M4-AC-4 no V4A operation mutated anything outside write_scope",
-      secret.read_text() == "ORIGINAL\n" and not (outside_repo / "v4a-add.txt").exists())
-move_out = f"*** Begin Patch\n*** Move File: {sub / 'new.py'} -> {outside_repo / 'moved.txt'}\n*** End Patch\n"
+      secret.read_text() == "ORIGINAL
+" and not (outside_repo / "v4a-add.txt").exists())
+move_out = f"*** Begin Patch
+*** Move File: {sub / 'new.py'} -> {outside_repo / 'moved.txt'}
+*** End Patch
+"
 r = call("patch", {"mode": "patch", "patch": move_out})
 check("M4-AC-4 V4A Move with an in-scope SOURCE and out-of-scope DESTINATION is refused", refused(r))
 check("M4-AC-4 the move left both endpoints untouched",
       (sub / "new.py").exists() and not (outside_repo / "moved.txt").exists())
-move_in = f"*** Begin Patch\n*** Move File: {outside_repo / 'secret.txt'} -> {sub / 'stolen.txt'}\n*** End Patch\n"
+move_in = f"*** Begin Patch
+*** Move File: {outside_repo / 'secret.txt'} -> {sub / 'stolen.txt'}
+*** End Patch
+"
 r = call("patch", {"mode": "patch", "patch": move_in})
 check("M4-AC-4 V4A Move with an out-of-scope SOURCE is refused", refused(r))
 check("M4-AC-4 nothing was copied into scope", not (sub / "stolen.txt").exists())
@@ -400,12 +436,14 @@ root3 = fresh("recon")
 cb3 = envelope_for(root3, write_sub="src")
 Path(root3, "src").mkdir(exist_ok=True)
 before = RM.snapshot_target(cb3)
-Path(root3, "src", "ok.py").write_text("x = 1\n")
+Path(root3, "src", "ok.py").write_text("x = 1
+")
 report = RM.reconcile_target(cb3, before)
 check("M4-AC-12 a change inside write_scope reconciles as within the envelope",
       report["within_envelope"] and "src/ok.py" in report["paths_touched"], f"({report['paths_touched']})")
 before = RM.snapshot_target(cb3)
-Path(root3, "calc.py").write_text("# mutated outside write_scope\n")
+Path(root3, "calc.py").write_text("# mutated outside write_scope
+")
 report = RM.reconcile_target(cb3, before)
 check("M4-AC-12 a change OUTSIDE write_scope is DETECTED",
       not report["within_envelope"] and any(e["path"] == "calc.py" for e in report["paths_outside_write_scope"]),
@@ -433,7 +471,8 @@ import threading as _thr
 root6 = fresh("fa5-mismatch")
 Path(root6, "src").mkdir(exist_ok=True)
 def _driver_mutates_then_raises(cb):
-    Path(cb["target"]["repo_root"], "calc.py").write_text("# escaped the envelope\n")
+    Path(cb["target"]["repo_root"], "calc.py").write_text("# escaped the envelope
+")
     raise RuntimeError("driver exploded after mutating")
 P.uninstall()
 outcome, raised = None, None
@@ -461,7 +500,8 @@ root7 = fresh("fa5-clean")
 Path(root7, "src").mkdir(exist_ok=True)
 sentinel = RuntimeError("clean failure, nothing escaped")
 def _driver_raises_only(cb):
-    Path(cb["target"]["repo_root"], "src", "inside.py").write_text("y = 2\n")
+    Path(cb["target"]["repo_root"], "src", "inside.py").write_text("y = 2
+")
     raise sentinel
 P.uninstall()
 outcome2 = None
@@ -482,7 +522,8 @@ check("F-A5 the in-scope write still landed, proving the turn really ran",
 print("--- F-A6: reconciliation snapshot does not follow symlinks ---")
 outside_dir = Path(tmp, "fa6-outside"); outside_dir.mkdir(exist_ok=True)
 outside_secret = outside_dir / "secret.txt"
-outside_secret.write_text("OUTSIDE-SECRET-CONTENT\n")
+outside_secret.write_text("OUTSIDE-SECRET-CONTENT
+")
 root8 = fresh("fa6")
 link = Path(root8, "link.txt")
 link.symlink_to(outside_secret)
@@ -500,7 +541,8 @@ check("F-A6 no outside path leaked into the snapshot keys",
 
 # Repointing the link is itself a detected change...
 before8 = RC.snapshot(root8)
-other = outside_dir / "other.txt"; other.write_text("DIFFERENT\n")
+other = outside_dir / "other.txt"; other.write_text("DIFFERENT
+")
 link.unlink(); link.symlink_to(other)
 after8 = RC.snapshot(root8)
 check("F-A6 repointing the symlink IS detected as a change",
@@ -510,7 +552,8 @@ check("F-A6 repointing the symlink IS detected as a change",
 # ...while changing only the OUTSIDE target's content is invisible, which is the
 # whole point: Diana never read it.
 before9 = RC.snapshot(root8)
-other.write_text("MUTATED-OUTSIDE-CONTENT-THAT-DIANA-MUST-NOT-SEE\n")
+other.write_text("MUTATED-OUTSIDE-CONTENT-THAT-DIANA-MUST-NOT-SEE
+")
 after9 = RC.snapshot(root8)
 check("F-A6 mutating the outside target is invisible to the snapshot (it was never read)",
       RC.diff(before9, after9)["modified"] == [], f"({RC.diff(before9, after9)})")
@@ -722,7 +765,8 @@ PERMITTED_PRODUCTION = ERRATA_001_PRODUCTION | {
 # (b) docs + publish manifest -- never a production-code replacement.
 # POST-M7-E1-D2: README.md is documentation. Omitting it counted a documentation
 # edit as a production replacement in all four milestone suites.
-DOCS_MANIFEST = {".gitignore", "README.md"}\nPOST_M7_DOCS = {"MEMORY.md",
+DOCS_MANIFEST = {".gitignore", "README.md"}
+POST_M7_DOCS = {"MEMORY.md",
                  "diana/security/README.md",
                  "diana/security/adapters/README.md"}
 is_doc = lambda q: q.startswith("docs/") or q in (DOCS_MANIFEST | POST_M7_DOCS)
@@ -770,6 +814,7 @@ for suite in ("runtime/test-contract.sh", "profile/test-repo-profile.sh",
     rc = subprocess.run([str(diana / suite)], capture_output=True, text=True, check=False).returncode
     check(f"M4-REG-4 reusable behavioral suite still green: {suite}", rc == 0)
 
-print(f"\n{passed} passed, {failed} failed")
+print(f"
+{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
 PY
