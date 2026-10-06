@@ -35,6 +35,7 @@ reconciliation and M2 does not revive it (M2-D13).
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import sys
@@ -95,6 +96,32 @@ def _redact(text: object) -> str:
     return _TOKEN_LIKE.sub("<redacted>", str(text))
 
 
+@contextlib.contextmanager
+def _hermes_home_scope(home: str | Path):
+    """Bind Hermes's own config/runtime APIs to the exact checkout/profile.
+
+    Hermes config lookup does NOT follow sys.path: it resolves its data/config
+    home through hermes_constants.get_hermes_home(). Merely importing code from
+    DIANA_HERMES_HOME can therefore execute the right source while reading the
+    WRONG config profile. Use Hermes's supported context-local override instead
+    of mutating process-global HERMES_HOME.
+    """
+    home = str(home)
+    try:
+        from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+    except Exception as exc:
+        raise blocking.Blocked(
+            blocking.HERMES_UNREACHABLE,
+            f"could not bind Hermes home {home!r}: {type(exc).__name__}: "
+            f"{_redact(exc)[:200]}",
+        ) from None
+    token = set_hermes_home_override(home)
+    try:
+        yield
+    finally:
+        reset_hermes_home_override(token)
+
+
 def provider_config(hermes_home: str | None = None) -> dict:
     """Resolve the configured model through Hermes's OWN runtime resolver.
 
@@ -113,7 +140,13 @@ def provider_config(hermes_home: str | None = None) -> dict:
         from hermes_cli.config import load_config_readonly
         from hermes_cli.runtime_provider import resolve_runtime_provider
 
-        config = load_config_readonly() or {}
+        # Critical: source checkout selection (sys.path) and Hermes data/config
+        # home selection are separate mechanisms. Bind BOTH to the same exact
+        # DIANA_HERMES_HOME for this call.
+        with _hermes_home_scope(home):
+            config = load_config_readonly() or {}
+    except blocking.Blocked:
+        raise
     except Exception as exc:
         raise blocking.Blocked(
             blocking.HERMES_UNREACHABLE,
@@ -131,7 +164,8 @@ def provider_config(hermes_home: str | None = None) -> dict:
         )
 
     try:
-        runtime = resolve_runtime_provider(requested=provider, target_model=model) or {}
+        with _hermes_home_scope(home):
+            runtime = resolve_runtime_provider(requested=provider, target_model=model) or {}
     except BaseException as exc:  # noqa: BLE001 - every provider resolution failure is fail-closed
         raise blocking.Blocked(
             blocking.HERMES_PROVIDER_UNAVAILABLE,
@@ -215,17 +249,18 @@ def build_agent(contract_block: dict, *, hermes_home: str | None = None,
     os.environ["TERMINAL_CWD"] = contract_block["target"]["repo_root"]
     from run_agent import AIAgent
 
-    agent = AIAgent(
-        model=cfg["model"], api_key=cfg["api_key"], base_url=cfg["base_url"],
-        provider=cfg["provider"], requested_provider=cfg["requested_provider"],
-        api_mode=cfg["api_mode"] or None,
-        command=cfg["command"] or None, args=cfg["args"],
-        quiet_mode=True, save_trajectories=False,
-        enabled_toolsets=["file"], max_iterations=MAX_ITERATIONS,
-        # M2-D9: one variable at a time. Skills, memory and AGENTS.md injection
-        # are additional context surfaces belonging to their own milestone.
-        skip_context_files=True, skip_memory=True,
-    )
+    with _hermes_home_scope(home):
+        agent = AIAgent(
+            model=cfg["model"], api_key=cfg["api_key"], base_url=cfg["base_url"],
+            provider=cfg["provider"], requested_provider=cfg["requested_provider"],
+            api_mode=cfg["api_mode"] or None,
+            command=cfg["command"] or None, args=cfg["args"],
+            quiet_mode=True, save_trajectories=False,
+            enabled_toolsets=["file"], max_iterations=MAX_ITERATIONS,
+            # M2-D9: one variable at a time. Skills, memory and AGENTS.md injection
+            # are additional context surfaces belonging to their own milestone.
+            skip_context_files=True, skip_memory=True,
+        )
     if allowed_tools is not None:
         shown = narrow_tool_schemas(agent, allowed=allowed_tools)
     elif narrow:
@@ -344,7 +379,12 @@ class LiveTurnDriver:
 
         def run_turn():
             try:
-                outcome["final"] = agent.chat(message)
+                # ContextVars do not provide a portable guarantee of implicit
+                # inheritance into this worker thread. Re-bind the exact Hermes
+                # home inside the thread that actually executes agent.chat().
+                home = str(self.hermes_home or _patches.HERMES_HOME)
+                with _hermes_home_scope(home):
+                    outcome["final"] = agent.chat(message)
             except BaseException as exc:  # noqa: BLE001 - recorded, then re-raised as Blocked
                 outcome["error"] = f"{type(exc).__name__}: {exc}"
 
