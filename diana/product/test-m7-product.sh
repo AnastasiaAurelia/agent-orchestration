@@ -527,6 +527,9 @@ frozen += [f"diana/commands/{n}" for n in
 # it is itself merged, exactly as ERRATA-001 was written after #65/#66 landed.
 POST_M7_PRODUCTION = {"diana/adapters/hermes.py",
                       "diana/adapters/hermes_live.py",
+                      # fix/behavioral-runtime-compatibility: new
+                      # HERMES_COMPATIBILITY_PREFLIGHT_FAILED reason code.
+                      "diana/runtime/blocking.py",
                       "diana/adapters/hermes_patches.py",
                       "diana/ci/build-gate-input.py",
                       "diana/ci/run-security-gate.py",
