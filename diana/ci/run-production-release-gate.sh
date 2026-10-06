@@ -61,7 +61,7 @@ required_known_m5_exception() {
   out="$(mktemp)"
   echo "=== M5 unattended (governed historical accounting exception) ==="
   set +e
-  bash diana/unattended/test-m5-unattended.sh >"$out" 2>&1
+  env PATH="$(dirname "$HERMES_PYTHON"):$PATH"     bash diana/unattended/test-m5-unattended.sh >"$out" 2>&1
   local rc=$?
   set -e
   cat "$out"
@@ -124,7 +124,7 @@ required "diana-do runtime fail-closed" bash diana/adapters/test-diana-do-runtim
 required "M4 bounded mutation" bash diana/mutation/test-m4-bounded-mutation.sh
 required "M5 journal" bash diana/unattended/test-m5-journal.sh
 required "M5 ownership" bash diana/unattended/test-m5-ownership.sh
-required "M5 proofs" python3 diana/unattended/test_m5_proofs.py
+required "M5 proofs" "$HERMES_PYTHON" diana/unattended/test_m5_proofs.py
 # Run the frozen M5 unattended suite too. It is accepted only when its sole
 # failure is exactly the immutable historical M5-REG-2 accounting clause
 # superseded by the repo-wide exact reconciliation above. Any second failure,
