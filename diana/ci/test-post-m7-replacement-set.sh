@@ -48,10 +48,26 @@ POST_M7_PRODUCTION = {"diana/adapters/hermes_live.py",
                       "diana/adapters/hermes.py",
                       "diana/adapters/hermes_patches.py"}
 # POST-M7-E1-D7, verbatim.
-POST_M7_HARNESS = {"diana/mutation/test-m4-bounded-mutation.sh",
+POST_M7_HARNESS = {"diana/adapters/test-hermes-capability.sh",
+                   "diana/adapters/test-hermes-confinement.sh",
+                   "diana/adapters/test-hermes-preflight.sh",
+                   "diana/advisory/test-acceptance.sh",
+                   "diana/advisory/test-m2-live-turn.sh",
+                   "diana/advisory/test-run.sh",
+                   "diana/multiactor/test-m6-audit.sh",
+                   "diana/multiactor/test-m6-lease.sh",
                    "diana/multiactor/test-m6-multiactor.sh",
-                   "diana/product/test-m7-product.sh"}
-DOCS_MANIFEST = {".gitignore", "README.md"}
+                   "diana/multiactor/test-m6-review.sh",
+                   "diana/multiactor/test-m6-thirdpass.sh",
+                   "diana/mutation/test-m4-bounded-mutation.sh",
+                   "diana/product/test-m7-product.sh",
+                   "diana/security/adapters/test-adapters.sh",
+                   "diana/security/test-ci-verifier-runs.sh",
+                   "diana/security/test-coverage-matrix.sh",
+                   "diana/security/test-security-gate.sh"}
+DOCS_MANIFEST = {".gitignore", "README.md"}\nPOST_M7_DOCS = {"MEMORY.md",
+                 "diana/security/README.md",
+                 "diana/security/adapters/README.md"}
 
 FREEZE = git("rev-list", "-1", "--grep=docs(m6): freeze the Multi-Actor", "HEAD").strip()
 # Each milestone's accepted base and the set IT declared. Copied from the
@@ -70,7 +86,7 @@ MILESTONES = [
     ("M7", "c77208a", set(), set()),
 ]
 
-is_doc = lambda q: q.startswith("docs/") or q in DOCS_MANIFEST
+is_doc = lambda q: q.startswith("docs/") or q in (DOCS_MANIFEST | POST_M7_DOCS)
 is_harness = lambda q: q.rsplit("/", 1)[-1].startswith("test-") and q.endswith(".sh")
 
 print("=== every milestone's replacement statement, by set equality ===")
