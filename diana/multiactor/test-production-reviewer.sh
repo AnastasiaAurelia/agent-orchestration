@@ -226,8 +226,16 @@ _run_agent = types.ModuleType("run_agent")
 _run_agent.AIAgent = FakeAgent
 sys.modules["run_agent"] = _run_agent
 HL.provider_config = lambda home=None: {
-    "provider": "fake-provider", "model": "fake-model",
-    "base_url": "https://example.invalid", "api_key": FAKE_KEY}
+    "provider": "fake-provider",
+    "requested_provider": "fake-provider",
+    "model": "fake-model",
+    "base_url": "https://example.invalid",
+    "api_key": FAKE_KEY,
+    "api_mode": "chat_completions",
+    "command": "",
+    "args": [],
+    "runtime_source": "test",
+}
 
 def _run_ok(driver):
     """Run a driver that is expected to finish, and hand back its final text."""
