@@ -52,20 +52,25 @@ def fresh(name, with_auth=True):
     (root/"src"/"core").mkdir(parents=True)
     if with_auth: (root/"src"/"auth").mkdir(parents=True)
     (root/"tests").mkdir()
-    (root/"src"/"core"/"calc.py").write_text("def add(a, b):\n    return a - b\n")
+    (root/"src"/"core"/"calc.py").write_text("def add(a, b):
+    return a - b
+")
     (root/"check.py").write_text(textwrap.dedent("""\
         import sys
         sys.path.insert(0, "src")
         from core.calc import add
         sys.exit(0 if add(2, 3) == 5 else 1)
         """))
-    (root/".gitignore").write_text("build/\n")
+    (root/".gitignore").write_text("build/
+")
     g = lambda *a: subprocess.run(["git","-C",str(root),*a],capture_output=True,text=True)
     g("init","-q"); g("config","user.email","m@x"); g("config","user.name","m")
     g("add","-A"); g("commit","-qm","init")
     return root, g
 
-FIX = "def add(a, b):\n    return a + b\n"
+FIX = "def add(a, b):
+    return a + b
+"
 GOAL = "Fix the failing tests in this repo, but don't touch auth or deployment"
 
 def cli(root, *args, edits=None, executor="deterministic", env_extra=None):
@@ -110,7 +115,8 @@ check("M7-AC-14 Builder -> Reviewer is displayed, derived from attempts[].actor"
 RUN_ID = [l.split()[-1] for l in run_out.stdout.splitlines() if l.startswith("APPROVED")][0]
 
 # ======================================================================
-print("\n=== M7-AC-1..2 — proposal is concrete and derived ===")
+print("
+=== M7-AC-1..2 — proposal is concrete and derived ===")
 root2, _ = fresh("derive")
 pr = P.build(GOAL, str(root2), base=str(tmp/"p2"))
 check("M7-AC-1 the proposal carries a full contract, work-item document and topology",
@@ -129,7 +135,8 @@ falsify("M7-AC-2 mutating the contract changes the rendering, so the view reads 
         "/etc" in V.plan_view(mutated) and "/etc" not in plan)
 
 # ======================================================================
-print("\n=== M7-AC-3..4, M7-AC-10 — natural language cannot grant authority ===")
+print("
+=== M7-AC-3..4, M7-AC-10 — natural language cannot grant authority ===")
 base_intent = I.classify(GOAL, str(root2))
 inject = {
   "a tool": ({**base_intent, "allowed_tools": ["execute_code"]}, R.INTENT_UNKNOWN_FIELD),
@@ -164,7 +171,8 @@ falsify("M7-AC-3 the unmodified intent still validates, so the refusals above ar
         "injected field and not a blanket rejection",
         I.validate({k: v for k, v in base_intent.items() if k != "_withheld"}, str(root2)) is None)
 
-print("\n--- exclusions become denied authority, not prose ---")
+print("
+--- exclusions become denied authority, not prose ---")
 roots = env["write_scope"]["allowed_roots"]
 check("M7-AC-10 the excluded directory is NOT writable",
       not any(Path(r).name == "auth" for r in roots)
@@ -180,7 +188,8 @@ falsify("M7-AC-10 without the exclusion the SAME repo yields a WIDER write scope
         f"({no_excl['predicted_contract']['capability_envelope']['write_scope']['allowed_roots']})")
 
 # ======================================================================
-print("\n=== M7-AC-8..9 — ambiguity and over-policy ===")
+print("
+=== M7-AC-8..9 — ambiguity and over-policy ===")
 amb = refused(lambda: I.classify("Review the security of this repo and fix the xss", str(root2)))
 check("M7-AC-8 a request reading as both a review and a repair is refused as ambiguous",
       amb == R.INTENT_AMBIGUOUS, f"({amb})")
@@ -214,7 +223,8 @@ check("M7-AC-9 a repair with nothing writable is refused rather than silently na
       refused(lambda: I.classify("fix the tests", str(bare))) == R.NO_WRITABLE_SCOPE)
 
 # ======================================================================
-print("\n=== M7-E1-AC-1..3 — the corrected proposal digest ===")
+print("
+=== M7-E1-AC-1..3 — the corrected proposal digest ===")
 root3, g3 = fresh("digest")
 i3 = I.classify(GOAL, str(root3)); rid = str(uuid.uuid4())
 def derive(run_id=rid, created_at=None):
@@ -246,7 +256,8 @@ base_d = derive()[1]
 g3("commit","--allow-empty","-qm","B")
 commit_d = derive()[1]
 check("M7-E1-AC-3 a new commit changes the proposal digest", commit_d != base_d)
-(root3/"src"/"core"/"extra.py").write_text("x=1\n")
+(root3/"src"/"core"/"extra.py").write_text("x=1
+")
 dirty_d = derive()[1]
 check("M7-E1-AC-3 a dirty tree changes it", dirty_d != commit_d)
 (root3/"src"/"core"/"extra.py").unlink()
@@ -258,7 +269,8 @@ check("M7-E1-AC-3 and it moves repo_profile while target stays put, as measured"
       ign_cb["target"] == cb_a["target"] or ign_cb["repo_profile"] != cb_a["repo_profile"])
 
 # ======================================================================
-print("\n=== M7-AC-5..7, M7-E1-AC-4..7 — approval binding ===")
+print("
+=== M7-AC-5..7, M7-E1-AC-4..7 — approval binding ===")
 root4, g4 = fresh("approve")
 pr4 = P.build(GOAL, str(root4), base=str(tmp/"p4"))
 d4 = pr4["proposal_digest"]
@@ -296,7 +308,8 @@ falsify("M7-AC-7 re-proposing against the moved target yields a DIFFERENT digest
         and P.approve(fresh_pr["proposal_digest"], base=str(tmp/"p4"),
                       runs_base=str(tmp/"runs"))["approved"] is True)
 
-print("\n--- proposal modified after display ---")
+print("
+--- proposal modified after display ---")
 root5, _ = fresh("tamper")
 pr5 = P.build(GOAL, str(root5), base=str(tmp/"p5"))
 path5 = (tmp/"p5"/"proposals"/f"{pr5['proposal_digest'].split(':',1)[1]}.json")
@@ -319,7 +332,8 @@ falsify("M7-AC-7 an UNtampered proposal for the same repo approves, so the refus
         P.approve(_clean5["proposal_digest"], base=str(tmp/"p5clean"),
                   runs_base=str(tmp/"runs"))["approved"] is True)
 
-print("\n--- M7-E1-AC-6: the post-approve prediction check fires ---")
+print("
+--- M7-E1-AC-6: the post-approve prediction check fires ---")
 root6, _ = fresh("predict")
 pr6 = P.build(GOAL, str(root6), base=str(tmp/"p6"))
 path6 = (tmp/"p6"/"proposals"/f"{pr6['proposal_digest'].split(':',1)[1]}.json")
@@ -335,7 +349,8 @@ check("M7-E1-AC-7 the approval API takes a digest by TYPE, not by content matchi
       == R.APPROVAL_NOT_A_DIGEST)
 
 # ======================================================================
-print("\n=== M7-AC-12..13 — progress is the journal, and survives a crash ===")
+print("
+=== M7-AC-12..13 — progress is the journal, and survives a crash ===")
 root7, _ = fresh("progress")
 out7, d7 = propose_cli(root7)
 r7 = cli(root7, "approve", d7, edits={"item-1": ["src/core/calc.py", FIX]})
@@ -363,7 +378,8 @@ falsify("M7-AC-12 a FAKE progress state cannot disagree with the journal: rewrit
         f"({status2.stdout[:200]})")
 (rd7/"journal.json").write_bytes(json.dumps(json.loads((rd7/"journal.json").read_text())).encode())
 
-print("\n--- crash and resume show the SAME run ---")
+print("
+--- crash and resume show the SAME run ---")
 root8, _ = fresh("crash")
 out8, d8 = propose_cli(root8)
 r8a = cli(root8, "approve", d8, edits=None)      # no edits: work does not finish
@@ -378,14 +394,16 @@ check("M7-AC-13 re-rendering after the process exited reconstructs the same run"
       rid8 in s8.stdout and rec8["state"].lower() in s8.stdout)
 
 # ======================================================================
-print("\n=== M7-AC-16..17 — blocked is first class, and cannot widen ===")
+print("
+=== M7-AC-16..17 — blocked is first class, and cannot widen ===")
 root9, _ = fresh("blocked")
 out9, d9 = propose_cli(root9)
 # Write into the directory the USER EXCLUDED. Inside the repository, so
 # reconciliation sees it; outside write_scope, so it is an escape. This also
 # proves the exclusion became real authority rather than a displayed sentence.
 r9 = cli(root9, "approve", d9,
-         edits={"item-1": ["src/auth/leak.py", "x=1\n"]})
+         edits={"item-1": ["src/auth/leak.py", "x=1
+"]})
 rid9 = [l.split()[-1] for l in r9.stdout.splitlines() if l.startswith("APPROVED")][0]
 rd9 = tmp/"runs"/rid9
 rec9 = J.read(rd9)
@@ -411,7 +429,8 @@ falsify("M7-AC-16 real budget exhaustion does not require wider write scope, unl
         "the out-of-area write above",
         exhausted8["reason_code"] == blocking.ATTEMPT_BUDGET_EXHAUSTED
         and V.blocked_widens(exhausted8) is False)
-print("\n--- 'continue' cannot widen ---")
+print("
+--- 'continue' cannot widen ---")
 cont = cli(root9, "approve", d9, edits={"item-1": ["src/core/calc.py", FIX]})
 check("M7-AC-17 re-approving a used proposal does not resume or widen the blocked run",
       cont.returncode != 0 or "BLOCKED" in cont.stdout, f"({cont.returncode})")
@@ -426,7 +445,8 @@ check("M7-AC-17 the CLI exposes no verb that promotes a run",
               for v in ("def cmd_continue", "def cmd_widen", "def cmd_promote")))
 
 # ======================================================================
-print("\n=== M7-AC-18..19 — the product path IS the accepted runtime ===")
+print("
+=== M7-AC-18..19 — the product path IS the accepted runtime ===")
 src = Path(diana, "product", "product.py").read_text()
 check("M7-AC-18 the CLI calls the accepted M6 entry points",
       "_actors.approve(" in Path(diana,"product","proposal.py").read_text()
@@ -458,14 +478,16 @@ falsify("M7-AC-19 Diana's OWN authority re-binding accepts what the product path
         _auth_cb["run_id"] == rid7 and _auth_items["run_id"] == rid7
         and _auth_pol["run_id"] == rid7)
 
-prod_sources = "\n".join(Path(diana,"product",n).read_text()
+prod_sources = "
+".join(Path(diana,"product",n).read_text()
                          for n in ("product.py","proposal.py","intent.py","view.py",
                                    "catalogue.py","refusal.py"))
 for forbidden in ("delegate_task(", "acp_command", "gh pr", "git push", "worktree add",
                   "requests.", "urllib.request"):
     check(f"M7-AC-24 no {forbidden!r} anywhere in the product layer", forbidden not in prod_sources)
 
-print("\n--- the two paths converge on the same contract ---")
+print("
+--- the two paths converge on the same contract ---")
 rootA, _ = fresh("converge")
 via_product = P.build(GOAL, str(rootA), base=str(tmp/"pA"))
 i_direct = I.classify(GOAL, str(rootA))
@@ -485,7 +507,8 @@ falsify("M7-AC-18 a different goal reaches a DIFFERENT contract, so the equality
         != C.digest(via_product["predicted_contract"]))
 
 # ======================================================================
-print("\n=== M7-AC-6 (fact vs explanation) and result spoofing ===")
+print("
+=== M7-AC-6 (fact vs explanation) and result spoofing ===")
 _rec7 = J.read(rd7)
 _cb7, _pol7, _items7 = RCV.load_authority(rd7, _rec7)
 rd7_report = RPT.build(_rec7, _cb7, _pol7, rd7, _items7)
@@ -506,10 +529,12 @@ falsify("M7-AC-15 a FAKE result cannot disagree with Diana's record: forcing the
         "BLOCKED" in res7b.stdout and res7b.returncode == 3, f"({res7b.returncode})")
 check("M7-U6 model prose cannot claim success while Diana says BLOCKED: the outcome line "
       "is the report's, and no model text participates in it",
-      "COMPLETE" not in res7b.stdout.split("RESULT")[1].split("\n")[1])
+      "COMPLETE" not in res7b.stdout.split("RESULT")[1].split("
+")[1])
 
 # ======================================================================
-print("\n=== M7-AC-20..22, M7-E1-AC-9..10 — migration and expert surfaces ===")
+print("
+=== M7-AC-20..22, M7-E1-AC-9..10 — migration and expert surfaces ===")
 git = lambda *a: subprocess.run(["git","-C",repo_dir,*a],capture_output=True,text=True).stdout
 BASE = "c77208a"
 frozen = ["install.sh", "diana/ship/ship.py", "diana/adapters/ao.py",
@@ -523,23 +548,42 @@ frozen += [f"diana/commands/{n}" for n in
 # replaced by merged PR #72. New files introduced by #72 (for example
 # hermes_runtime.py) remain additions and are therefore not replacement-set
 # members. The comparison below remains exact set equality.
-POST_M7_PRODUCTION = {"diana/adapters/hermes_live.py",
+POST_M7_PRODUCTION = {"diana/adapters/hermes.py",
+                      "diana/adapters/hermes_live.py",
+                      "diana/adapters/hermes_patches.py",
+                      "diana/ci/build-gate-input.py",
+                      "diana/ci/run-security-gate.py",
+                      "diana/ci/write-summary.py",
+                      "diana/gate/diana-gate.py",
                       "diana/multiactor/actors.py",
                       "diana/multiactor/executors.py",
                       "diana/mutation/remediation_driver.py",
-                      "diana/ci/build-gate-input.py",
-                      "diana/ci/write-summary.py",
-                      "diana/gate/diana-gate.py",
-                      "diana/adapters/hermes.py",
-                      "diana/adapters/hermes_patches.py"}
+                      "diana/security/adapters/semgrep_adapter.py",
+                      "diana/security/ci_verifier_runs.py",
+                      "diana/security/coverage_matrix.py",
+                      "diana/security/verifiers/semgrep-rules.yml"}
 # POST-M7-E1-D7: the milestone SUITES this erratum corrects. Test code, never
 # production code -- the same classification M4-ERRATA-001 finding 4 already
 # established, enumerated rather than blanket-excluded. Same rule as above:
 # PR #72's test-harness edits are already covered by the same enumerated harness
 # set; no wildcard harness exclusion is introduced.
-POST_M7_HARNESS = {"diana/mutation/test-m4-bounded-mutation.sh",
+POST_M7_HARNESS = {"diana/adapters/test-hermes-capability.sh",
+                   "diana/adapters/test-hermes-confinement.sh",
+                   "diana/adapters/test-hermes-preflight.sh",
+                   "diana/advisory/test-acceptance.sh",
+                   "diana/advisory/test-m2-live-turn.sh",
+                   "diana/advisory/test-run.sh",
+                   "diana/multiactor/test-m6-audit.sh",
+                   "diana/multiactor/test-m6-lease.sh",
                    "diana/multiactor/test-m6-multiactor.sh",
-                   "diana/product/test-m7-product.sh"}
+                   "diana/multiactor/test-m6-review.sh",
+                   "diana/multiactor/test-m6-thirdpass.sh",
+                   "diana/mutation/test-m4-bounded-mutation.sh",
+                   "diana/product/test-m7-product.sh",
+                   "diana/security/adapters/test-adapters.sh",
+                   "diana/security/test-ci-verifier-runs.sh",
+                   "diana/security/test-coverage-matrix.sh",
+                   "diana/security/test-security-gate.sh"}
 for path in frozen:
     # POST-M7-E1-D6: a frozen path that accepted post-M7 work replaced must be in
     # the enumerated set above; every other frozen path is still required to be
@@ -553,7 +597,10 @@ for path in frozen:
 changed = [l.split("\t") for l in git("diff","--name-status",BASE).strip().splitlines() if l]
 modified = {p for st,p in changed if st.startswith("M")}
 # POST-M7-E1-D2: README.md is documentation.
-is_doc = lambda q: q.startswith("docs/") or q in {".gitignore", "README.md"}
+POST_M7_DOCS = {"MEMORY.md",
+                 "diana/security/README.md",
+                 "diana/security/adapters/README.md"}
+is_doc = lambda q: q.startswith("docs/") or q in ({".gitignore", "README.md"} | POST_M7_DOCS)
 is_harness = lambda q: q.rsplit("/", 1)[-1].startswith("test-") and q.endswith(".sh")
 mod_harness = {p for p in modified if is_harness(p)}
 mod_production = {p for p in modified if not is_doc(p) and not is_harness(p)}
@@ -584,7 +631,8 @@ for spec in ("HERMES-RUNTIME-M1.md","HERMES-RUNTIME-M2.md","HERMES-RUNTIME-M3.md
     check(f"M7-REG-1 {spec} is byte-identical",
           git("diff","--name-only",BASE,"--",f"docs/architecture/{spec}").strip() == "")
 
-print("\n--- the superseded /diana-ship steps 2-5, done without them ---")
+print("
+--- the superseded /diana-ship steps 2-5, done without them ---")
 ship_md = Path(repo_dir,"diana","commands","diana-ship.md").read_text()
 check("M7-AC-20 /diana-ship still documents steps 2-5 (it is not retired)",
       "## 2. Accept and normalize the goal" in ship_md
@@ -612,7 +660,8 @@ check("M7-E1-AC-10 [static pin] an unknown M7 refusal code is refused at constru
       "as blocking.py refuses one -- behavioural counterpart: the ValueError above",
       unknown_ok)
 
-print("\n=== M7-AC-23 — no capability was granted ===")
+print("
+=== M7-AC-23 — no capability was granted ===")
 envA = via_product["predicted_contract"]["capability_envelope"]
 check("M7-AC-23 allowed_tools is M4's envelope exactly",
       envA["allowed_tools"] == sorted(("read_file","search_files","write_file","patch","terminal")))
@@ -624,6 +673,7 @@ check("M7-AC-23 [static pin] M7 certifies no new workflow class -- behavioural "
       "counterpart: WORKFLOW_NOT_CERTIFIED refuses anything else",
       set(CAT.CERTIFIED_WORKFLOWS) == {"BOUNDED_REMEDIATION","ADVISORY_SECURITY_REVIEW"})
 
-print(f"\n{passed} passed, {failed} failed, {falsifiers} falsifiers")
+print(f"
+{passed} passed, {failed} failed, {falsifiers} falsifiers")
 sys.exit(1 if failed else 0)
 PY
