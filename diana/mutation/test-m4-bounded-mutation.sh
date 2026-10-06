@@ -793,7 +793,7 @@ check("M4-REG-2 no OTHER pre-existing production module was modified",
       not (mod_production - PERMITTED_PRODUCTION),
       f"(unexpected {sorted(mod_production - PERMITTED_PRODUCTION)})")
 check("M4-REG-2 docs/manifest changes are classified separately, not as replacements",
-      mod_docs <= ({"docs/architecture/HERMES-RUNTIME-M4.md"} | DOCS_MANIFEST),
+      mod_docs <= ({"docs/architecture/HERMES-RUNTIME-M4.md"} | DOCS_MANIFEST | POST_M7_DOCS),
       f"(got {sorted(mod_docs)})")
 check("M4-REG-2 test-harness corrections are classified separately, not as production code",
       mod_harness <= ERRATA_001_HARNESS, f"(got {sorted(mod_harness)})")
