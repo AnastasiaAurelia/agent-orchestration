@@ -47,6 +47,36 @@ def _manifest_payload(doc: dict) -> bytes:
     ).encode("utf-8")
 
 
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _verify_manifest_files(doc: dict) -> str | None:
+    files = doc.get("files")
+    if not isinstance(files, dict) or not files:
+        return "manifest carries no runtime files"
+    root = DIANA_ROOT.resolve()
+    for rel, meta in files.items():
+        if not isinstance(rel, str) or rel.startswith("/") or ".." in Path(rel).parts:
+            return f"unsafe manifest path: {rel!r}"
+        if not isinstance(meta, dict) or set(meta) != {"sha256", "size"}:
+            return f"malformed file metadata: {rel}"
+        path = DIANA_ROOT / rel
+        if path.is_symlink() or not path.is_file():
+            return f"required runtime file missing or symlinked: {rel}"
+        try:
+            path.resolve(strict=True).relative_to(root)
+        except (OSError, ValueError):
+            return f"runtime file escapes installed release: {rel}"
+        if path.stat().st_size != meta.get("size") or _sha256(path) != meta.get("sha256"):
+            return f"runtime file integrity mismatch: {rel}"
+    return None
+
+
 def _authenticated_manifest() -> tuple[dict | None, str | None]:
     """Return an authenticated installed-release manifest, never an asserted one.
 
@@ -87,6 +117,9 @@ def _authenticated_manifest() -> tuple[dict | None, str | None]:
     expected = hmac.new(key, _manifest_payload(doc), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(auth["value"], expected):
         return None, "manifest authentication mismatch"
+    file_error = _verify_manifest_files(doc)
+    if file_error:
+        return None, file_error
     return doc, None
 
 
