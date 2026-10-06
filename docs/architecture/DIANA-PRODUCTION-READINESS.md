@@ -233,3 +233,22 @@ An old approval is never upgraded into broader authority merely because a newer 
 ## Evidence rule
 
 Historical green evidence may motivate or explain a change, but a production release claim requires fresh evidence for the release commit and the supported runtime environment.
+
+
+## Distribution trust and interrupted-transition clarification
+
+For PR-A/PR-B/PR-C/PR-S, an installed release is not considered verified merely because its runtime files match hashes written inside the same mutable runtime prefix.
+
+The complete release manifest MUST be authenticated by a trust anchor stored outside the runtime prefix. The current candidate implementation uses HMAC-SHA256 with a 32-byte local trust key that is:
+- outside the runtime prefix;
+- a regular non-symlink file;
+- owned by the current user;
+- inaccessible to group/other.
+
+Production diagnostics for an installed runtime MUST verify both:
+1. manifest authentication; and
+2. every manifest-bound runtime file's size/hash/path confinement.
+
+A process that can rewrite only the runtime prefix must not be able to create a new self-consistent release that passes verification. This does not extend the threat model to a same-user compromise that can also read or rewrite the external trust key.
+
+Install/upgrade/rollback MUST also persist an explicit transition marker before changing active release symlinks. A leftover transition marker or non-empty staging directory after a hard interruption is ambiguous state and MUST refuse automatic continuation until authority is re-established. Refusal is acceptable; silent adoption of either side of the interrupted transition is not.
