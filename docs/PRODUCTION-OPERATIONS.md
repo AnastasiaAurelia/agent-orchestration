@@ -11,9 +11,14 @@ The portable project integration (`./install.sh`) and the governed runtime are s
 
 For this hardening track:
 - Linux only.
-- Python 3.11 for release certification.
+- Bootstrap Python: exactly 3.11 for release certification.
+- Hermes PM runtime Python: >=3.11,<3.15.
 - Hermes must resolve through its PM-managed runtime.
 - Hermes identity must exactly match one of Diana's certified identities.
+
+`diana-do doctor` reports bootstrap Python and the PM-resolved Hermes runtime
+Python separately. A green bootstrap check does not imply the governed
+execution interpreter is the same Python.
 
 macOS and Windows remain unsupported/unproven.
 
@@ -178,3 +183,33 @@ Catchable activation failures attempt to restore the previous verified state. A 
 
 `runtime-install.sh uninstall` removes only the Diana-managed runtime prefix and launcher. It intentionally does **not** delete the external trust key because that key may authenticate another managed Diana prefix.
 
+
+
+## Provider runtime resolution
+
+Diana does not maintain a second provider/authentication matrix.
+
+For live Builder/Reviewer turns it reads the configured provider/model from
+Hermes's read-only config and delegates runtime resolution to the exact
+certified Hermes checkout via
+`hermes_cli.runtime_provider.resolve_runtime_provider()`.
+
+That resolver may return:
+- API-key backed runtime credentials;
+- OAuth/auth-store credentials;
+- an external-process runtime where the subprocess owns authentication and the
+  returned `api_key` is a non-secret provider placeholder.
+
+Diana forwards the resolved `provider`, `requested_provider`,
+`base_url`, `api_mode`, `command`, and `args` to `AIAgent`.
+It does not fabricate a token or add provider-specific OAuth exceptions.
+
+If Hermes's own runtime resolver refuses or returns an incomplete runtime,
+Diana blocks the turn with `hermes-provider-unavailable`.
+
+## Release-gate Hermes pinning
+
+The production release gate resolves `DIANA_HERMES_HOME` once at gate entry,
+exports that exact home to every child suite, resolves its PM Python once, and
+records both paths before testing. Child suites must not silently fall back to a
+different default Hermes profile.
