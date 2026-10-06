@@ -672,21 +672,40 @@ ERRATA_001_PRODUCTION = {"diana/runtime/contract.py",
 # did not touch them -- `BASE..HEAD` cannot tell "replaced by M4" from
 # "replaced by later accepted work", and the clause is a statement about M4.
 # The comparison stays SET EQUALITY: a file in neither set still fails.
-POST_M7_PRODUCTION = {"diana/adapters/hermes_live.py",
+POST_M7_PRODUCTION = {"diana/adapters/hermes.py",
+                      "diana/adapters/hermes_live.py",
+                      "diana/adapters/hermes_patches.py",
+                      "diana/ci/build-gate-input.py",
+                      "diana/ci/run-security-gate.py",
+                      "diana/ci/write-summary.py",
+                      "diana/gate/diana-gate.py",
                       "diana/multiactor/actors.py",
                       "diana/multiactor/executors.py",
                       "diana/mutation/remediation_driver.py",
-                      "diana/ci/build-gate-input.py",
-                      "diana/ci/write-summary.py",
-                      "diana/gate/diana-gate.py",
-                      "diana/adapters/hermes.py",
-                      "diana/adapters/hermes_patches.py"}
+                      "diana/security/adapters/semgrep_adapter.py",
+                      "diana/security/ci_verifier_runs.py",
+                      "diana/security/coverage_matrix.py",
+                      "diana/security/verifiers/semgrep-rules.yml"}
 # POST-M7-E1-D7: the milestone SUITES this erratum corrects. Test code, never
 # production code -- the same classification M4-ERRATA-001 finding 4 already
 # established, enumerated rather than blanket-excluded.
-POST_M7_HARNESS = {"diana/mutation/test-m4-bounded-mutation.sh",
+POST_M7_HARNESS = {"diana/adapters/test-hermes-capability.sh",
+                   "diana/adapters/test-hermes-confinement.sh",
+                   "diana/adapters/test-hermes-preflight.sh",
+                   "diana/advisory/test-acceptance.sh",
+                   "diana/advisory/test-m2-live-turn.sh",
+                   "diana/advisory/test-run.sh",
+                   "diana/multiactor/test-m6-audit.sh",
+                   "diana/multiactor/test-m6-lease.sh",
                    "diana/multiactor/test-m6-multiactor.sh",
-                   "diana/product/test-m7-product.sh"}
+                   "diana/multiactor/test-m6-review.sh",
+                   "diana/multiactor/test-m6-thirdpass.sh",
+                   "diana/mutation/test-m4-bounded-mutation.sh",
+                   "diana/product/test-m7-product.sh",
+                   "diana/security/adapters/test-adapters.sh",
+                   "diana/security/test-ci-verifier-runs.sh",
+                   "diana/security/test-coverage-matrix.sh",
+                   "diana/security/test-security-gate.sh"}
 # M4's own declared set is left PRISTINE so the per-file justification check
 # below still compares against exactly the three files a frozen M4 decision
 # requires. The union is a separate name, used only where the question is
@@ -703,8 +722,10 @@ PERMITTED_PRODUCTION = ERRATA_001_PRODUCTION | {
 # (b) docs + publish manifest -- never a production-code replacement.
 # POST-M7-E1-D2: README.md is documentation. Omitting it counted a documentation
 # edit as a production replacement in all four milestone suites.
-DOCS_MANIFEST = {".gitignore", "README.md"}
-is_doc = lambda q: q.startswith("docs/") or q in DOCS_MANIFEST
+DOCS_MANIFEST = {".gitignore", "README.md"}\nPOST_M7_DOCS = {"MEMORY.md",
+                 "diana/security/README.md",
+                 "diana/security/adapters/README.md"}
+is_doc = lambda q: q.startswith("docs/") or q in (DOCS_MANIFEST | POST_M7_DOCS)
 # (c) test-harness corrections -- test code, not production code. The M3
 # harness fix is audit finding 4, authorised as a governance decision.
 is_harness = lambda q: Path(q).name.startswith("test-") and q.endswith(".sh")
