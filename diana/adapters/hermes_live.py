@@ -202,7 +202,8 @@ def provider_config(hermes_home: str | None = None) -> dict:
 
     resolved_provider = str(runtime.get("provider") or "").strip()
     requested_provider = str(runtime.get("requested_provider") or provider).strip()
-    api_key = runtime.get("api_key")
+    api_key_raw = runtime.get("api_key")
+    api_key = api_key_raw.strip() if isinstance(api_key_raw, str) else ""
     base_url = str(runtime.get("base_url") or "").strip()
     api_mode = str(runtime.get("api_mode") or "").strip()
     command = str(runtime.get("command") or "").strip()
