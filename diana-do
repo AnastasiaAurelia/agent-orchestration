@@ -10,6 +10,13 @@
 # API, no M1-M6 terminology required to use it.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# HERMES_HOME is Hermes's DATA/PROFILE home. DIANA_HERMES_HOME is the exact
+# certified SOURCE checkout Diana imports/resolves. A live Hermes shell may
+# already export HERMES_HOME; assigning to an exported shell variable preserves
+# the export attribute and would leak the source checkout into child processes,
+# causing Hermes config.yaml lookup to target the wrong directory. Clear that
+# inherited export before keeping Diana's source path as a shell-local value.
+unset HERMES_HOME
 HERMES_HOME="${DIANA_HERMES_HOME:-$HOME/.hermes/hermes-agent}"
 
 # Operator diagnostics are deliberately stdlib-only and run BEFORE Hermes
