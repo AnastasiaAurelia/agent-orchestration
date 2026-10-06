@@ -60,6 +60,48 @@ def source_commit() -> str | None:
     return value if proc.returncode == 0 and value else None
 
 
+def source_tree_clean() -> bool | None:
+    """Whether the Diana-managed source files are clean, or None if this is
+    not a git checkout / git is unavailable (the same `None`-on-unknown
+    contract as `source_commit()` -- doctor must not read an undetermined
+    state as a false `True`).
+
+    Mirrors `runtime_install._source_clean`'s scope (`diana`, `diana-do`,
+    `VERSION` only -- not the whole tree, so unrelated dirty files such as
+    docs-in-progress do not block a governed run) without importing that
+    module, keeping this diagnostic path's only dependency on the stdlib
+    `subprocess` call already used by `source_commit()` above.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(DIANA_ROOT), "status", "--porcelain", "--",
+             "diana", "diana-do", "VERSION"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return not proc.stdout.strip()
+
+
+def release_identity() -> dict:
+    """The Diana release identity a proposal's authority digest is bound to.
+
+    Deliberately `{diana_version, source_commit}` only -- not the full
+    `version_document()` (which also carries the certified-Hermes-identities
+    list and supported-platform matrix). Binding to those too would make
+    every OLD, already-approved proposal spuriously "stale" the moment this
+    release certifies an additional Hermes identity or platform, even though
+    neither changes what authority was actually granted. `diana_version`
+    comes from the VERSION file directly (not git), matching
+    `test-production-release.sh`'s own falsifier: rewriting VERSION on disk
+    without a commit must already change this identity and therefore refuse
+    reuse of a proposal digested under the old one.
+    """
+    return {"diana_version": diana_version(), "source_commit": source_commit()}
+
+
 def _certified_identities() -> tuple[dict, ...]:
     import hermes_patches  # local Diana module, stdlib-only at import time
     return tuple(dict(x) for x in hermes_patches.CERTIFIED_IDENTITIES)
