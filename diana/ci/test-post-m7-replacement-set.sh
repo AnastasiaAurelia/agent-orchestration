@@ -147,11 +147,11 @@ check("every accounted production file is a real path in the repository",
           subprocess.run(["git", "-C", repo, "cat-file", "-e", f"HEAD:{q}"],
                          capture_output=True).returncode == 0
           for q in POST_M7_PRODUCTION))
-check("every accounted harness file is a real path in the repository",
+check("every accounted/candidate harness file is a real path in the repository",
       all(subprocess.run(["git", "-C", repo, "cat-file", "-e", f"HEAD:{q}"],
                          capture_output=True).returncode == 0
           or subprocess.run(["test", "-f", f"{repo}/{q}"]).returncode == 0
-          for q in POST_M7_HARNESS))
+          for q in (POST_M7_HARNESS | PR74_CANDIDATE_HARNESS)))
 check("no accounted file is under diana/autonomy/ or diana/supervisors/: post-M7 "
       "feature work ADDS files and replaces none",
       not any(q.startswith(("diana/autonomy/", "diana/supervisors/"))
