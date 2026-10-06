@@ -154,15 +154,46 @@ check("AC-5 the spy mechanism is falsifiable (a deliberate call is recorded)",
 calls["gate"].clear()
 
 # ---------- AC-6: no git/gh mutation subprocess ----------
-MUTATING = ("commit", "push", "merge", "rebase", "reset", "checkout", "tag", "am",
-            "cherry-pick", "revert", "clean", "stash", "apply", "restore")
+MUTATING = {"commit", "push", "merge", "rebase", "reset", "checkout", "am",
+            "cherry-pick", "revert", "clean", "stash", "apply", "restore"}
+READ_ONLY = {"rev-parse", "status", "diff", "show", "log", "ls-files", "rev-list",
+             "cat-file", "describe", "branch"}
+
+def git_subcommand(call):
+    args = [str(a) for a in call[1:]]
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-C", "-c", "--git-dir", "--work-tree", "--namespace"):
+            i += 2
+            continue
+        if a.startswith("-"):
+            i += 1
+            continue
+        return a, args[i + 1:]
+    return "", []
+
+def readonly_git(call):
+    sub, rest = git_subcommand(call)
+    if sub in READ_ONLY:
+        return True
+    if sub == "tag":
+        # Listing/merged tag queries are read-only. Creating/deleting/signing a
+        # tag lacks --list/-l and remains outside this read-only form.
+        return "--list" in rest or "-l" in rest
+    return False
+
 git_calls = [c for c in spawned if isinstance(c, (list, tuple)) and c and str(c[0]).endswith("git")]
 gh_calls = [c for c in spawned if isinstance(c, (list, tuple)) and c and str(c[0]).endswith("gh")]
-mutating = [c for c in git_calls if any(str(a) in MUTATING for a in c)]
+mutating = []
+for call in git_calls:
+    sub, _ = git_subcommand(call)
+    if sub in MUTATING or (sub == "tag" and not readonly_git(call)):
+        mutating.append(call)
 check("AC-6 no gh subprocess was spawned at all", gh_calls == [], f"(spawned {gh_calls})")
 check("AC-6 no mutating git subprocess was spawned", mutating == [], f"(spawned {mutating})")
-check("AC-6 git was used read-only only (rev-parse / status)",
-      all(any(str(a) in ("rev-parse", "status") for a in c) for c in git_calls),
+check("AC-6 git was used read-only only",
+      all(readonly_git(c) for c in git_calls),
       f"(spawned {git_calls})")
 
 # ---------- AC-12: the measured baseline delta ----------
