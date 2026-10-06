@@ -9,8 +9,35 @@
 # One stable invocation. No Python module path, no runtime class, no journal
 # API, no M1-M6 terminology required to use it.
 set -uo pipefail
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve the managed launcher symlink before locating the packaged Diana tree.
+SOURCE_PATH="$(readlink -f "${BASH_SOURCE[0]}")" || exit 3
+HERE="$(cd "$(dirname "$SOURCE_PATH")" && pwd)"
+# HERMES_HOME is Hermes's DATA/PROFILE home. DIANA_HERMES_HOME is the exact
+# certified SOURCE checkout Diana imports/resolves. A live Hermes shell may
+# already export HERMES_HOME; assigning to an exported shell variable preserves
+# the export attribute and would leak the source checkout into child processes,
+# causing Hermes config.yaml lookup to target the wrong directory. Clear that
+# inherited export before keeping Diana's source path as a shell-local value.
+unset HERMES_HOME
 HERMES_HOME="${DIANA_HERMES_HOME:-$HOME/.hermes/hermes-agent}"
+
+# Operator diagnostics are deliberately stdlib-only and run BEFORE Hermes
+# runtime activation so they can explain a broken/missing Hermes bootstrap.
+# This is not a governed execution fallback: only the non-authority-bearing
+# version/doctor commands take this path. Any real run still requires Hermes
+# PM resolution below and fails closed if it cannot be established.
+case "${1:-}" in
+  version)
+    exec python3 "$HERE/diana/product/release.py" version
+    ;;
+  doctor)
+    exec python3 "$HERE/diana/product/release.py" doctor "$HERMES_HOME"
+    ;;
+  doctor-json)
+    exec python3 "$HERE/diana/product/release.py" doctor-json "$HERMES_HOME"
+    ;;
+esac
+
 export HERMES_SAFE_MODE="${HERMES_SAFE_MODE:-1}"
 # Resolve Hermes's OWN supported runtime (its PM-managed dependency venv) --
 # never a hardcoded repo-local venv and never an install-hash path. Fails

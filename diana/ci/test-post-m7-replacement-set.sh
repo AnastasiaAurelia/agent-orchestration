@@ -70,6 +70,11 @@ POST_M7_HARNESS = {"diana/adapters/test-hermes-capability.sh",
                    "diana/security/test-ci-verifier-runs.sh",
                    "diana/security/test-coverage-matrix.sh",
                    "diana/security/test-security-gate.sh"}
+
+# PR #74 candidate-only harness classification. This is not accepted-history
+# accounting and must not be copied into ERRATA-002 before merge. The file is a
+# Python proof/test runner, not production runtime code.
+PR74_CANDIDATE_HARNESS = {"diana/unattended/test_m5_proofs.py"}
 DOCS_MANIFEST = {".gitignore", "README.md"}
 POST_M7_DOCS = {"MEMORY.md",
                  "diana/security/README.md",
@@ -93,7 +98,7 @@ MILESTONES = [
 ]
 
 is_doc = lambda q: q.startswith("docs/") or q in (DOCS_MANIFEST | POST_M7_DOCS)
-is_harness = lambda q: q.rsplit("/", 1)[-1].startswith("test-") and q.endswith(".sh")
+is_harness = lambda q: ((q.rsplit("/", 1)[-1].startswith("test-") and q.endswith(".sh")) or q in PR74_CANDIDATE_HARNESS)
 
 print("=== every milestone's replacement statement, by set equality ===")
 for label, base, declared, declared_harness in MILESTONES:
@@ -114,14 +119,13 @@ for label, base, declared, declared_harness in MILESTONES:
     check(f"{label} its own declared set is entirely present and unreduced",
           declared <= production and declared <= permitted)
     permitted_harness = declared_harness | {
-        q for q in POST_M7_HARNESS if existed_at(base, q)}
+        q for q in (POST_M7_HARNESS | PR74_CANDIDATE_HARNESS) if existed_at(base, q)}
     check(f"{label} harness corrections are enumerated, not blanket-excluded",
           harness == permitted_harness,
           f"(got {sorted(harness)} want {sorted(permitted_harness)})")
     check(f"{label} nothing was deleted", deleted == [], f"({deleted})")
 
-print("
-=== the statement M5's own frozen suite can no longer make ===")
+print("\n=== the statement M5's own frozen suite can no longer make ===")
 m5_declared = {"diana/runtime/blocking.py"}
 rows = [l.split("\t") for l in git("diff", "--name-status", "69f5569").strip().splitlines() if l]
 m5_production = {p for st, p in rows if st.startswith("M")
@@ -137,18 +141,17 @@ falsify("M5's own suite still reports this one failure, because its constant is 
         git("diff", "--name-only", FREEZE, "--",
             "diana/unattended/test-m5-unattended.sh").strip() == "")
 
-print("
-=== the accounting is exhaustive and nothing was quietly excluded ===")
+print("\n=== the accounting is exhaustive and nothing was quietly excluded ===")
 check("every accounted production file is a real path in the repository",
       all((git("cat-file", "-e", f"HEAD:{q}") or True) and
           subprocess.run(["git", "-C", repo, "cat-file", "-e", f"HEAD:{q}"],
                          capture_output=True).returncode == 0
           for q in POST_M7_PRODUCTION))
-check("every accounted harness file is a real path in the repository",
+check("every accounted/candidate harness file is a real path in the repository",
       all(subprocess.run(["git", "-C", repo, "cat-file", "-e", f"HEAD:{q}"],
                          capture_output=True).returncode == 0
           or subprocess.run(["test", "-f", f"{repo}/{q}"]).returncode == 0
-          for q in POST_M7_HARNESS))
+          for q in (POST_M7_HARNESS | PR74_CANDIDATE_HARNESS)))
 check("no accounted file is under diana/autonomy/ or diana/supervisors/: post-M7 "
       "feature work ADDS files and replaces none",
       not any(q.startswith(("diana/autonomy/", "diana/supervisors/"))
@@ -165,7 +168,6 @@ falsify("the accounted set is NOT a wildcard: a file nobody accounted for would 
         and "diana/mutation/mutation_policy.py" not in POST_M7_PRODUCTION
         and "diana/runtime/contract.py" not in POST_M7_PRODUCTION)
 
-print(f"
-{passed} passed, {failed} failed, {falsifiers} falsifiers")
+print(f"\n{passed} passed, {failed} failed, {falsifiers} falsifiers")
 sys.exit(1 if failed else 0)
 PY

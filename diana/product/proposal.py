@@ -63,12 +63,13 @@ import journal as _journal  # noqa: E402
 import actors as _actors  # noqa: E402
 import intent as _intent  # noqa: E402
 import refusal as _ref  # noqa: E402
+import release as _release  # noqa: E402
 sys.path.insert(0, str(_HERE.parent / "autonomy"))
 import policy as _autonomy  # noqa: E402
 import standing as _standing  # noqa: E402
 
 PROPOSALS_DIRNAME = "proposals"
-DOCUMENT_VERSION = 1
+DOCUMENT_VERSION = 2
 
 # M7-E1-D1: every contract field except `created_at`.
 AUTHORITY_FIELDS = tuple(k for k in _contract.CONTRACT_KEYS if k != "created_at")
@@ -101,7 +102,8 @@ def policy_authority(policy: dict) -> dict:
 
 
 def digest_of(contract_block: dict, items_doc: dict, topology_doc: dict | None,
-              policy_doc: dict, standing_doc: dict | None = None) -> str:
+              policy_doc: dict, standing_doc: dict | None = None,
+              release_doc: dict | None = None) -> str:
     """The proposal digest (M7-E1-D1), over the same canonical serialization
     the contract itself is hashed with, so the two cannot disagree about bytes.
 
@@ -117,6 +119,10 @@ def digest_of(contract_block: dict, items_doc: dict, topology_doc: dict | None,
         "work_items": _workitems.digest(items_doc),
         "actors": _topology.digest(topology_doc) if topology_doc else None,
         "run_policy": policy_authority(policy_doc),
+        # Production hardening: approval is also bound to the Diana release
+        # that derived the authority. A later release cannot reinterpret an old
+        # approval under wider policy without producing a different digest.
+        "diana_release": release_doc or _release.release_identity(),
     }
     if standing_doc is not None and standing_doc["autonomy"]["enabled"]:
         payload["autonomy"] = _standing.digest(standing_doc)
@@ -169,6 +175,7 @@ def build(goal: str, repo_root: str, *, base: str | None = None,
         "proposal_digest": digest_of(derived["contract"], derived["items"],
                                      derived["topology"], derived["policy"],
                                      derived["standing"]),
+        "diana_release": _release.release_identity(),
         "run_id": run_id,
         "repo_root": repo_root,
         "intent": {k: v for k, v in intent_doc.items() if k != "_withheld"},
@@ -205,6 +212,17 @@ def load(proposal_digest: str, base: str | None = None) -> dict:
     if proposal.get("proposal_digest") != proposal_digest:
         raise _ref.Refused(
             _ref.PROPOSAL_MALFORMED, "the stored proposal does not carry its own digest")
+    if proposal.get("document_version") != DOCUMENT_VERSION:
+        raise _ref.Refused(
+            _ref.PROPOSAL_MALFORMED,
+            f"proposal document_version {proposal.get('document_version')!r} is not "
+            f"supported by this Diana release (expected {DOCUMENT_VERSION}); propose again")
+    release_doc = proposal.get("diana_release")
+    if not isinstance(release_doc, dict) or release_doc != _release.release_identity():
+        raise _ref.Refused(
+            _ref.PROPOSAL_STALE,
+            "this proposal was produced by a different Diana release; old approvals are "
+            "never reinterpreted under a new runtime. Propose again and approve the new proposal")
     return proposal
 
 

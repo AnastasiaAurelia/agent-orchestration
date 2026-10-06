@@ -366,7 +366,7 @@ either becomes a merge.
 | | |
 |---|---|
 | **Current** | Natural-language goal → bounded proposal → exact approval → Builder/Reviewer run → progress → `COMPLETE` / `FAILED` / `BLOCKED`, on Linux, for one certified product workflow class (bounded repair). Write scope derived from explicitly named paths. Opt-in one-approval autonomous recovery. Mechanically enforced human merge approval (conditional on credential separation). |
-| **Not yet** | Certified security evidence (Track A) · deployment approval · more certified workflow classes (Track C) · packaging (Track D). See the [post-M7 roadmap](docs/architecture/DIANA-POST-M7-ROADMAP.md). |
+| **Not yet** | Certified security evidence (Track A) · deployment approval · more certified workflow classes (Track C) · an accepted production-ready release. Track D implementation is now under hardening, but release certification is not complete. See the [production-readiness contract](docs/architecture/DIANA-PRODUCTION-READINESS.md). |
 
 ### Limitations worth knowing before you rely on it
 
@@ -407,7 +407,7 @@ These are real, current, and documented in the specifications rather than soften
 - **One milestone suite reports a known failure.** `test-m5-unattended.sh` is frozen byte-identical and
   cannot absorb the post-M7 replacement set; this is recorded, not hidden
   ([POST-M7 ERRATA 001](docs/architecture/DIANA-POST-M7-ERRATA-001.md) §4).
-- **Not packaged.** `diana-do` is not on `PATH` and `install.sh` does not ship it.
+- **Governed-runtime packaging is under hardening, not released.** The candidate `runtime-install.sh` keeps `install.sh`'s Layer 2 semantics separate and adds a versioned governed-runtime install/verify/upgrade/rollback path. Until the production release gate is green on the supported environment and the hardening PR is accepted, this is not a production-ready distribution claim. See [Production Operations](docs/PRODUCTION-OPERATIONS.md).
 - **External runtimes are outside Diana's boundary.** AO, Playwright and GitHub are delegated to;
   quiescence bounds only processes Diana can see, not work handed to a service, container or remote
   host. AO + Codex autonomous writes are not certified.

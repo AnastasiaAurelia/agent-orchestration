@@ -70,9 +70,9 @@ def load_hermes_config(hermes_home: str | None = None) -> dict:
     if str(home) not in sys.path:
         sys.path.insert(0, str(home))
     try:
-        from hermes_cli.config import load_config_readonly
+        from hermes_cli.config import load_config
 
-        config = load_config_readonly()
+        config = load_config()
     except Exception as exc:
         raise blocking.Blocked(
             blocking.HERMES_UNREACHABLE, f"could not read Hermes config: {exc}"
