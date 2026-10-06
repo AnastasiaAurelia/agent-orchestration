@@ -36,7 +36,14 @@ required() {
   local rc=$?
   set -e
   cat "$out"
-  if grep -Eq '^[[:space:]]*SKIP([[:space:]]|$)' "$out"; then
+  local pass_lines fail_lines skip_lines
+  pass_lines="$(grep -c '^PASS  ' "$out" || true)"
+  fail_lines="$(grep -c '^FAIL  ' "$out" || true)"
+  skip_lines="$(grep -c '^[[:space:]]*SKIP\([[:space:]]\|$\)' "$out" || true)"
+  # A suite-level skip means the suite produced no substantive assertions.
+  # Nested/falsifier paths may emit SKIP while the enclosing required suite
+  # still executes hundreds of assertions; those must be classified by rc.
+  if [ "$rc" -eq 0 ] && [ "$pass_lines" -eq 0 ] && [ "$fail_lines" -eq 0 ] && [ "$skip_lines" -gt 0 ]; then
     echo "RELEASE-FAIL  $label skipped"
     fail=$((fail+1))
   elif [ "$rc" -ne 0 ]; then
