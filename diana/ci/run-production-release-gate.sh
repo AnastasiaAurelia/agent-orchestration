@@ -65,9 +65,11 @@ required_known_m5_exception() {
   local rc=$?
   set -e
   cat "$out"
-  local fail_lines
+  local pass_lines fail_lines skip_lines
+  pass_lines="$(grep -c '^PASS  ' "$out" || true)"
   fail_lines="$(grep -c '^FAIL  ' "$out" || true)"
-  if grep -Eq '^[[:space:]]*SKIP([[:space:]]|$)' "$out"; then
+  skip_lines="$(grep -c '^[[:space:]]*SKIP\([[:space:]]\|$\)' "$out" || true)"
+  if [ "$rc" -eq 0 ] && [ "$pass_lines" -eq 0 ] && [ "$fail_lines" -eq 0 ] && [ "$skip_lines" -gt 0 ]; then
     echo "RELEASE-FAIL  M5 unattended skipped"
     fail=$((fail+1))
   elif [ "$rc" -eq 0 ]; then
