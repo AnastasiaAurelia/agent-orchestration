@@ -988,21 +988,40 @@ M6_PRODUCTION = {"diana/runtime/blocking.py", "diana/unattended/journal.py",
 # did not touch them -- `BASE..HEAD` cannot tell "replaced by M6" from
 # "replaced by later accepted work", and the clause is a statement about M6.
 # The comparison stays SET EQUALITY: a file in neither set still fails.
-POST_M7_PRODUCTION = {"diana/adapters/hermes_live.py",
+POST_M7_PRODUCTION = {"diana/adapters/hermes.py",
+                      "diana/adapters/hermes_live.py",
+                      "diana/adapters/hermes_patches.py",
+                      "diana/ci/build-gate-input.py",
+                      "diana/ci/run-security-gate.py",
+                      "diana/ci/write-summary.py",
+                      "diana/gate/diana-gate.py",
                       "diana/multiactor/actors.py",
                       "diana/multiactor/executors.py",
                       "diana/mutation/remediation_driver.py",
-                      "diana/ci/build-gate-input.py",
-                      "diana/ci/write-summary.py",
-                      "diana/gate/diana-gate.py",
-                      "diana/adapters/hermes.py",
-                      "diana/adapters/hermes_patches.py"}
+                      "diana/security/adapters/semgrep_adapter.py",
+                      "diana/security/ci_verifier_runs.py",
+                      "diana/security/coverage_matrix.py",
+                      "diana/security/verifiers/semgrep-rules.yml"}
 # POST-M7-E1-D7: the milestone SUITES this erratum corrects. Test code, never
 # production code -- the same classification M4-ERRATA-001 finding 4 already
 # established, enumerated rather than blanket-excluded.
-POST_M7_HARNESS = {"diana/mutation/test-m4-bounded-mutation.sh",
+POST_M7_HARNESS = {"diana/adapters/test-hermes-capability.sh",
+                   "diana/adapters/test-hermes-confinement.sh",
+                   "diana/adapters/test-hermes-preflight.sh",
+                   "diana/advisory/test-acceptance.sh",
+                   "diana/advisory/test-m2-live-turn.sh",
+                   "diana/advisory/test-run.sh",
+                   "diana/multiactor/test-m6-audit.sh",
+                   "diana/multiactor/test-m6-lease.sh",
                    "diana/multiactor/test-m6-multiactor.sh",
-                   "diana/product/test-m7-product.sh"}
+                   "diana/multiactor/test-m6-review.sh",
+                   "diana/multiactor/test-m6-thirdpass.sh",
+                   "diana/mutation/test-m4-bounded-mutation.sh",
+                   "diana/product/test-m7-product.sh",
+                   "diana/security/adapters/test-adapters.sh",
+                   "diana/security/test-ci-verifier-runs.sh",
+                   "diana/security/test-coverage-matrix.sh",
+                   "diana/security/test-security-gate.sh"}
 M6_DECLARED = set(M6_PRODUCTION)      # pristine: M6's own claim
 # A post-M7 replacement is visible as a MODIFICATION only at a base where the
 # file already existed; where it did not, the same file is an ADDITION and the
@@ -1014,8 +1033,10 @@ existed_at = lambda base, q: subprocess.run(
 M6_PRODUCTION = M6_PRODUCTION | {
     q for q in POST_M7_PRODUCTION if existed_at(FREEZE, q)}
 # POST-M7-E1-D2: README.md is documentation.
-DOCS_MANIFEST = {".gitignore", "README.md"}
-is_doc = lambda q: q.startswith("docs/") or q in DOCS_MANIFEST
+DOCS_MANIFEST = {".gitignore", "README.md"}\nPOST_M7_DOCS = {"MEMORY.md",
+                 "diana/security/README.md",
+                 "diana/security/adapters/README.md"}
+is_doc = lambda q: q.startswith("docs/") or q in (DOCS_MANIFEST | POST_M7_DOCS)
 mod_production = {q for q in modified if not is_doc(q)}
 # Files M5 first added show as A in the BASE range, so the equality below is
 # computed against the M6 FREEZE commit as well -- git's A/M classification
