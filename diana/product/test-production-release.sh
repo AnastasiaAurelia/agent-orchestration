@@ -94,6 +94,17 @@ check "installed doctor authenticates its release before diagnosing Hermes" \
 check "trust key is outside runtime prefix"   bash -c 'case "$1" in "$2"/*) exit 1;; *) exit 0;; esac' _ "$TRUST" "$PREFIX"
 check "trust key is private"   bash -c '[ "$(stat -c %a "$1")" = 600 ]' _ "$TRUST"
 
+ln -s "$TRUST" "$TMP/trust-link"
+expect_fail "symlink trust key is refused"   "${MANAGER[@]}" verify --prefix "$PREFIX" --bin-dir "$BIN" --trust-file "$TMP/trust-link"
+
+mkdir -p "$TMP/existing-trust-parent"
+chmod 755 "$TMP/existing-trust-parent"
+PARENT_PREFIX="$TMP/parent-prefix"
+PARENT_BIN="$TMP/parent-bin"
+"${MANAGER[@]}" install --prefix "$PARENT_PREFIX" --bin-dir "$PARENT_BIN" --trust-file "$TMP/existing-trust-parent/key" >/dev/null
+check "trust-key creation preserves existing parent permissions"   bash -c '[ "$(stat -c %a "$1")" = 755 ]' _ "$TMP/existing-trust-parent"
+"${MANAGER[@]}" uninstall --prefix "$PARENT_PREFIX" --bin-dir "$PARENT_BIN" --trust-file "$TMP/existing-trust-parent/key" >/dev/null
+
 # Trust key must never live inside the runtime prefix.
 expect_fail "trust key inside runtime prefix is refused"   "${MANAGER[@]}" verify --prefix "$PREFIX" --bin-dir "$BIN"   --trust-file "$PREFIX/forged.key"
 
