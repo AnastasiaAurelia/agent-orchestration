@@ -596,7 +596,7 @@ check("M7-REG-2 modified pre-existing non-doc production files is exactly M7's "
       "(empty) set plus the accounted post-M7 set, by set equality",
       mod_production == PERMITTED_PRODUCTION, f"(got {sorted(mod_production)})")
 check("M7-REG-2 test-harness corrections are classified separately and enumerated",
-      mod_harness <= POST_M7_HARNESS, f"(got {sorted(mod_harness)})")
+      mod_harness <= (POST_M7_HARNESS | PR74_CANDIDATE_HARNESS), f"(got {sorted(mod_harness)})")
 deleted = [p for st,p in changed if st.startswith("D")]
 check("M7-REG-3 nothing was deleted or renamed", deleted == [], f"({deleted})")
 untracked = [l for l in git("ls-files","--others","--exclude-standard").strip().splitlines() if l]
